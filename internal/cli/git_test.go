@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -93,6 +96,114 @@ More text after conflict.`,
 			}
 		})
 	}
+}
+
+func TestRunGitPullWithoutUpstreamIsFailure(t *testing.T) {
+	repo := initGitSyncTestRepo(t)
+	for _, dryRun := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pull", true: "dry-run"}[dryRun], func(t *testing.T) {
+			result := runGitPull(repo, dryRun)
+			if result.Success {
+				t.Fatalf("runGitPull(dryRun=%v) success = true, want failure", dryRun)
+			}
+			if result.AlreadyUpToDate {
+				t.Fatalf("runGitPull(dryRun=%v) reported already up to date without an upstream", dryRun)
+			}
+			if !strings.Contains(result.Error, "pull distance") {
+				t.Fatalf("runGitPull(dryRun=%v) error = %q, want upstream distance failure", dryRun, result.Error)
+			}
+		})
+	}
+}
+
+func TestRunGitPullFetchFailureIsFailure(t *testing.T) {
+	result := runGitPull(filepath.Join(t.TempDir(), "missing-repository"), false)
+	if result.Success || result.AlreadyUpToDate {
+		t.Fatalf("runGitPull result = %+v, want fetch failure", result)
+	}
+	if !strings.Contains(result.Error, "fetch failed") {
+		t.Fatalf("runGitPull error = %q, want fetch phase attribution", result.Error)
+	}
+}
+
+func TestRunGitPushWithoutUpstreamIsFailure(t *testing.T) {
+	result := runGitPush(initGitSyncTestRepo(t), false, false)
+	if result.Success {
+		t.Fatal("runGitPush success = true, want failure")
+	}
+	if result.NothingToPush {
+		t.Fatal("runGitPush reported nothing to push without an upstream")
+	}
+	if !strings.Contains(result.Error, "upstream") {
+		t.Fatalf("runGitPush error = %q, want upstream failure", result.Error)
+	}
+}
+
+func TestRunGitSyncNonConflictPullFailureIsTerminalJSON(t *testing.T) {
+	repo := initGitSyncTestRepo(t)
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir repo: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restore cwd: %v", err)
+		}
+	})
+
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	stdout, runErr := captureStdout(t, func() error {
+		return runGitSync("", true, false, false, false)
+	})
+	if !errors.Is(runErr, errJSONFailure) {
+		t.Fatalf("runGitSync error = %v, want terminal JSON failure", runErr)
+	}
+
+	var result GitSyncResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode one git sync document: %v; output=%q", err, stdout)
+	}
+	if result.Success || result.PullResult == nil || result.PullResult.Success {
+		t.Fatalf("git sync result = %+v, want failed pull and top-level failure", result)
+	}
+	if result.HasConflict {
+		t.Fatalf("git sync result = %+v, non-conflict pull failure marked as conflict", result)
+	}
+	if !strings.Contains(result.Error, "pull failed") {
+		t.Fatalf("git sync error = %q, want pull phase attribution", result.Error)
+	}
+}
+
+func initGitSyncTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	commands := [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "ntm-test@example.invalid"},
+		{"config", "user.name", "NTM Test"},
+	}
+	for _, args := range commands {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("test\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "initial"}} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+		}
+	}
+	return dir
 }
 
 func TestResolveGitAgentMailProjectKeyUsesSavedSessionAgentProjectKey(t *testing.T) {

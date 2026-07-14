@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,11 +28,12 @@ const (
 type ClaimState string
 
 const (
-	ClaimPending  ClaimState = "pending"
-	ClaimClaiming ClaimState = "claiming"
-	ClaimClaimed  ClaimState = "claimed"
-	ClaimFailed   ClaimState = "failed"
-	ClaimUnknown  ClaimState = "unknown"
+	ClaimPending    ClaimState = "pending"
+	ClaimClaiming   ClaimState = "claiming"
+	ClaimClaimed    ClaimState = "claimed"
+	ClaimFailed     ClaimState = "failed"
+	ClaimIneligible ClaimState = "ineligible"
+	ClaimUnknown    ClaimState = "unknown"
 )
 
 // ReservationState records the crash-recovery state of the Agent Mail lease.
@@ -48,6 +51,9 @@ const (
 var (
 	// ErrClaimConflict means another actor owns the bead.
 	ErrClaimConflict = errors.New("bead claim is owned by another actor")
+	// ErrClaimIneligible means the tracker atomically rejected a new assignment
+	// because the work item is not open and ready for automated dispatch.
+	ErrClaimIneligible = errors.New("bead is not eligible for automated assignment")
 	// ErrReservationRequired means the assignment intent requires Agent Mail
 	// reservation, but no reservation port is available to enforce it.
 	ErrReservationRequired = errors.New("file reservation is required but unavailable")
@@ -71,15 +77,49 @@ var (
 	// ErrTargetOccupied means another active assignment owns the exact pane or
 	// mail delivery target. It is detected before claiming or dispatching.
 	ErrTargetOccupied = errors.New("assignment target already has active work")
+	// ErrPaneIdentityMigrationRequired means a durable assignment predates the
+	// canonical pane identity fields required for unambiguous physical targeting.
+	ErrPaneIdentityMigrationRequired = errors.New("assignment requires canonical pane identity migration")
 	// ErrTerminalAssignmentAttempt means a completed assignment generation was
 	// retried with its old idempotency key. Reopened work must start a new
 	// generation so it receives a new durable dispatch receipt.
 	ErrTerminalAssignmentAttempt = errors.New("assignment generation is terminal; reopen the work item and use a new idempotency key")
+	// ErrCompletionEventPending means a terminal generation still owns an
+	// unacknowledged completion event. A reopened generation cannot replace the
+	// durable row until the exact event consumer acknowledges that outbox entry.
+	ErrCompletionEventPending = errors.New("assignment completion event is pending acknowledgement")
 	// ErrWorkingReplacementNotAllowed means a caller requested an atomic
-	// reassignment without first establishing the exact durable handoff barrier:
-	// the same bead must still be working and its old leases must be released.
+	// reassignment without establishing the exact durable handoff barrier: the
+	// same bead must still be actionable and working, and its old leases must be
+	// released or reconciled before the replacement generation is persisted.
 	ErrWorkingReplacementNotAllowed = errors.New("atomic replacement requires the same working assignment with released leases")
 )
+
+// PaneIdentityMigrationError identifies a durable assignment that cannot be
+// acted on until its ambiguous pane reference is migrated to a physical tmux
+// pane ID. Topology addresses such as window.pane are routing metadata only and
+// are never durable occupancy identities.
+type PaneIdentityMigrationError struct {
+	BeadID         string
+	Pane           int
+	OccupancyKey   string
+	DispatchTarget string
+}
+
+func (e *PaneIdentityMigrationError) Error() string {
+	if e == nil {
+		return ErrPaneIdentityMigrationRequired.Error()
+	}
+	beadID := strings.TrimSpace(e.BeadID)
+	if beadID == "" {
+		beadID = "<unknown>"
+	}
+	return fmt.Sprintf("%s: assignment %s has no physical tmux pane ID (legacy pane index %d); migrate occupancy_key or dispatch_target to a %%N tmux pane ID", ErrPaneIdentityMigrationRequired, beadID, e.Pane)
+}
+
+func (e *PaneIdentityMigrationError) Unwrap() error {
+	return ErrPaneIdentityMigrationRequired
+}
 
 type guaranteedNoActuationError struct {
 	err error
@@ -265,6 +305,10 @@ type DispatchRequest struct {
 	AgentName      string
 	Prompt         string
 	IdempotencyKey string
+	// RequestedPaths are exposed to preflight so production policy can reject
+	// credential-bearing reservation paths before they are persisted or sent to
+	// Agent Mail. Dispatch adapters must not treat them as transport payload.
+	RequestedPaths []string
 }
 
 // DispatchReceipt identifies the completed transport operation.
@@ -290,6 +334,10 @@ func (f DispatchFunc) Dispatch(ctx context.Context, req DispatchRequest) (Dispat
 type PromptPreflightResult struct {
 	DispatchPrompt string
 	DurablePrompt  string
+	// DurableTitle is the sanitized work-item title safe for persistence and
+	// transport metadata. Empty preserves the supplied title for adapters that
+	// do not transform titles.
+	DurableTitle string
 }
 
 // PromptPreflightPort validates and redacts the final target-specific prompt.
@@ -316,6 +364,53 @@ type WorkItemStatusFunc func(context.Context, string) (string, error)
 
 func (f WorkItemStatusFunc) WorkItemStatus(ctx context.Context, beadID string) (string, error) {
 	return f(ctx, beadID)
+}
+
+// WorkingReplacementAuthorization is the live tracker ownership proof required
+// immediately before a working generation's external leases are released.
+type WorkingReplacementAuthorization struct {
+	Status   string
+	Assignee string
+}
+
+// WorkingReplacementAuthorizationPort reads exact live tracker status and
+// ownership. Replacement release fails closed when this capability is absent,
+// errors, or does not prove the durable claim actor still owns in-progress work.
+type WorkingReplacementAuthorizationPort interface {
+	AuthorizeWorkingReplacement(context.Context, string) (WorkingReplacementAuthorization, error)
+}
+
+// WorkingReplacementAuthorizationFunc adapts a function to the authorization
+// port.
+type WorkingReplacementAuthorizationFunc func(context.Context, string) (WorkingReplacementAuthorization, error)
+
+func (f WorkingReplacementAuthorizationFunc) AuthorizeWorkingReplacement(ctx context.Context, beadID string) (WorkingReplacementAuthorization, error) {
+	return f(ctx, beadID)
+}
+
+// WorkingReplacementReleaseReceipt reports the old assignment lease surface
+// removed before a replacement generation is persisted. A successful port must
+// return the exact complete durable path and reservation-ID sets supplied by
+// the source Assignment, including on an idempotent retry that finds the remote
+// leases already absent. Empty durable sets require empty receipt sets.
+type WorkingReplacementReleaseReceipt struct {
+	ReleasedPaths          []string
+	ReleasedReservationIDs []int
+}
+
+// WorkingReplacementReleasePort releases or reconciles the previous working
+// assignment's external leases. Implementations must be idempotent because a
+// crash after remote release but before the durable checkpoint repeats this
+// call while ClearState is reservation_releasing.
+type WorkingReplacementReleasePort interface {
+	ReleaseWorkingAssignment(context.Context, *Assignment) (WorkingReplacementReleaseReceipt, error)
+}
+
+// WorkingReplacementReleaseFunc adapts a function to the release port.
+type WorkingReplacementReleaseFunc func(context.Context, *Assignment) (WorkingReplacementReleaseReceipt, error)
+
+func (f WorkingReplacementReleaseFunc) ReleaseWorkingAssignment(ctx context.Context, current *Assignment) (WorkingReplacementReleaseReceipt, error) {
+	return f(ctx, current)
 }
 
 type nonTerminalClaimContextKey struct{}
@@ -369,33 +464,38 @@ type AtomicRequest struct {
 	RequestedPaths            []string
 	ReservationTTL            time.Duration
 	// ReplaceWorkingAssignment starts a new atomic generation in place of the
-	// same bead's working generation. It is accepted only after clear has
-	// durably reached ClearStateLeasesReleased. Exact retries of the newly
-	// persisted idempotency key remain ordinary recovery attempts.
+	// same bead's working generation. The coordinator releases or reconciles the
+	// old generation's leases under the external-cleanup, bead, and target
+	// operation locks before persisting the replacement. Exact retries of the
+	// newly persisted idempotency key remain ordinary recovery attempts.
 	ReplaceWorkingAssignment bool
 	claimRequiresNonTerminal bool
 }
 
 // AtomicResult reports the durable state reached by Execute.
 type AtomicResult struct {
-	Assignment *Assignment
-	Claim      ClaimReceipt
-	Lease      LeaseReceipt
-	Dispatch   DispatchReceipt
-	Sent       bool
-	Replayed   bool
-	Recovered  bool
+	Assignment             *Assignment
+	Claim                  ClaimReceipt
+	Lease                  LeaseReceipt
+	Dispatch               DispatchReceipt
+	ReleasedPaths          []string
+	ReleasedReservationIDs []int
+	Sent                   bool
+	Replayed               bool
+	Recovered              bool
 }
 
 // AtomicCoordinator owns the single claim-before-reserve-before-send boundary.
 type AtomicCoordinator struct {
-	store      *AssignmentStore
-	claimer    ClaimPort
-	reserver   ReservationPort
-	dispatcher DispatchPort
-	preflight  PromptPreflightPort
-	workStatus WorkItemStatusPort
-	now        func() time.Time
+	store       *AssignmentStore
+	claimer     ClaimPort
+	reserver    ReservationPort
+	dispatcher  DispatchPort
+	preflight   PromptPreflightPort
+	workStatus  WorkItemStatusPort
+	replaceAuth WorkingReplacementAuthorizationPort
+	releaser    WorkingReplacementReleasePort
+	now         func() time.Time
 }
 
 // NewAtomicCoordinator creates an assignment coordinator with injectable
@@ -418,6 +518,21 @@ func NewAtomicCoordinator(store *AssignmentStore, claimer ClaimPort, reserver Re
 // assignment generations. Production adapters should always configure it.
 func (c *AtomicCoordinator) WithWorkItemStatusPort(port WorkItemStatusPort) *AtomicCoordinator {
 	c.workStatus = port
+	return c
+}
+
+// WithWorkingReplacementAuthorizationPort installs the exact live ownership
+// proof required before releasing a working assignment's external leases.
+func (c *AtomicCoordinator) WithWorkingReplacementAuthorizationPort(port WorkingReplacementAuthorizationPort) *AtomicCoordinator {
+	c.replaceAuth = port
+	return c
+}
+
+// WithWorkingReplacementReleasePort installs the idempotent lease handoff used
+// by ReplaceWorkingAssignment. The callback executes while the external-cleanup,
+// bead, and target operation locks are held.
+func (c *AtomicCoordinator) WithWorkingReplacementReleasePort(port WorkingReplacementReleasePort) *AtomicCoordinator {
+	c.releaser = port
 	return c
 }
 
@@ -461,6 +576,37 @@ func normalizeOccupancyKey(target, occupancyKey string) string {
 		return normalized
 	}
 	return strings.TrimSpace(target)
+}
+
+// CanonicalPaneIdentity returns an assignment's unambiguous physical pane
+// identity. Bare pane indexes and arbitrary delivery labels are deliberately
+// rejected because they cannot distinguish equal local indexes across windows.
+func CanonicalPaneIdentity(a *Assignment) (string, error) {
+	if a == nil {
+		return "", errors.New("assignment is required")
+	}
+	if occupancyKey := strings.TrimSpace(a.OccupancyKey); occupancyKey != "" {
+		if isCanonicalPaneIdentity(occupancyKey) {
+			return occupancyKey, nil
+		}
+		return "", paneIdentityMigrationError(a)
+	}
+	if dispatchTarget := strings.TrimSpace(a.DispatchTarget); dispatchTarget != "" && isCanonicalPaneIdentity(dispatchTarget) {
+		return dispatchTarget, nil
+	}
+	return "", paneIdentityMigrationError(a)
+}
+
+func paneIdentityMigrationError(a *Assignment) error {
+	if a == nil {
+		return errors.New("assignment is required")
+	}
+	return &PaneIdentityMigrationError{
+		BeadID:         a.BeadID,
+		Pane:           a.Pane,
+		OccupancyKey:   a.OccupancyKey,
+		DispatchTarget: a.DispatchTarget,
+	}
 }
 
 // StableClaimActor makes independent assignment intents distinct Beads actors
@@ -509,6 +655,11 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 
 	rawPrompt := req.Prompt
 	req.IntentSHA256 = PromptSHA256(rawPrompt)
+	cleanupUnlock, err := c.store.AcquireExternalCleanupLock(ctx, req.BeadID)
+	if err != nil {
+		return result, fmt.Errorf("lock atomic assignment external cleanup %s: %w", req.BeadID, err)
+	}
+	defer cleanupUnlock()
 	operationUnlock, err := acquireAtomicBeadOperationLock(ctx, c.store.path, req.BeadID)
 	if err != nil {
 		return result, fmt.Errorf("lock atomic assignment %s: %w", req.BeadID, err)
@@ -522,12 +673,22 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 	if err := c.store.LoadStrict(); err != nil {
 		return result, fmt.Errorf("refresh atomic assignment %s: %w", req.BeadID, err)
 	}
-	if occupied := activeAssignmentForTarget(c.store.List(), req.BeadID, req.OccupancyKey, req.Pane); occupied != nil {
+	occupied, occupancyErr := activeAssignmentForTarget(c.store.List(), req.BeadID, req.OccupancyKey)
+	if occupancyErr != nil {
+		result.Assignment = occupied
+		return result, occupancyErr
+	}
+	if occupied != nil {
 		result.Assignment = occupied
 		return result, fmt.Errorf("%w: %s is owned by bead %s", ErrTargetOccupied, req.Target, occupied.BeadID)
 	}
 
 	prior := c.store.Get(req.BeadID)
+	if prior != nil && isTerminalAssignmentStatus(prior.Status) &&
+		prior.IdempotencyKey != req.IdempotencyKey && strings.TrimSpace(prior.PendingCompletionEventID) != "" {
+		result.Assignment = prior
+		return result, fmt.Errorf("%w: acknowledge event %s for %s before starting a new generation", ErrCompletionEventPending, prior.PendingCompletionEventID, req.BeadID)
+	}
 	actor := StableClaimActor(req.Actor, req.IdempotencyKey)
 	if prior != nil && prior.IdempotencyKey == req.IdempotencyKey && strings.TrimSpace(prior.ClaimActor) != "" {
 		// The durable row is authoritative during same-key crash recovery. A
@@ -542,7 +703,7 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			return result, fmt.Errorf("%w: no durable assignment exists for %s", ErrWorkingReplacementNotAllowed, req.BeadID)
 		}
 		if prior.IdempotencyKey != req.IdempotencyKey {
-			if err := validateWorkingReplacement(prior, req); err != nil {
+			if err := validateWorkingReplacementCandidate(prior, req); err != nil {
 				result.Assignment = prior
 				return result, err
 			}
@@ -580,6 +741,14 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			return result, fmt.Errorf("%w: %s is awaiting reservation release", ErrClaimConflict, req.BeadID)
 		}
 		if prior.IdempotencyKey == req.IdempotencyKey && prior.ClaimActor == actor {
+			switch effectiveClaimState(prior) {
+			case ClaimIneligible:
+				result.Assignment = prior
+				return result, fmt.Errorf("claim %s: %w", req.BeadID, ErrClaimIneligible)
+			case ClaimFailed:
+				result.Assignment = prior
+				return result, fmt.Errorf("claim %s: %w", req.BeadID, ErrClaimConflict)
+			}
 			if isTerminalAssignmentStatus(prior.Status) {
 				result.Assignment = prior
 				return result, fmt.Errorf("%w: %s", ErrTerminalAssignmentAttempt, req.BeadID)
@@ -590,10 +759,15 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			}
 			switch prior.DispatchState {
 			case DispatchSent:
+				dispatch := DispatchReceipt{DeliveryID: prior.DispatchReceiptID, Duration: prior.DispatchDuration}
+				if receiptErr := validateDispatchReceipt(dispatch); receiptErr != nil {
+					result.Assignment = prior
+					return result, errors.Join(ErrDispatchOutcomeUnknown, receiptErr)
+				}
 				result.Assignment = prior
 				result.Sent = true
 				result.Replayed = true
-				result.Dispatch = DispatchReceipt{DeliveryID: prior.DispatchReceiptID, Duration: prior.DispatchDuration}
+				result.Dispatch = dispatch
 				return result, nil
 			case DispatchSending:
 				result.Assignment = prior
@@ -634,12 +808,13 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			req.claimRequiresNonTerminal = true
 		}
 	}
-
 	durablePrompt := rawPrompt
+	durableTitle := req.BeadTitle
 	if c.preflight != nil {
 		preflightResult, preflightErr := c.preflight.Preflight(ctx, DispatchRequest{
 			BeadID: req.BeadID, BeadTitle: req.BeadTitle, Target: req.Target, Pane: req.Pane,
 			AgentType: req.AgentType, AgentName: req.AgentName, Prompt: rawPrompt, IdempotencyKey: req.IdempotencyKey,
+			RequestedPaths: append([]string(nil), req.RequestedPaths...),
 		})
 		if preflightErr != nil {
 			return result, fmt.Errorf("preflight assignment prompt for %s: %w", req.BeadID, preflightErr)
@@ -649,19 +824,34 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 		}
 		req.Prompt = preflightResult.DispatchPrompt
 		durablePrompt = preflightResult.DurablePrompt
+		if strings.TrimSpace(preflightResult.DurableTitle) != "" {
+			durableTitle = preflightResult.DurableTitle
+		}
 	}
+	req.BeadTitle = durableTitle
 	persistedReq := req
 	persistedReq.Prompt = durablePrompt
 	if prior != nil && prior.IdempotencyKey == req.IdempotencyKey && prior.ClaimActor == actor && !matchesAtomicIntent(prior, persistedReq) {
 		result.Assignment = prior
 		return result, fmt.Errorf("idempotency key %s was reused for a different durable assignment intent", req.IdempotencyKey)
 	}
-	if req.RequireReservation && c.reserver == nil && !replacementStart {
+	if req.RequireReservation && c.reserver == nil {
 		switch {
 		case prior != nil && prior.IdempotencyKey == req.IdempotencyKey && reservationOutcomeAmbiguous(prior):
+			result.Assignment = prior
 			return result, ErrReservationOutcomeUnknown
 		case prior == nil || prior.IdempotencyKey != req.IdempotencyKey || reservationNeedsRefresh(prior, c.now()):
+			result.Assignment = prior
 			return result, ErrReservationRequired
+		}
+	}
+	if replacementStart {
+		releaseReceipt, releasedAssignment, releaseErr := c.releaseWorkingReplacementWithOperationLocks(ctx, prior, req)
+		result.ReleasedPaths = append([]string(nil), releaseReceipt.ReleasedPaths...)
+		result.ReleasedReservationIDs = append([]int(nil), releaseReceipt.ReleasedReservationIDs...)
+		result.Assignment = releasedAssignment
+		if releaseErr != nil {
+			return result, releaseErr
 		}
 	}
 
@@ -711,8 +901,13 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 		result.Assignment = c.store.Get(req.BeadID)
 		return result, fmt.Errorf("dispatch %s: %w", req.BeadID, errors.Join(ErrDispatchOutcomeUnknown, dispatchErr))
 	}
+	if receiptErr := validateDispatchReceipt(dispatch); receiptErr != nil {
+		result.Assignment = c.store.Get(req.BeadID)
+		return result, fmt.Errorf("dispatch %s: %w", req.BeadID, errors.Join(ErrDispatchOutcomeUnknown, receiptErr))
+	}
 	if err := c.store.RecordAtomicDispatchSent(req.BeadID, req.IdempotencyKey, durablePrompt, dispatch, c.now()); err != nil {
-		return result, err
+		result.Assignment = c.store.Get(req.BeadID)
+		return result, fmt.Errorf("persist dispatch receipt for %s: %w", req.BeadID, errors.Join(ErrDispatchOutcomeUnknown, err))
 	}
 	result.Assignment = c.store.Get(req.BeadID)
 	result.Sent = true
@@ -728,24 +923,198 @@ func workItemStatusAllowsNewGeneration(status string) bool {
 	}
 }
 
-func validateWorkingReplacement(prior *Assignment, req AtomicRequest) error {
+func (c *AtomicCoordinator) releaseWorkingReplacementWithOperationLocks(ctx context.Context, prior *Assignment, req AtomicRequest) (WorkingReplacementReleaseReceipt, *Assignment, error) {
+	var receipt WorkingReplacementReleaseReceipt
+	if err := validateWorkingReplacementCandidate(prior, req); err != nil {
+		return receipt, prior, err
+	}
+	current := prior
+	switch current.ClearState {
+	case ClearStateLeasesReleased:
+		if err := validateWorkingReplacement(current, req); err != nil {
+			return receipt, current, err
+		}
+		return receipt, current, nil
+	case ClearStateNone, ClearStateReservationReleasing:
+		if c.releaser == nil {
+			return receipt, current, fmt.Errorf("%w: no working-assignment release port is configured", ErrWorkingReplacementNotAllowed)
+		}
+	default:
+		return receipt, current, fmt.Errorf("%w: %s has invalid clear state %q", ErrWorkingReplacementNotAllowed, req.BeadID, current.ClearState)
+	}
+	if err := c.authorizeWorkingReplacementRelease(ctx, current); err != nil {
+		return receipt, current, err
+	}
+
+	if current.ClearState == ClearStateNone {
+		clearing, err := c.store.beginClearWithOperationLock(req.BeadID, c.now(), []AssignmentStatus{StatusWorking})
+		if err != nil {
+			return receipt, c.store.Get(req.BeadID), err
+		}
+		current = clearing
+	}
+
+	receipt, releaseErr := c.releaser.ReleaseWorkingAssignment(ctx, cloneAssignment(current))
+	if releaseErr != nil {
+		return c.recordWorkingReplacementReleaseFailure(req.BeadID, receipt, releaseErr)
+	}
+	normalizedPaths, normalizedIDs, receiptErr := validateWorkingReplacementReleaseReceipt(current, receipt)
+	receipt.ReleasedPaths = normalizedPaths
+	receipt.ReleasedReservationIDs = normalizedIDs
+	if receiptErr != nil {
+		return c.recordWorkingReplacementReleaseFailure(req.BeadID, receipt, receiptErr)
+	}
+
+	released, err := c.store.recordClearLeasesReleasedWithOperationLock(req.BeadID)
+	if err != nil {
+		return receipt, c.store.Get(req.BeadID), fmt.Errorf("persist working-assignment release checkpoint: %w", err)
+	}
+	if err := validateWorkingReplacement(released, req); err != nil {
+		return receipt, released, err
+	}
+	return receipt, released, nil
+}
+
+func (c *AtomicCoordinator) authorizeWorkingReplacementRelease(ctx context.Context, current *Assignment) error {
+	if current == nil {
+		return fmt.Errorf("%w: replacement source assignment is missing", ErrWorkingReplacementNotAllowed)
+	}
+	if c.replaceAuth == nil {
+		return fmt.Errorf("%w: cannot prove bead %s live tracker ownership", ErrWorkingReplacementNotAllowed, current.BeadID)
+	}
+	authorization, err := c.replaceAuth.AuthorizeWorkingReplacement(ctx, current.BeadID)
+	if err != nil {
+		return fmt.Errorf("%w: verify bead %s replacement authorization: %v", ErrWorkingReplacementNotAllowed, current.BeadID, err)
+	}
+	if status := strings.TrimSpace(authorization.Status); status != "in_progress" {
+		return fmt.Errorf("%w: bead %s tracker status is %q, want in_progress", ErrWorkingReplacementNotAllowed, current.BeadID, authorization.Status)
+	}
+	expectedActor := strings.TrimSpace(current.ClaimActor)
+	actualAssignee := strings.TrimSpace(authorization.Assignee)
+	if expectedActor == "" {
+		return fmt.Errorf("%w: bead %s durable claim actor is empty", ErrWorkingReplacementNotAllowed, current.BeadID)
+	}
+	if actualAssignee == "" {
+		return fmt.Errorf("%w: bead %s live tracker assignee is empty", ErrWorkingReplacementNotAllowed, current.BeadID)
+	}
+	if actualAssignee != expectedActor {
+		return fmt.Errorf("%w: bead %s live tracker assignee %q does not match durable claim actor %q", ErrWorkingReplacementNotAllowed, current.BeadID, actualAssignee, expectedActor)
+	}
+	return nil
+}
+
+func (c *AtomicCoordinator) recordWorkingReplacementReleaseFailure(beadID string, receipt WorkingReplacementReleaseReceipt, releaseErr error) (WorkingReplacementReleaseReceipt, *Assignment, error) {
+	if persistErr := c.store.recordClearReleaseFailedWithOperationLock(beadID, releaseErr); persistErr != nil {
+		return receipt, c.store.Get(beadID), errors.Join(releaseErr, fmt.Errorf("persist working-assignment release failure: %w", persistErr))
+	}
+	return receipt, c.store.Get(beadID), fmt.Errorf("release working assignment %s: %w", beadID, releaseErr)
+}
+
+func validateWorkingReplacementReleaseReceipt(current *Assignment, receipt WorkingReplacementReleaseReceipt) ([]string, []int, error) {
+	released, err := normalizedUniqueReservationPaths(receipt.ReleasedPaths, "working replacement released path")
+	if err != nil {
+		return nil, nil, err
+	}
+	releasedIDs, err := normalizedUniqueReservationIDs(receipt.ReleasedReservationIDs, "working replacement released reservation ID")
+	if err != nil {
+		return nil, nil, err
+	}
+	if current == nil {
+		return nil, nil, errors.New("working replacement release receipt has no source assignment")
+	}
+	known := make([]string, 0, len(current.ReservedPaths)+len(current.ReservationRequested)+len(current.ReservationInputPaths))
+	seenKnown := make(map[string]struct{}, cap(known))
+	for _, group := range [][]string{current.ReservedPaths, current.ReservationRequested, current.ReservationInputPaths} {
+		normalized, groupErr := normalizedUniqueReservationPaths(group, "durable working replacement path")
+		if groupErr != nil {
+			return nil, nil, groupErr
+		}
+		for _, path := range normalized {
+			if _, duplicate := seenKnown[path]; duplicate {
+				continue
+			}
+			seenKnown[path] = struct{}{}
+			known = append(known, path)
+		}
+	}
+	if missing := reservationPathDifference(known, released); len(missing) > 0 {
+		return nil, nil, fmt.Errorf("working replacement release receipt omitted expected paths: %s", strings.Join(missing, ", "))
+	}
+	if unexpected := reservationPathDifference(released, known); len(unexpected) > 0 {
+		return nil, nil, fmt.Errorf("working replacement release receipt contains unexpected paths: %s", strings.Join(unexpected, ", "))
+	}
+	expectedIDs, err := normalizedUniqueReservationIDs(current.ReservationIDs, "durable working replacement reservation ID")
+	if err != nil {
+		return nil, nil, err
+	}
+	if !sameReservationIDSet(expectedIDs, releasedIDs) {
+		return nil, nil, fmt.Errorf("working replacement release receipt IDs %v do not match expected IDs %v", releasedIDs, expectedIDs)
+	}
+	return released, releasedIDs, nil
+}
+
+func normalizedUniqueReservationIDs(ids []int, field string) ([]int, error) {
+	result := make([]int, 0, len(ids))
+	seen := make(map[int]struct{}, len(ids))
+	var validationErrors []error
+	for _, id := range ids {
+		if id <= 0 {
+			validationErrors = append(validationErrors, fmt.Errorf("%s %d must be positive", field, id))
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			validationErrors = append(validationErrors, fmt.Errorf("%s %d is duplicated", field, id))
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	sort.Ints(result)
+	return result, errors.Join(validationErrors...)
+}
+
+func sameReservationIDSet(left, right []int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func validateWorkingReplacementCandidate(prior *Assignment, req AtomicRequest) error {
 	if prior == nil || prior.BeadID != req.BeadID {
 		return fmt.Errorf("%w: no matching durable assignment exists for %s", ErrWorkingReplacementNotAllowed, req.BeadID)
 	}
 	if prior.Status != StatusWorking {
 		return fmt.Errorf("%w: %s is %s, expected %s", ErrWorkingReplacementNotAllowed, req.BeadID, prior.Status, StatusWorking)
 	}
-	if prior.ClearState != ClearStateLeasesReleased {
-		return fmt.Errorf("%w: %s clear state is %q, expected %q", ErrWorkingReplacementNotAllowed, req.BeadID, prior.ClearState, ClearStateLeasesReleased)
+	switch prior.ClearState {
+	case ClearStateNone, ClearStateReservationReleasing, ClearStateLeasesReleased:
+	default:
+		return fmt.Errorf("%w: %s has invalid clear state %q", ErrWorkingReplacementNotAllowed, req.BeadID, prior.ClearState)
 	}
 	if prior.DispatchState == DispatchSending {
 		return fmt.Errorf("%w: %s has an unknown dispatch outcome", ErrWorkingReplacementNotAllowed, req.BeadID)
 	}
-	if assignmentHasUnresolvedReservation(prior) {
-		return fmt.Errorf("%w: %s still has unresolved reservation metadata", ErrWorkingReplacementNotAllowed, req.BeadID)
-	}
 	if strings.TrimSpace(prior.IdempotencyKey) == strings.TrimSpace(req.IdempotencyKey) {
 		return fmt.Errorf("%w: replacement generation must use a new idempotency key", ErrWorkingReplacementNotAllowed)
+	}
+	return nil
+}
+
+func validateWorkingReplacement(prior *Assignment, req AtomicRequest) error {
+	if err := validateWorkingReplacementCandidate(prior, req); err != nil {
+		return err
+	}
+	if prior.ClearState != ClearStateLeasesReleased {
+		return fmt.Errorf("%w: %s clear state is %q, expected %q", ErrWorkingReplacementNotAllowed, req.BeadID, prior.ClearState, ClearStateLeasesReleased)
+	}
+	if assignmentHasUnresolvedReservation(prior) {
+		return fmt.Errorf("%w: %s still has unresolved reservation metadata", ErrWorkingReplacementNotAllowed, req.BeadID)
 	}
 	return nil
 }
@@ -757,13 +1126,7 @@ func workingReplacementClaimActor(prior *Assignment) (string, error) {
 	if actor := strings.TrimSpace(prior.ClaimActor); actor != "" {
 		return actor, nil
 	}
-	// Pre-atomic ledgers did not persist ClaimActor. Their Agent Mail identity
-	// is the only conservative claim-owner identity available for an idempotent
-	// guarded claim; never derive a fresh actor from the replacement target.
-	if actor := strings.TrimSpace(prior.AgentName); actor != "" {
-		return actor, nil
-	}
-	return "", fmt.Errorf("%w: %s has no durable claim actor", ErrWorkingReplacementNotAllowed, prior.BeadID)
+	return "", fmt.Errorf("%w: %s has no durable claim actor; migrate the assignment before replacement", ErrWorkingReplacementNotAllowed, prior.BeadID)
 }
 
 func (c *AtomicCoordinator) ensureClaim(ctx context.Context, req AtomicRequest, actor string, recorded *Assignment) (ClaimReceipt, *Assignment, error) {
@@ -772,10 +1135,17 @@ func (c *AtomicCoordinator) ensureClaim(ctx context.Context, req AtomicRequest, 
 	}
 	state := effectiveClaimState(recorded)
 	if state == ClaimClaimed {
-		return claimFromAssignment(recorded), recorded, nil
+		claim := claimFromAssignment(recorded)
+		if receiptErr := validateClaimReceipt(claim, req.BeadID, actor); receiptErr != nil {
+			return ClaimReceipt{}, recorded, errors.Join(ErrClaimOutcomeUnknown, receiptErr)
+		}
+		return claim, recorded, nil
 	}
 	if state == ClaimFailed {
 		return ClaimReceipt{}, recorded, fmt.Errorf("claim %s: %w", req.BeadID, ErrClaimConflict)
+	}
+	if state == ClaimIneligible {
+		return ClaimReceipt{}, recorded, fmt.Errorf("claim %s: %w", req.BeadID, ErrClaimIneligible)
 	}
 
 	if state == ClaimClaiming || state == ClaimUnknown {
@@ -871,6 +1241,17 @@ func (c *AtomicCoordinator) ensureReservation(ctx context.Context, req AtomicReq
 		if recorded.ReservationError != "" {
 			return lease, recorded, fmt.Errorf("reserve files for %s: %w", req.BeadID, RequireReservationRelease(errors.New(recorded.ReservationError)))
 		}
+		validationErr := validateLeaseReceipt(reservationReq, lease)
+		if validationErr == nil && req.RequireReservation {
+			validationErr = validateRequiredLease(req, lease, c.now())
+		}
+		if validationErr != nil {
+			reservationState, reservationErr := classifyValidatedReservation(lease, validationErr)
+			if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, reservationState, lease, reservationErr); persistErr != nil {
+				return lease, recorded, errors.Join(reservationErr, persistErr)
+			}
+			return lease, c.store.Get(req.BeadID), fmt.Errorf("validate persisted reservation for %s: %w", req.BeadID, reservationErr)
+		}
 		if !reservationExpired(recorded, c.now()) {
 			return lease, recorded, nil
 		}
@@ -894,7 +1275,7 @@ func (c *AtomicCoordinator) ensureReservation(ctx context.Context, req AtomicReq
 			lease = reconciliation.Lease
 			validationErr := validateLeaseReceipt(reservationReq, lease)
 			if validationErr == nil && req.RequireReservation {
-				validationErr = validateRequiredLease(req, lease)
+				validationErr = validateRequiredLease(req, lease, c.now())
 			}
 			reservationState, reservationErr := classifyValidatedReservation(lease, validationErr)
 			if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, reservationState, lease, reservationErr); persistErr != nil {
@@ -943,7 +1324,7 @@ func (c *AtomicCoordinator) ensureReservation(ctx context.Context, req AtomicReq
 	}
 	validationErr := validateLeaseReceipt(reservationReq, lease)
 	if validationErr == nil && req.RequireReservation {
-		validationErr = validateRequiredLease(req, lease)
+		validationErr = validateRequiredLease(req, lease, c.now())
 	}
 	reservationState, reservationErr := classifyValidatedReservation(lease, validationErr)
 	if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, reservationState, lease, reservationErr); persistErr != nil {
@@ -966,11 +1347,21 @@ func normalizeClaimReceipt(claim ClaimReceipt, beadID, actor string, now time.Ti
 }
 
 func validateClaimReceipt(claim ClaimReceipt, beadID, actor string) error {
-	if actual := strings.TrimSpace(claim.BeadID); actual != "" && actual != beadID {
+	if actual := strings.TrimSpace(claim.BeadID); actual == "" {
+		return errors.New("claim receipt has no bead ID")
+	} else if actual != strings.TrimSpace(beadID) {
 		return fmt.Errorf("claim receipt bead mismatch: got %s, want %s", actual, beadID)
 	}
-	if actual := strings.TrimSpace(claim.Actor); actual != "" && actual != actor {
+	if actual := strings.TrimSpace(claim.Actor); actual == "" {
+		return errors.New("claim receipt has no actor")
+	} else if actual != strings.TrimSpace(actor) {
 		return fmt.Errorf("claim receipt actor mismatch: got %s, want %s", actual, actor)
+	}
+	if status := strings.ToLower(strings.TrimSpace(claim.Status)); status != "in_progress" {
+		return fmt.Errorf("claim receipt status %q does not prove an in-progress claim", claim.Status)
+	}
+	if claim.ClaimedAt.IsZero() {
+		return errors.New("claim receipt has no claim timestamp")
 	}
 	return nil
 }
@@ -994,6 +1385,13 @@ func validateAtomicRequest(req AtomicRequest) error {
 		return errors.New("idempotency key is required")
 	case strings.TrimSpace(req.Target) == "":
 		return errors.New("assignment target is required")
+	case !isPhysicalPaneOccupancyKey(req.OccupancyKey):
+		return &PaneIdentityMigrationError{
+			BeadID:         req.BeadID,
+			Pane:           req.Pane,
+			OccupancyKey:   req.OccupancyKey,
+			DispatchTarget: req.Target,
+		}
 	case strings.TrimSpace(req.Prompt) == "":
 		return errors.New("assignment prompt is required")
 	case req.RequireReservation && len(req.RequestedPaths) == 0 && !req.AllowReservationDiscovery:
@@ -1007,42 +1405,40 @@ func validateAtomicRequest(req AtomicRequest) error {
 	return nil
 }
 
-func activeAssignmentForTarget(assignments []*Assignment, beadID, occupancyKey string, pane int) *Assignment {
+func activeAssignmentForTarget(assignments []*Assignment, beadID, occupancyKey string) (*Assignment, error) {
 	occupancyKey = strings.TrimSpace(occupancyKey)
 	for _, candidate := range assignments {
 		if candidate == nil || candidate.BeadID == beadID {
 			continue
 		}
-		if !assignmentOccupiesTarget(candidate, occupancyKey, pane) {
-			continue
-		}
-		if candidate.DispatchState == DispatchSending || candidate.ClearState != ClearStateNone {
-			return candidate
-		}
+		active := candidate.DispatchState == DispatchSending || candidate.ClearState != ClearStateNone
 		switch candidate.Status {
 		case StatusClaiming, StatusClaimed, StatusAssigned, StatusWorking:
-			return candidate
+			active = true
+		}
+		if !active {
+			continue
+		}
+		occupied, err := assignmentOccupiesTarget(candidate, occupancyKey)
+		if err != nil {
+			return candidate, err
+		}
+		if occupied {
+			return candidate, nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
-func assignmentOccupiesTarget(candidate *Assignment, occupancyKey string, pane int) bool {
+func assignmentOccupiesTarget(candidate *Assignment, occupancyKey string) (bool, error) {
 	if candidate == nil {
-		return false
+		return false, nil
 	}
-	canonicalKey := strings.TrimSpace(candidate.OccupancyKey)
-	comparisonKey := canonicalKey
-	if comparisonKey == "" {
-		comparisonKey = strings.TrimSpace(candidate.DispatchTarget)
+	canonicalKey, err := CanonicalPaneIdentity(candidate)
+	if err != nil {
+		return false, err
 	}
-	if comparisonKey != "" && comparisonKey == occupancyKey {
-		return true
-	}
-	// Rows written before canonical pane IDs were durable cannot distinguish
-	// duplicate window-local indexes. Conservatively reserve every physical pane
-	// with that local index until the legacy row is cleared or migrated.
-	return !isPhysicalPaneOccupancyKey(canonicalKey) && candidate.Pane == pane
+	return canonicalKey == strings.TrimSpace(occupancyKey), nil
 }
 
 func isPhysicalPaneOccupancyKey(value string) bool {
@@ -1050,45 +1446,137 @@ func isPhysicalPaneOccupancyKey(value string) bool {
 	if len(value) < 2 || value[0] != '%' {
 		return false
 	}
-	for _, ch := range value[1:] {
+	digits := value[1:]
+	if len(digits) > 1 && digits[0] == '0' {
+		return false
+	}
+	for _, ch := range digits {
 		if ch < '0' || ch > '9' {
 			return false
 		}
 	}
-	return true
+	_, err := strconv.ParseUint(digits, 10, strconv.IntSize)
+	return err == nil
 }
 
-func validateRequiredLease(req AtomicRequest, lease LeaseReceipt) error {
-	expected := req.RequestedPaths
-	if req.AllowReservationDiscovery {
-		expected = lease.Requested
+func isCanonicalPaneIdentity(value string) bool {
+	return isPhysicalPaneOccupancyKey(value)
+}
+
+func validateRequiredLease(req AtomicRequest, lease LeaseReceipt, now time.Time) error {
+	var validationErrors []error
+	explicit, explicitErr := normalizedUniqueReservationPaths(req.RequestedPaths, "requested reservation path")
+	if explicitErr != nil {
+		validationErrors = append(validationErrors, explicitErr)
+	}
+	receiptRequested, requestedErr := normalizedUniqueReservationPaths(lease.Requested, "reservation receipt requested path")
+	if requestedErr != nil {
+		validationErrors = append(validationErrors, requestedErr)
+	}
+
+	expected := explicit
+	if req.AllowReservationDiscovery && len(explicit) == 0 {
+		expected = receiptRequested
+	} else if requestedErr == nil && !sameReservationPathSet(explicit, receiptRequested) {
+		validationErrors = append(validationErrors, fmt.Errorf("reservation receipt requested paths %v do not match %v", receiptRequested, explicit))
 	}
 	if len(expected) == 0 {
-		return ErrReservationPathsRequired
+		validationErrors = append(validationErrors, ErrReservationPathsRequired)
 	}
-	granted := make(map[string]struct{}, len(lease.Granted))
-	for _, path := range lease.Granted {
-		granted[strings.TrimSpace(path)] = struct{}{}
+
+	granted, grantedErr := normalizedUniqueReservationPaths(lease.Granted, "reservation receipt granted path")
+	if grantedErr != nil {
+		validationErrors = append(validationErrors, grantedErr)
 	}
-	missing := make([]string, 0)
-	for _, path := range expected {
-		path = strings.TrimSpace(path)
-		if _, ok := granted[path]; !ok {
-			missing = append(missing, path)
+	if grantedErr == nil {
+		missing := reservationPathDifference(expected, granted)
+		if len(missing) > 0 {
+			validationErrors = append(validationErrors, fmt.Errorf("required file reservations were not granted: %s", strings.Join(missing, ", ")))
+		}
+		unexpected := reservationPathDifference(granted, expected)
+		if len(unexpected) > 0 {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation receipt granted unexpected paths: %s", strings.Join(unexpected, ", ")))
 		}
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("required file reservations were not granted: %s", strings.Join(missing, ", "))
+
+	seenIDs := make(map[int]struct{}, len(lease.ReservationIDs))
+	for _, id := range lease.ReservationIDs {
+		if id <= 0 {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation receipt contains invalid ID %d", id))
+			continue
+		}
+		if _, duplicate := seenIDs[id]; duplicate {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation receipt repeats ID %d", id))
+			continue
+		}
+		seenIDs[id] = struct{}{}
+	}
+	if len(seenIDs) == 0 {
+		validationErrors = append(validationErrors, errors.New("reservation receipt has no positive durable reservation IDs"))
+	}
+	if lease.ExpiresAt == nil || lease.ExpiresAt.IsZero() || !lease.ExpiresAt.After(now) {
+		validationErrors = append(validationErrors, errors.New("reservation receipt has no live future expiry"))
+	}
+	return errors.Join(validationErrors...)
+}
+
+func validateLeaseReceipt(req ReservationRequest, lease LeaseReceipt) error {
+	if strings.TrimSpace(lease.AgentName) == "" {
+		return errors.New("reservation receipt has no agent")
+	}
+	if strings.TrimSpace(lease.AgentName) != strings.TrimSpace(req.AgentName) {
+		return fmt.Errorf("reservation receipt agent mismatch: got %q, want %q", lease.AgentName, req.AgentName)
+	}
+	if strings.TrimSpace(lease.Target) == "" {
+		return errors.New("reservation receipt has no target")
+	}
+	if strings.TrimSpace(lease.Target) != strings.TrimSpace(req.Target) {
+		return fmt.Errorf("reservation receipt target mismatch: got %q, want %q", lease.Target, req.Target)
 	}
 	return nil
 }
 
-func validateLeaseReceipt(req ReservationRequest, lease LeaseReceipt) error {
-	if strings.TrimSpace(lease.AgentName) != strings.TrimSpace(req.AgentName) {
-		return fmt.Errorf("reservation receipt agent mismatch: got %q, want %q", lease.AgentName, req.AgentName)
+func normalizedUniqueReservationPaths(paths []string, field string) ([]string, error) {
+	result := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	var validationErrors []error
+	for _, raw := range paths {
+		path := strings.TrimSpace(raw)
+		if path == "" {
+			validationErrors = append(validationErrors, fmt.Errorf("%s cannot be empty", field))
+			continue
+		}
+		if _, duplicate := seen[path]; duplicate {
+			validationErrors = append(validationErrors, fmt.Errorf("%s %q is duplicated", field, path))
+			continue
+		}
+		seen[path] = struct{}{}
+		result = append(result, path)
 	}
-	if strings.TrimSpace(lease.Target) != strings.TrimSpace(req.Target) {
-		return fmt.Errorf("reservation receipt target mismatch: got %q, want %q", lease.Target, req.Target)
+	return result, errors.Join(validationErrors...)
+}
+
+func sameReservationPathSet(left, right []string) bool {
+	return len(left) == len(right) && len(reservationPathDifference(left, right)) == 0
+}
+
+func reservationPathDifference(left, right []string) []string {
+	rightSet := make(map[string]struct{}, len(right))
+	for _, path := range right {
+		rightSet[path] = struct{}{}
+	}
+	difference := make([]string, 0)
+	for _, path := range left {
+		if _, found := rightSet[path]; !found {
+			difference = append(difference, path)
+		}
+	}
+	return difference
+}
+
+func validateDispatchReceipt(receipt DispatchReceipt) error {
+	if strings.TrimSpace(receipt.DeliveryID) == "" {
+		return errors.New("dispatch returned no concrete delivery receipt")
 	}
 	return nil
 }
@@ -1226,7 +1714,7 @@ func matchesAtomicRawIntent(a *Assignment, req AtomicRequest) bool {
 	if storedOccupancyKey == "" {
 		storedOccupancyKey = a.DispatchTarget
 	}
-	return a.DispatchTarget == req.Target && storedOccupancyKey == normalizeOccupancyKey(req.Target, req.OccupancyKey) && a.Pane == req.Pane &&
+	return a.DispatchTarget == req.Target && storedOccupancyKey == normalizeOccupancyKey(req.Target, req.OccupancyKey) &&
 		a.AgentName == req.AgentName && a.AgentType == req.AgentType &&
 		storedIntentSHA256 == intentSHA256 &&
 		a.ReservationRequired == req.RequireReservation &&
@@ -1235,7 +1723,9 @@ func matchesAtomicRawIntent(a *Assignment, req AtomicRequest) bool {
 }
 
 func matchesAtomicIntent(a *Assignment, req AtomicRequest) bool {
-	return matchesAtomicRawIntent(a, req) && a.PromptSHA256 == PromptSHA256(req.Prompt)
+	return matchesAtomicRawIntent(a, req) &&
+		a.BeadTitle == req.BeadTitle &&
+		a.PromptSHA256 == PromptSHA256(req.Prompt)
 }
 
 func stringSlicesEqual(a, b []string) bool {
@@ -1271,6 +1761,10 @@ func (s *AssignmentStore) RecordAtomicIntent(req AtomicRequest, actor string, cr
 	defer s.mutex.Unlock()
 
 	existing := s.Assignments[req.BeadID]
+	if existing != nil && isTerminalAssignmentStatus(existing.Status) &&
+		existing.IdempotencyKey != req.IdempotencyKey && strings.TrimSpace(existing.PendingCompletionEventID) != "" {
+		return nil, fmt.Errorf("%w: acknowledge event %s for %s before starting a new generation", ErrCompletionEventPending, existing.PendingCompletionEventID, req.BeadID)
+	}
 	replacementStart := req.ReplaceWorkingAssignment && existing != nil && existing.IdempotencyKey != req.IdempotencyKey
 	if req.ReplaceWorkingAssignment && existing == nil {
 		return nil, fmt.Errorf("%w: no durable assignment exists for %s", ErrWorkingReplacementNotAllowed, req.BeadID)
@@ -1421,8 +1915,8 @@ func (s *AssignmentStore) RecordAtomicClaim(req AtomicRequest, claim ClaimReceip
 }
 
 // RecordAtomicClaimUncertain records a returned claim error without erasing
-// the pre-call barrier. Conflict is a known failure; all other errors remain
-// unknown until reconciled.
+// the pre-call barrier. Conflict and atomic eligibility rejection are known
+// failures; all other errors remain unknown until reconciled.
 func (s *AssignmentStore) RecordAtomicClaimUncertain(beadID, idempotencyKey string, claimErr error) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -1432,7 +1926,12 @@ func (s *AssignmentStore) RecordAtomicClaimUncertain(beadID, idempotencyKey stri
 		return err
 	}
 	a.ClaimState = ClaimUnknown
-	if errors.Is(claimErr, ErrClaimConflict) {
+	if errors.Is(claimErr, ErrClaimIneligible) {
+		a.ClaimState = ClaimIneligible
+		a.Status = StatusFailed
+		failedAt := time.Now().UTC()
+		a.FailedAt = &failedAt
+	} else if errors.Is(claimErr, ErrClaimConflict) {
 		a.ClaimState = ClaimFailed
 		a.Status = StatusFailed
 		failedAt := time.Now().UTC()
@@ -1544,12 +2043,16 @@ func (s *AssignmentStore) RecordAtomicDispatchFailed(beadID, idempotencyKey stri
 // RecordAtomicDispatchSent commits the final delivery receipt and exposes the
 // assignment to existing assigned/working consumers.
 func (s *AssignmentStore) RecordAtomicDispatchSent(beadID, idempotencyKey, prompt string, receipt DispatchReceipt, dispatchedAt time.Time) error {
+	if err := validateDispatchReceipt(receipt); err != nil {
+		return err
+	}
 	s.mutex.Lock()
 	a, err := s.atomicAssignmentLocked(beadID, idempotencyKey)
 	if err != nil {
 		s.mutex.Unlock()
 		return err
 	}
+	previous := cloneAssignment(a)
 	a.Status = StatusAssigned
 	a.PromptSent = prompt
 	a.PendingPrompt = ""
@@ -1559,6 +2062,10 @@ func (s *AssignmentStore) RecordAtomicDispatchSent(beadID, idempotencyKey, promp
 	a.DispatchDuration = receipt.Duration
 	a.LastDispatchError = ""
 	if err := s.saveLocked(); err != nil {
+		var concurrentMutation *ConcurrentMutationError
+		if !errors.As(err, &concurrentMutation) {
+			s.Assignments[beadID] = previous
+		}
 		s.mutex.Unlock()
 		return err
 	}

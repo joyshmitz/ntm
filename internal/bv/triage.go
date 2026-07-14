@@ -3,6 +3,7 @@
 package bv
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,8 +26,14 @@ var (
 	triageRunMu     sync.Mutex
 )
 
-func acquireTriageRunLock(deadline time.Time, timeout time.Duration) (func(), error) {
+func acquireTriageRunLock(ctx context.Context, deadline time.Time, timeout time.Duration) (func(), error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("triage context is required")
+	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return nil, fmt.Errorf("bv timed out after %v", timeout)
@@ -38,7 +45,13 @@ func acquireTriageRunLock(deadline time.Time, timeout time.Duration) (func(), er
 		if remaining < sleep {
 			sleep = remaining
 		}
-		time.Sleep(sleep)
+		timer := time.NewTimer(sleep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -65,16 +78,31 @@ func normalizeTriageDir(dir string) (string, error) {
 // GetTriage returns the complete triage analysis from bv --robot-triage.
 // Results are cached for TriageCacheTTL (default 30 seconds).
 func GetTriage(dir string) (*TriageResponse, error) {
-	return getTriageWithTimeout(dir, DefaultTimeout)
+	return getTriageContext(context.Background(), dir, DefaultTimeout)
+}
+
+// GetTriageContext returns cached or fresh triage while honoring caller
+// cancellation during runner serialization, subprocess execution, and retry.
+func GetTriageContext(ctx context.Context, dir string) (*TriageResponse, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("triage context is required")
+	}
+	return getTriageContext(ctx, dir, DefaultTimeout)
 }
 
 // GetTriageWithTimeout returns complete triage analysis with a caller-scoped
 // command timeout. Cached results are still reused when valid.
 func GetTriageWithTimeout(dir string, timeout time.Duration) (*TriageResponse, error) {
-	return getTriageWithTimeout(dir, timeout)
+	return getTriageContext(context.Background(), dir, timeout)
 }
 
-func getTriageWithTimeout(dir string, timeout time.Duration) (*TriageResponse, error) {
+func getTriageContext(ctx context.Context, dir string, timeout time.Duration) (*TriageResponse, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("triage context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	normalizedDir, err := normalizeTriageDir(dir)
 	if err != nil {
 		return nil, err
@@ -94,7 +122,7 @@ func getTriageWithTimeout(dir string, timeout time.Duration) (*TriageResponse, e
 	triageCacheMu.RUnlock()
 
 	// Ensure only one runner fetches triage concurrently
-	releaseRunLock, err := acquireTriageRunLock(deadline, timeout)
+	releaseRunLock, err := acquireTriageRunLock(ctx, deadline, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +141,7 @@ func getTriageWithTimeout(dir string, timeout time.Duration) (*TriageResponse, e
 	if remaining <= 0 {
 		return nil, fmt.Errorf("bv timed out after %v", timeout)
 	}
-	output, err := runWithTimeout(normalizedDir, remaining, "--robot-triage")
+	output, err := runWithContextTimeout(ctx, normalizedDir, remaining, "--robot-triage")
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +254,13 @@ func GetTriageTopPicks(dir string, n int) ([]TriageTopPick, error) {
 // unavailable, it degrades to the (capped) triage set so callers never regress
 // below today's behavior; if triage itself fails, the error is returned.
 func GetActionableRecommendations(dir string, n int) ([]TriageRecommendation, error) {
-	triage, err := GetTriage(dir)
+	return GetActionableRecommendationsContext(context.Background(), dir, n)
+}
+
+// GetActionableRecommendationsContext returns the full actionable set while
+// honoring caller cancellation across triage, plan, and label enrichment.
+func GetActionableRecommendationsContext(ctx context.Context, dir string, n int) ([]TriageRecommendation, error) {
+	triage, err := GetTriageContext(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +277,11 @@ func GetActionableRecommendations(dir string, n int) ([]TriageRecommendation, er
 
 	// Best-effort: pull the uncapped actionable plan and append anything triage
 	// didn't already rank. A plan failure is non-fatal — fall back to triage.
-	if plan, planErr := GetPlan(dir); planErr == nil && plan != nil {
+	plan, planErr := GetPlanContext(ctx, dir)
+	if planErr != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if planErr == nil && plan != nil {
 		// bv --robot-plan omits per-item labels (PlanItem carries only
 		// id/title/status/priority/unblocks), yet the assignment classifier
 		// gates operator-gated beads by label. A synthesized rec with empty
@@ -251,7 +289,10 @@ func GetActionableRecommendations(dir string, n int) ([]TriageRecommendation, er
 		// surfaced below triage's top-10 cut, so restore label fidelity from
 		// `br ready` (#197). Best-effort: an empty map degrades to the prior
 		// permissive behavior, never worse.
-		labelsByID := readyBeadLabels(dir)
+		labelsByID, labelsErr := readyBeadLabelsContext(ctx, dir)
+		if labelsErr != nil {
+			return nil, labelsErr
+		}
 		for _, track := range plan.Plan.Tracks {
 			for _, item := range track.Items {
 				if item.ID == "" {
@@ -295,24 +336,29 @@ func GetActionableRecommendations(dir string, n int) ([]TriageRecommendation, er
 // keeps the map complete on br builds whose `ready` default limit is finite
 // (older builds treat --limit 0 as zero rows rather than "unlimited").
 func readyBeadLabels(dir string) map[string][]string {
+	labels, _ := readyBeadLabelsContext(context.Background(), dir)
+	return labels
+}
+
+func readyBeadLabelsContext(ctx context.Context, dir string) (map[string][]string, error) {
 	labels := make(map[string][]string)
-	output, err := RunBd(dir, "ready", "--json", "--limit", "100000")
+	output, err := RunBdContext(ctx, dir, "ready", "--json", "--limit", "100000")
 	if err != nil {
-		return labels
+		return nil, fmt.Errorf("read ready bead labels: %w", err)
 	}
 	items, err := UnmarshalBdList[struct {
 		ID     string   `json:"id"`
 		Labels []string `json:"labels"`
 	}](output)
 	if err != nil {
-		return labels
+		return nil, fmt.Errorf("parse ready bead labels: %w", err)
 	}
 	for _, it := range items {
 		if it.ID != "" && len(it.Labels) > 0 {
 			labels[it.ID] = it.Labels
 		}
 	}
-	return labels
+	return labels, nil
 }
 
 // GetTriageRecommendations returns the top N recommendations

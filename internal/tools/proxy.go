@@ -203,8 +203,11 @@ var (
 	proxyAvailabilityMutex  sync.RWMutex
 	proxyAvailabilityTTL    = 30 * time.Second
 	proxyMinVersion         = Version{Major: 0, Minor: 1, Patch: 0}
-	proxyLogger             = slog.Default().With("component", "tools.proxy")
 )
+
+func proxyLogger() *slog.Logger {
+	return slog.Default().With("component", "tools.proxy")
+}
 
 // GetAvailability returns whether rust_proxy is available and compatible, with caching.
 func (a *ProxyAdapter) GetAvailability(ctx context.Context) (*ProxyAvailability, error) {
@@ -302,7 +305,7 @@ func (a *ProxyAdapter) fetchAvailability(ctx context.Context) *ProxyAvailability
 	path, err := exec.LookPath(a.BinaryName())
 	if err != nil {
 		availability.Error = err.Error()
-		proxyLogger.Debug("rust_proxy binary not found", "error", err)
+		proxyLogger().Debug("rust_proxy binary not found", "error", err)
 		return availability
 	}
 
@@ -312,13 +315,13 @@ func (a *ProxyAdapter) fetchAvailability(ctx context.Context) *ProxyAvailability
 	version, err := a.Version(ctx)
 	if err != nil {
 		availability.Error = err.Error()
-		proxyLogger.Warn("rust_proxy version check failed", "path", path, "error", err)
+		proxyLogger().Warn("rust_proxy version check failed", "path", path, "error", err)
 		return availability
 	}
 
 	availability.Version = version
 	if !proxyCompatible(version) {
-		proxyLogger.Warn("rust_proxy version incompatible", "path", path, "version", version.String(), "min_version", proxyMinVersion.String())
+		proxyLogger().Warn("rust_proxy version incompatible", "path", path, "version", version.String(), "min_version", proxyMinVersion.String())
 		return availability
 	}
 
@@ -326,7 +329,7 @@ func (a *ProxyAdapter) fetchAvailability(ctx context.Context) *ProxyAvailability
 
 	status, err := a.GetStatus(ctx)
 	if err != nil {
-		proxyLogger.Debug("rust_proxy status check failed", "error", err)
+		proxyLogger().Debug("rust_proxy status check failed", "error", err)
 		return availability
 	}
 	if status != nil {

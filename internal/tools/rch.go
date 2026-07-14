@@ -234,8 +234,11 @@ var (
 	rchAvailabilityMutex  sync.RWMutex
 	rchAvailabilityTTL    = 30 * time.Second // Workers may come/go, so shorter TTL than DCG
 	rchMinVersion         = Version{Major: 0, Minor: 1, Patch: 0}
-	rchLogger             = slog.Default().With("component", "tools.rch")
 )
+
+func rchLogger() *slog.Logger {
+	return slog.Default().With("component", "tools.rch")
+}
 
 // GetAvailability returns whether rch is available and compatible, with caching.
 // It also checks worker availability since workers may come and go.
@@ -297,7 +300,7 @@ func (a *RCHAdapter) fetchAvailability(ctx context.Context) *RCHAvailability {
 	path, err := exec.LookPath(a.BinaryName())
 	if err != nil {
 		availability.Error = err.Error()
-		rchLogger.Debug("rch binary not found", "error", err)
+		rchLogger().Debug("rch binary not found", "error", err)
 		return availability
 	}
 
@@ -307,13 +310,13 @@ func (a *RCHAdapter) fetchAvailability(ctx context.Context) *RCHAvailability {
 	version, err := a.Version(ctx)
 	if err != nil {
 		availability.Error = err.Error()
-		rchLogger.Warn("rch version check failed", "path", path, "error", err)
+		rchLogger().Warn("rch version check failed", "path", path, "error", err)
 		return availability
 	}
 
 	availability.Version = version
 	if !rchCompatible(version) {
-		rchLogger.Warn("rch version incompatible", "path", path, "version", version.String(), "min_version", rchMinVersion.String())
+		rchLogger().Warn("rch version incompatible", "path", path, "version", version.String(), "min_version", rchMinVersion.String())
 		return availability
 	}
 
@@ -547,7 +550,7 @@ func (a *RCHAdapter) SelectWorker(ctx context.Context, preferred string) (*RCHWo
 			}
 		}
 		// Preferred worker not available, fall through to auto selection
-		rchLogger.Debug("preferred worker not available", "preferred", preferred)
+		rchLogger().Debug("preferred worker not available", "preferred", preferred)
 	}
 
 	// Auto-select: find the healthiest worker with lowest load

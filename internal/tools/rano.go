@@ -186,8 +186,11 @@ var (
 	ranoAvailabilityMutex  sync.RWMutex
 	ranoAvailabilityTTL    = 2 * time.Minute // Shorter TTL since permissions may change
 	ranoMinVersion         = Version{Major: 0, Minor: 1, Patch: 0}
-	ranoLogger             = slog.Default().With("component", "tools.rano")
 )
+
+func ranoLogger() *slog.Logger {
+	return slog.Default().With("component", "tools.rano")
+}
 
 // GetAvailability returns whether rano is available and compatible, with caching.
 func (a *RanoAdapter) GetAvailability(ctx context.Context) (*RanoAvailability, error) {
@@ -248,7 +251,7 @@ func (a *RanoAdapter) fetchAvailability(ctx context.Context) *RanoAvailability {
 	path, err := exec.LookPath(a.BinaryName())
 	if err != nil {
 		availability.Error = err.Error()
-		ranoLogger.Debug("rano binary not found", "error", err)
+		ranoLogger().Debug("rano binary not found", "error", err)
 		return availability
 	}
 
@@ -258,13 +261,13 @@ func (a *RanoAdapter) fetchAvailability(ctx context.Context) *RanoAvailability {
 	version, err := a.Version(ctx)
 	if err != nil {
 		availability.Error = err.Error()
-		ranoLogger.Warn("rano version check failed", "path", path, "error", err)
+		ranoLogger().Warn("rano version check failed", "path", path, "error", err)
 		return availability
 	}
 
 	availability.Version = version
 	if !ranoCompatible(version) {
-		ranoLogger.Warn("rano version incompatible", "path", path, "version", version.String(), "min_version", ranoMinVersion.String())
+		ranoLogger().Warn("rano version incompatible", "path", path, "version", version.String(), "min_version", ranoMinVersion.String())
 		return availability
 	}
 
@@ -279,7 +282,7 @@ func (a *RanoAdapter) fetchAvailability(ctx context.Context) *RanoAvailability {
 	availability.CanReadProc = a.checkProcAccess()
 
 	if !availability.HasCapability {
-		ranoLogger.Warn("rano status check failed", "path", path)
+		ranoLogger().Warn("rano status check failed", "path", path)
 	}
 
 	return availability
@@ -317,10 +320,10 @@ func (a *RanoAdapter) checkOperational(ctx context.Context) bool {
 			strings.Contains(errStr, "CAP_NET") ||
 			strings.Contains(errStr, "Operation not permitted") ||
 			strings.Contains(errStr, "EPERM") {
-			ranoLogger.Debug("rano status blocked by permissions", "stderr", errStr)
+			ranoLogger().Debug("rano status blocked by permissions", "stderr", errStr)
 			return false
 		}
-		ranoLogger.Debug("rano status check failed", "error", err, "stderr", errStr)
+		ranoLogger().Debug("rano status check failed", "error", err, "stderr", errStr)
 		return false
 	}
 

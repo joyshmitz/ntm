@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -318,16 +319,20 @@ func TestE2ERobotCapabilitiesBuiltBinaryBudgets(t *testing.T) {
 	}
 
 	type capabilityCommand struct {
-		Name string `json:"name"`
-		Flag string `json:"flag"`
+		Name     string `json:"name"`
+		Flag     string `json:"flag"`
+		Category string `json:"category"`
 	}
 	type capabilityEnvelope struct {
 		Success      bool                `json:"success"`
 		OutputFormat string              `json:"output_format"`
 		Commands     []capabilityCommand `json:"commands"`
+		Categories   []string            `json:"categories"`
 		Filter       *struct {
-			Command string `json:"command,omitempty"`
-			Compact bool   `json:"compact,omitempty"`
+			Command  string `json:"command,omitempty"`
+			Category string `json:"category,omitempty"`
+			Query    string `json:"query,omitempty"`
+			Compact  bool   `json:"compact,omitempty"`
 		} `json:"filter,omitempty"`
 	}
 	run := func(t *testing.T, maxBytes int, args ...string) capabilityEnvelope {
@@ -364,10 +369,38 @@ func TestE2ERobotCapabilitiesBuiltBinaryBudgets(t *testing.T) {
 		t.Logf("[E2E-CAPABILITIES] args=%q bytes=%d commands=%d", args, len(payload), len(envelope.Commands))
 		return envelope
 	}
+	assertInvalidFilter := func(t *testing.T, args ...string) {
+		t.Helper()
+		process := runBuiltRobotProcess(t, ntmPath, "", nil, args...)
+		if process.exitCode != 1 {
+			t.Fatalf("ntm %q exit=%d, want 1; stdout=%s stderr=%s", args, process.exitCode, process.stdout, process.stderr)
+		}
+		if len(process.stderr) != 0 {
+			t.Fatalf("ntm %q wrote stderr: %s", args, process.stderr)
+		}
+		var envelope struct {
+			Success      *bool  `json:"success"`
+			Timestamp    string `json:"timestamp"`
+			OutputFormat string `json:"output_format"`
+			Error        string `json:"error"`
+			ErrorCode    string `json:"error_code"`
+			Hint         string `json:"hint"`
+		}
+		decodeSingleRobotJSON(t, process.stdout, &envelope)
+		if envelope.Success == nil || *envelope.Success || envelope.ErrorCode != "INVALID_FLAG" ||
+			envelope.Error == "" || envelope.Hint == "" || envelope.OutputFormat != "json" {
+			t.Fatalf("ntm %q invalid capability filter envelope = %+v", args, envelope)
+		}
+		if _, err := time.Parse(time.RFC3339, envelope.Timestamp); err != nil {
+			t.Fatalf("ntm %q timestamp %q is not RFC3339: %v", args, envelope.Timestamp, err)
+		}
+	}
 
 	full := run(t, 400_000, "--robot-capabilities", "--robot-format=json")
 	compact := run(t, 50_000, "--robot-capabilities", "--capability-compact")
 	exact := run(t, 4_000, "--robot-capabilities", "--capability-command=send", "--capability-compact")
+	search := run(t, 50_000, "--robot-capabilities", "--capability-search=interrupt", "--capability-compact")
+	category := run(t, 50_000, "--robot-capabilities", "--capability-category=control", "--capability-compact")
 
 	if len(full.Commands) == 0 || len(compact.Commands) != len(full.Commands) {
 		t.Fatalf("capability command counts full=%d compact=%d", len(full.Commands), len(compact.Commands))
@@ -379,6 +412,29 @@ func TestE2ERobotCapabilitiesBuiltBinaryBudgets(t *testing.T) {
 	if compact.OutputFormat != "json" || exact.OutputFormat != "json" {
 		t.Fatalf("auto compact capability formats compact=%q exact=%q, want json", compact.OutputFormat, exact.OutputFormat)
 	}
+	interruptFound := false
+	for _, command := range search.Commands {
+		if command.Name == "interrupt" && command.Flag == "--robot-interrupt" && command.Category == "control" {
+			interruptFound = true
+			break
+		}
+	}
+	if search.Filter == nil || search.Filter.Query != "interrupt" || !search.Filter.Compact ||
+		len(search.Commands) == 0 || len(search.Commands) >= len(compact.Commands) || !interruptFound {
+		t.Fatalf("compact capability search projection = %+v", search)
+	}
+	if category.Filter == nil || category.Filter.Category != "control" || !category.Filter.Compact ||
+		len(category.Commands) == 0 || len(category.Commands) >= len(compact.Commands) ||
+		len(category.Categories) != 1 || category.Categories[0] != "control" {
+		t.Fatalf("compact capability category projection = %+v", category)
+	}
+	for _, command := range category.Commands {
+		if command.Category != "control" {
+			t.Fatalf("compact control projection included command %+v", command)
+		}
+	}
+	assertInvalidFilter(t, "--robot-capabilities", "--capability-command=not-a-command", "--capability-compact")
+	assertInvalidFilter(t, "--robot-capabilities", "--capability-category=not-a-category", "--capability-compact")
 }
 
 func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {
@@ -396,10 +452,31 @@ func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {
 		if process.exitCode != wantExit {
 			t.Fatalf("exit=%d, want %d; stdout=%s stderr=%s", process.exitCode, wantExit, process.stdout, process.stderr)
 		}
+		if len(process.stderr) != 0 {
+			t.Fatalf("stderr=%q, want empty canonical robot boundary", process.stderr)
+		}
 		var envelope terminalEnvelope
 		decodeSingleRobotJSON(t, process.stdout, &envelope)
 		if envelope.Success || envelope.ErrorCode != wantCode || envelope.OutputFormat != "json" {
 			t.Fatalf("terminal envelope = %+v, want %s canonical JSON failure", envelope, wantCode)
+		}
+		if _, err := time.Parse(time.RFC3339, envelope.Timestamp); err != nil {
+			t.Fatalf("terminal timestamp %q is not RFC3339: %v", envelope.Timestamp, err)
+		}
+		return envelope
+	}
+	assertSuccess := func(t *testing.T, process robotBoundaryProcessResult) terminalEnvelope {
+		t.Helper()
+		if process.exitCode != 0 {
+			t.Fatalf("exit=%d, want 0; stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+		}
+		if len(process.stderr) != 0 {
+			t.Fatalf("stderr=%q, want empty canonical robot boundary", process.stderr)
+		}
+		var envelope terminalEnvelope
+		decodeSingleRobotJSON(t, process.stdout, &envelope)
+		if !envelope.Success || envelope.ErrorCode != "" || envelope.OutputFormat != "json" {
+			t.Fatalf("terminal envelope = %+v, want canonical JSON success", envelope)
 		}
 		if _, err := time.Parse(time.RFC3339, envelope.Timestamp); err != nil {
 			t.Fatalf("terminal timestamp %q is not RFC3339: %v", envelope.Timestamp, err)
@@ -414,14 +491,21 @@ func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {
 	t.Run("markdown_validation_under_toon", func(t *testing.T) {
 		process := run(t, fixture.env,
 			"--robot-markdown",
-			"--md-sections=not-a-section",
+			"--sections=not-a-section",
 			"--robot-format=toon",
 		)
 		assertFailure(t, process, 1, "INTERNAL_ERROR")
 	})
 
-	t.Run("terse_dependency_failure_under_toon", func(t *testing.T) {
-		env := mergeRobotProcessEnv(fixture.env, map[string]string{"PATH": "/nonexistent"})
+	t.Run("terse_pre_dispatch_format_failure", func(t *testing.T) {
+		process := run(t, fixture.env, "--robot-terse", "--robot-format=invalid")
+		assertFailure(t, process, 1, "INVALID_FLAG")
+	})
+
+	t.Run("terse_runtime_dependency_failure_under_toon", func(t *testing.T) {
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY": filepath.Join(fixture.root, "missing-bin", "tmux"),
+		})
 		process := run(t, env, "--robot-terse", "--robot-format=toon")
 		assertFailure(t, process, 1, "DEPENDENCY_MISSING")
 	})
@@ -429,8 +513,17 @@ func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {
 	t.Run("save_write_failure_under_toon", func(t *testing.T) {
 		process := run(t, fixture.env,
 			"--robot-save="+fixture.session,
-			"--save-output="+fixture.root,
+			"--output="+fixture.root,
 			"--robot-format=toon",
+		)
+		assertFailure(t, process, 1, "INTERNAL_ERROR")
+	})
+
+	t.Run("deprecated_save_output_does_not_pollute_stderr", func(t *testing.T) {
+		process := run(t, fixture.env,
+			"--robot-save="+fixture.session,
+			"--save-output="+fixture.root,
+			"--robot-format=json",
 		)
 		assertFailure(t, process, 1, "INTERNAL_ERROR")
 	})
@@ -493,6 +586,1090 @@ func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {
 			"--robot-format=toon",
 		)
 		assertFailure(t, process, 1, "TIMEOUT")
+	})
+
+	t.Run("invalid_project_overlay_warning_is_suppressed", func(t *testing.T) {
+		projectDir := filepath.Join(fixture.root, "invalid-project-overlay")
+		configDir := filepath.Join(projectDir, ".ntm")
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
+			t.Fatalf("create invalid project config directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("[invalid\n"), 0o600); err != nil {
+			t.Fatalf("write invalid project config: %v", err)
+		}
+		process := runBuiltRobotProcess(t, fixture.ntmPath, projectDir, fixture.env,
+			"--robot-status",
+			"--robot-format=json",
+		)
+		assertSuccess(t, process)
+	})
+
+	t.Run("verbose_startup_cleanup_warning_is_suppressed", func(t *testing.T) {
+		configPath := filepath.Join(fixture.root, "verbose-cleanup.toml")
+		configBody := "[cleanup]\nauto_clean_on_startup = true\nmax_age_hours = 0\nverbose = true\n"
+		if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+			t.Fatalf("write verbose cleanup config: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"TMPDIR": filepath.Join(fixture.root, "missing-temp-root"),
+		})
+		process := run(t, env,
+			"--config="+configPath,
+			"--robot-status",
+			"--robot-format=json",
+		)
+		assertSuccess(t, process)
+	})
+
+	t.Run("encryption_key_failure_is_one_error_envelope", func(t *testing.T) {
+		configPath := filepath.Join(fixture.root, "missing-encryption-key.toml")
+		configBody := "[encryption]\nenabled = true\nkey_source = \"env\"\nkey_env = \"NTM_E2E_MISSING_ENCRYPTION_KEY\"\nkey_format = \"hex\"\n"
+		if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+			t.Fatalf("write encryption config: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_E2E_MISSING_ENCRYPTION_KEY": "",
+		})
+		process := run(t, env,
+			"--config="+configPath,
+			"--robot-status",
+			"--robot-format=json",
+		)
+		assertFailure(t, process, 1, "INTERNAL_ERROR")
+	})
+
+	t.Run("encryption_keyring_failure_is_one_error_envelope", func(t *testing.T) {
+		configPath := filepath.Join(fixture.root, "invalid-encryption-keyring.toml")
+		configBody := "[encryption]\nenabled = true\nkey_source = \"env\"\nkey_env = \"NTM_E2E_ENCRYPTION_KEY\"\nkey_format = \"hex\"\nactive_key_id = \"current\"\n[encryption.keyring]\ncurrent = \"not-hex\"\n"
+		if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+			t.Fatalf("write invalid encryption keyring config: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_E2E_ENCRYPTION_KEY": strings.Repeat("00", 32),
+		})
+		process := run(t, env,
+			"--config="+configPath,
+			"--robot-status",
+			"--robot-format=json",
+		)
+		assertFailure(t, process, 1, "INTERNAL_ERROR")
+	})
+
+	t.Run("startup_profile_does_not_append_a_second_document", func(t *testing.T) {
+		process := run(t, fixture.env,
+			"--profile-startup",
+			"--robot-status",
+			"--robot-format=json",
+		)
+		assertSuccess(t, process)
+	})
+}
+
+func TestE2ERobotAssignTerminalContractsBuiltBinary(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "assign-terminal")
+
+	type assignEnvelope struct {
+		Success         bool             `json:"success"`
+		Timestamp       string           `json:"timestamp"`
+		OutputFormat    string           `json:"output_format"`
+		Error           string           `json:"error"`
+		ErrorCode       string           `json:"error_code"`
+		Recommendations []map[string]any `json:"recommendations"`
+		BlockedBeads    []map[string]any `json:"blocked_beads"`
+		IdleAgents      []string         `json:"idle_agents"`
+	}
+	assertAssignFailure := func(t *testing.T, process robotBoundaryProcessResult, wantCode string) assignEnvelope {
+		t.Helper()
+		if process.exitCode != 1 {
+			t.Fatalf("exit=%d, want 1; stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+		}
+		if len(bytes.TrimSpace(process.stderr)) != 0 {
+			t.Fatalf("stderr=%q, want empty canonical robot boundary", process.stderr)
+		}
+		var envelope assignEnvelope
+		decodeSingleRobotJSON(t, process.stdout, &envelope)
+		if envelope.Success || envelope.ErrorCode != wantCode || envelope.Error == "" || envelope.OutputFormat != "json" {
+			t.Fatalf("assign envelope=%+v, want %s canonical JSON failure", envelope, wantCode)
+		}
+		if envelope.Recommendations == nil || envelope.BlockedBeads == nil || envelope.IdleAgents == nil {
+			t.Fatalf("assign failure lost required arrays: %+v", envelope)
+		}
+		if _, err := time.Parse(time.RFC3339, envelope.Timestamp); err != nil {
+			t.Fatalf("terminal timestamp %q is not RFC3339: %v", envelope.Timestamp, err)
+		}
+		return envelope
+	}
+	writeTmuxGuard := func(t *testing.T, name string) (string, string, string) {
+		t.Helper()
+		wrapperPath := filepath.Join(fixture.root, "tmux-"+name)
+		actuationLog := filepath.Join(fixture.root, name+"-tmux-actuation.log")
+		hasSessionLog := filepath.Join(fixture.root, name+"-tmux-has-session.log")
+		wrapper := `#!/bin/sh
+command=${1:-}
+target=
+previous=
+for argument in "$@"; do
+    if [ "$previous" = "-t" ]; then
+        target=$argument
+    fi
+    previous=$argument
+done
+
+case "$command" in
+    new-session|kill-session|kill-pane|split-window|join-pane|break-pane|respawn-pane|send-keys|select-layout|select-pane|move-window|link-window|unlink-window|rename-session|rename-window|set-option|set-window-option)
+        printf '%s\n' "$*" >> "$NTM_E2E_TMUX_ACTUATION_LOG"
+        ;;
+esac
+
+if [ "$command" = "has-session" ] && [ "$target" = "$NTM_E2E_TARGET_SESSION" ] && [ -n "${NTM_E2E_HAS_SESSION_EXIT:-}" ]; then
+    printf '%s\n' "$*" >> "$NTM_E2E_HAS_SESSION_LOG"
+    exit "$NTM_E2E_HAS_SESSION_EXIT"
+fi
+
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+		if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o700); err != nil {
+			t.Fatalf("write %s tmux guard: %v", name, err)
+		}
+		return wrapperPath, actuationLog, hasSessionLog
+	}
+	assertFileAbsent := func(t *testing.T, path, description string) {
+		t.Helper()
+		if data, err := os.ReadFile(path); err == nil {
+			t.Fatalf("%s unexpectedly recorded work: %s", description, data)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read %s: %v", path, err)
+		}
+	}
+
+	t.Run("SIGINT_cancels_blocked_ready_scan_once", func(t *testing.T) {
+		fakeBin := filepath.Join(fixture.root, "cancel-bin")
+		if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+			t.Fatalf("create cancellation fake bin: %v", err)
+		}
+		brStarted := filepath.Join(fixture.root, "cancel-br-started")
+		brCalls := filepath.Join(fixture.root, "cancel-br-calls.log")
+		brPath := filepath.Join(fakeBin, "br")
+		brScript := `#!/bin/sh
+if [ "${1:-}" = "--lock-timeout" ]; then
+    shift 2
+fi
+printf '%s\n' "$*" >> "$NTM_E2E_BR_CALLS"
+case "${1:-}" in
+    ready)
+        printf 'ready-started\n' > "$NTM_E2E_BR_STARTED"
+        exec sleep 30
+        ;;
+    *)
+        printf '[]\n'
+        ;;
+esac
+`
+		if err := os.WriteFile(brPath, []byte(brScript), 0o700); err != nil {
+			t.Fatalf("write blocking br: %v", err)
+		}
+		tmuxWrapper, actuationLog, _ := writeTmuxGuard(t, "cancel")
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"PATH":                       fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"NTM_TMUX_BINARY":            tmuxWrapper,
+			"NTM_E2E_REAL_TMUX":          fixture.tmuxPath,
+			"NTM_E2E_TARGET_SESSION":     fixture.session,
+			"NTM_E2E_TMUX_ACTUATION_LOG": actuationLog,
+			"NTM_E2E_HAS_SESSION_LOG":    filepath.Join(fixture.root, "cancel-unused-has-session.log"),
+			"NTM_E2E_HAS_SESSION_EXIT":   "",
+			"NTM_E2E_BR_STARTED":         brStarted,
+			"NTM_E2E_BR_CALLS":           brCalls,
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, fixture.ntmPath,
+			"--robot-format=json",
+			"--robot-assign="+fixture.session,
+			"--strategy=balanced",
+		)
+		cmd.Dir = fixture.projectDir
+		cmd.Env = append([]string(nil), env...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start cancelable robot assign: %v", err)
+		}
+		waitCh := make(chan error, 1)
+		go func() {
+			waitCh <- cmd.Wait()
+		}()
+		startedDeadline := time.Now().Add(20 * time.Second)
+		for {
+			data, readErr := os.ReadFile(brStarted)
+			if readErr == nil && strings.Contains(string(data), "ready-started") {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				cancel()
+				<-waitCh
+				t.Fatalf("read blocked-ready marker: %v", readErr)
+			}
+			select {
+			case earlyErr := <-waitCh:
+				t.Fatalf("robot assign exited before blocked ready scan: %v stdout=%s stderr=%s", earlyErr, stdout.String(), stderr.String())
+			default:
+			}
+			if time.Now().After(startedDeadline) {
+				cancel()
+				<-waitCh
+				t.Fatalf("timed out waiting for robot assign ready scan: stdout=%s stderr=%s", stdout.String(), stderr.String())
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			cancel()
+			<-waitCh
+			t.Fatalf("signal robot assign: %v", err)
+		}
+		var err error
+		select {
+		case err = <-waitCh:
+		case <-ctx.Done():
+			err = <-waitCh
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("robot assign did not join after SIGINT: %v stdout=%s stderr=%s", ctx.Err(), stdout.String(), stderr.String())
+		}
+		if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
+			t.Fatalf("robot assign process was not joined: state=%v", cmd.ProcessState)
+		}
+		exitCode := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("wait for canceled robot assign: %v", err)
+			}
+			exitCode = exitErr.ExitCode()
+		}
+		process := robotBoundaryProcessResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), exitCode: exitCode}
+		assertAssignFailure(t, process, "TIMEOUT")
+
+		callsBefore, err := os.ReadFile(brCalls)
+		if err != nil {
+			t.Fatalf("read cancellation br calls: %v", err)
+		}
+		readyCalls := 0
+		for _, call := range strings.Split(strings.TrimSpace(string(callsBefore)), "\n") {
+			if strings.HasPrefix(call, "ready ") {
+				readyCalls++
+			}
+		}
+		if readyCalls != 1 {
+			t.Fatalf("br calls=%q, want exactly one blocked ready scan", callsBefore)
+		}
+		assertFileAbsent(t, actuationLog, "canceled robot assign tmux actuation")
+		time.Sleep(750 * time.Millisecond)
+		callsAfter, err := os.ReadFile(brCalls)
+		if err != nil {
+			t.Fatalf("read late cancellation br calls: %v", err)
+		}
+		if !bytes.Equal(callsAfter, callsBefore) {
+			t.Fatalf("late br work appeared after joined cancellation: before=%q after=%q", callsBefore, callsAfter)
+		}
+		assertFileAbsent(t, actuationLog, "late canceled robot assign tmux actuation")
+	})
+
+	for _, exitCode := range []int{2, 255} {
+		t.Run(fmt.Sprintf("has_session_exit_%d_is_internal_error", exitCode), func(t *testing.T) {
+			name := fmt.Sprintf("has-session-%d", exitCode)
+			fakeBin := filepath.Join(fixture.root, name+"-bin")
+			if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+				t.Fatalf("create %s fake bin: %v", name, err)
+			}
+			brCalls := filepath.Join(fixture.root, name+"-br-calls.log")
+			brScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$NTM_E2E_BR_CALLS\"\nprintf '[]\\n'\n"
+			if err := os.WriteFile(filepath.Join(fakeBin, "br"), []byte(brScript), 0o700); err != nil {
+				t.Fatalf("write %s br guard: %v", name, err)
+			}
+			tmuxWrapper, actuationLog, hasSessionLog := writeTmuxGuard(t, name)
+			env := mergeRobotProcessEnv(fixture.env, map[string]string{
+				"PATH":                       fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"NTM_TMUX_BINARY":            tmuxWrapper,
+				"NTM_E2E_REAL_TMUX":          fixture.tmuxPath,
+				"NTM_E2E_TARGET_SESSION":     fixture.session,
+				"NTM_E2E_TMUX_ACTUATION_LOG": actuationLog,
+				"NTM_E2E_HAS_SESSION_LOG":    hasSessionLog,
+				"NTM_E2E_HAS_SESSION_EXIT":   fmt.Sprintf("%d", exitCode),
+				"NTM_E2E_BR_CALLS":           brCalls,
+			})
+			process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env,
+				"--robot-format=json",
+				"--robot-assign="+fixture.session,
+				"--strategy=balanced",
+			)
+			envelope := assertAssignFailure(t, process, "INTERNAL_ERROR")
+			if strings.Contains(strings.ToUpper(envelope.Error), "SESSION_NOT_FOUND") {
+				t.Fatalf("has-session exit %d was collapsed to session absence: %+v", exitCode, envelope)
+			}
+			hasSessionCalls, err := os.ReadFile(hasSessionLog)
+			if err != nil {
+				t.Fatalf("read injected has-session calls: %v", err)
+			}
+			if strings.Count(strings.TrimSpace(string(hasSessionCalls)), "\n") != 0 || !strings.Contains(string(hasSessionCalls), "has-session") {
+				t.Fatalf("injected has-session calls=%q, want exactly one", hasSessionCalls)
+			}
+			assertFileAbsent(t, actuationLog, fmt.Sprintf("has-session exit %d tmux actuation", exitCode))
+			if data, err := os.ReadFile(brCalls); err == nil {
+				for _, mutation := range []string{"update ", "close ", "claim ", "create ", "dep ", "sync "} {
+					if strings.Contains(string(data), mutation) {
+						t.Fatalf("has-session exit %d triggered br mutation %q: %s", exitCode, mutation, data)
+					}
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("read has-session br calls: %v", err)
+			}
+			time.Sleep(250 * time.Millisecond)
+			assertFileAbsent(t, actuationLog, fmt.Sprintf("late has-session exit %d tmux actuation", exitCode))
+		})
+	}
+}
+
+func TestE2EJSONCommandTerminalContractsBuiltBinary(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "json-command-terminal")
+
+	type failureEnvelope struct {
+		Success *bool  `json:"success"`
+		Error   string `json:"error"`
+	}
+	assertOneFailure := func(t *testing.T, process robotBoundaryProcessResult) failureEnvelope {
+		t.Helper()
+		if process.exitCode == 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+			t.Fatalf("terminal failure exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+		}
+		var envelope failureEnvelope
+		decodeSingleRobotJSON(t, process.stdout, &envelope)
+		if envelope.Success == nil || *envelope.Success || strings.TrimSpace(envelope.Error) == "" {
+			t.Fatalf("terminal failure envelope = %+v", envelope)
+		}
+		return envelope
+	}
+	runFailure := func(t *testing.T, dir string, env []string, args ...string) failureEnvelope {
+		t.Helper()
+		return assertOneFailure(t, runBuiltRobotProcess(t, fixture.ntmPath, dir, env, args...))
+	}
+
+	t.Run("legacy_json_failure_surfaces_are_one_document", func(t *testing.T) {
+		invalidPipeline := filepath.Join(fixture.root, "invalid-pipeline.yaml")
+		if err := os.WriteFile(invalidPipeline, []byte("name: invalid\nsteps: [\n"), 0o600); err != nil {
+			t.Fatalf("write invalid pipeline: %v", err)
+		}
+		invalidPolicy := filepath.Join(fixture.root, "invalid-policy.yaml")
+		if err := os.WriteFile(invalidPolicy, []byte("rules: [\n"), 0o600); err != nil {
+			t.Fatalf("write invalid policy: %v", err)
+		}
+
+		cases := []struct {
+			name string
+			args []string
+		}{
+			{name: "pipeline_lint", args: []string{"--json", "pipeline", "lint", invalidPipeline}},
+			{name: "persona_show", args: []string{"--json", "personas", "show", "missing-terminal-persona"}},
+			{name: "checkpoint_restore", args: []string{"--json", "checkpoint", "restore", fixture.session, "missing-terminal-checkpoint", "--dry-run"}},
+			{name: "approval", args: []string{"approve", "missing-terminal-approval", "--json"}},
+			{name: "session_template_show", args: []string{"--json", "session-templates", "show", "missing-terminal-template"}},
+			{name: "workflow_show", args: []string{"--json", "workflows", "show", "missing-terminal-workflow"}},
+			{name: "recipe_show", args: []string{"--json", "recipes", "show", "missing-terminal-recipe"}},
+			{name: "hooks_status", args: []string{"--json", "hooks", "status"}},
+			{name: "policy_validate", args: []string{"--json", "policy", "validate", invalidPolicy}},
+			{name: "health_missing_session", args: []string{"--json", "health", fixture.session + "-missing"}},
+		}
+		for _, test := range cases {
+			t.Run(test.name, func(t *testing.T) {
+				runFailure(t, fixture.projectDir, fixture.env, test.args...)
+			})
+		}
+	})
+
+	t.Run("strict_preflight_failure_is_one_document", func(t *testing.T) {
+		runFailure(t, fixture.projectDir, fixture.env,
+			"preflight", "Run rm -rf /tmp/important to clean cache", "--strict", "--json",
+		)
+	})
+
+	t.Run("config_validation_failure_is_one_document", func(t *testing.T) {
+		projectDir := filepath.Join(fixture.root, "invalid-config-project")
+		ntmDir := filepath.Join(projectDir, ".ntm")
+		if err := os.MkdirAll(ntmDir, 0o700); err != nil {
+			t.Fatalf("create invalid config project: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(ntmDir, "config.toml"), []byte("[invalid\n"), 0o600); err != nil {
+			t.Fatalf("write invalid project config: %v", err)
+		}
+		runFailure(t, projectDir, fixture.env, "--json", "config", "validate")
+	})
+
+	t.Run("checkpoint_verification_failures_are_one_document", func(t *testing.T) {
+		checkpointID := "terminal-invalid-checkpoint"
+		checkpointDir := filepath.Join(
+			fixture.root, "home", ".local", "share", "ntm", "checkpoints", fixture.session, checkpointID,
+		)
+		if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
+			t.Fatalf("create invalid checkpoint: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(checkpointDir, "metadata.json"), []byte("{\n"), 0o600); err != nil {
+			t.Fatalf("write invalid checkpoint metadata: %v", err)
+		}
+		runFailure(t, fixture.projectDir, fixture.env,
+			"--json", "checkpoint", "verify", fixture.session, checkpointID,
+		)
+		runFailure(t, fixture.projectDir, fixture.env,
+			"--json", "checkpoint", "verify", fixture.session, "--all",
+		)
+	})
+
+	t.Run("missing_optional_tools_are_terminal_failures", func(t *testing.T) {
+		emptyPath := filepath.Join(fixture.root, "empty-path")
+		if err := os.MkdirAll(emptyPath, 0o700); err != nil {
+			t.Fatalf("create empty PATH: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{"PATH": emptyPath})
+		for _, test := range []struct {
+			name string
+			args []string
+		}{
+			{name: "deps_without_tmux", args: []string{"--json", "deps"}},
+			{name: "scan_without_ubs", args: []string{"--json", "scan", fixture.projectDir}},
+			{name: "bugs_without_ubs", args: []string{"--json", "bugs", "list", fixture.projectDir}},
+			{name: "cass_status_without_cass", args: []string{"--json", "cass", "status"}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env, test.args...)
+				assertOneFailure(t, process)
+				if test.name == "cass_status_without_cass" && process.exitCode != 2 {
+					t.Fatalf("CASS unavailable exit=%d, want 2", process.exitCode)
+				}
+			})
+		}
+	})
+
+	t.Run("scan_severity_matches_process_status", func(t *testing.T) {
+		fakeBin := filepath.Join(fixture.root, "fake-ubs-bin")
+		if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+			t.Fatalf("create fake UBS bin: %v", err)
+		}
+		ubsPath := filepath.Join(fakeBin, "ubs")
+		writeUBS := func(t *testing.T, critical, warning int) {
+			t.Helper()
+			payload := fmt.Sprintf(`{"project":%q,"timestamp":"2026-07-13T00:00:00Z","scanners":[],"totals":{"critical":%d,"warning":%d,"info":0,"files":1},"findings":[],"exit_code":0}`+"\n", fixture.projectDir, critical, warning)
+			script := "#!/bin/sh\nprintf '%s\\n' '" + strings.TrimSpace(payload) + "'\n"
+			if err := os.WriteFile(ubsPath, []byte(script), 0o700); err != nil {
+				t.Fatalf("write fake UBS: %v", err)
+			}
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"PATH": fakeBin + string(os.PathListSeparator) + "/usr/bin:/bin",
+		})
+
+		writeUBS(t, 0, 1)
+		assertOneFailure(t, runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env,
+			"--json", "scan", fixture.projectDir, "--fail-on-warning",
+		))
+
+		writeUBS(t, 1, 0)
+		assertOneFailure(t, runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env,
+			"--json", "scan", fixture.projectDir,
+		))
+
+		writeUBS(t, 0, 0)
+		process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env,
+			"--json", "scan", fixture.projectDir,
+		)
+		if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+			t.Fatalf("clean scan exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+		}
+		var clean map[string]any
+		decodeSingleRobotJSON(t, process.stdout, &clean)
+
+		findingPayload := fmt.Sprintf(`{"project":%q,"timestamp":"2026-07-13T00:00:00Z","scanners":[],"totals":{"critical":0,"warning":1,"info":0,"files":1},"findings":[{"file":"terminal.go","line":1,"column":1,"severity":"warning","category":"test","message":"fixture finding","rule_id":"terminal-fixture"}],"exit_code":0}`+"\n", fixture.projectDir)
+		findingScript := "#!/bin/sh\nprintf '%s\\n' '" + strings.TrimSpace(findingPayload) + "'\n"
+		if err := os.WriteFile(ubsPath, []byte(findingScript), 0o700); err != nil {
+			t.Fatalf("write integration-failure UBS: %v", err)
+		}
+		assertOneFailure(t, runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env,
+			"--json", "scan", fixture.projectDir, "--create-beads",
+		))
+	})
+
+	t.Run("git_sync_failures_are_terminal", func(t *testing.T) {
+		runFailure(t, fixture.projectDir, fixture.env, "--json", "git", "sync")
+
+		repoDir := filepath.Join(fixture.root, "repo-without-upstream")
+		if err := os.MkdirAll(repoDir, 0o700); err != nil {
+			t.Fatalf("create git fixture: %v", err)
+		}
+		initCmd := exec.Command("git", "init", "-b", "main")
+		initCmd.Dir = repoDir
+		if output, err := initCmd.CombinedOutput(); err != nil {
+			t.Fatalf("init git fixture: %v: %s", err, output)
+		}
+		commitCmd := exec.Command("git", "-c", "user.name=NTM E2E", "-c", "user.email=ntm-e2e@example.invalid", "commit", "--allow-empty", "-m", "fixture")
+		commitCmd.Dir = repoDir
+		if output, err := commitCmd.CombinedOutput(); err != nil {
+			t.Fatalf("commit git fixture: %v: %s", err, output)
+		}
+		runFailure(t, repoDir, fixture.env, "--json", "git", "sync")
+	})
+
+	t.Run("audit_verify_corruption_is_one_aggregate_document", func(t *testing.T) {
+		session := "terminal-audit"
+		auditDir := filepath.Join(fixture.root, "home", ".local", "share", "ntm", "audit")
+		if err := os.MkdirAll(auditDir, 0o700); err != nil {
+			t.Fatalf("create audit directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(auditDir, session+"-2026-07-13.jsonl"), []byte("not-json\n"), 0o600); err != nil {
+			t.Fatalf("write corrupt audit log: %v", err)
+		}
+		runFailure(t, fixture.projectDir, fixture.env, "--json", "audit", "verify", session)
+	})
+
+	t.Run("local_format_json_is_machine_terminal", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"ensemble", "compare", "missing-run-a", "missing-run-b", "--format=json"},
+			{"ensemble", "compare", "missing-run-a", "missing-run-b", "--format", "json"},
+			{"ensemble", "compare", "missing-run-a", "missing-run-b", "-f=json"},
+			{"ensemble", "compare", "missing-run-a", "missing-run-b", "-f", "json"},
+		} {
+			runFailure(t, fixture.projectDir, fixture.env, args...)
+		}
+
+		configDir := filepath.Join(fixture.root, "presets-config")
+		if err := os.MkdirAll(filepath.Join(configDir, "ntm"), 0o700); err != nil {
+			t.Fatalf("create presets config directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "ntm", "ensembles.toml"), []byte("presets = [\n"), 0o600); err != nil {
+			t.Fatalf("write malformed ensemble registry: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{"XDG_CONFIG_HOME": configDir})
+		runFailure(t, fixture.projectDir, env, "ensemble", "presets", "--format=json")
+	})
+
+	t.Run("profile_parse_error_is_one_document", func(t *testing.T) {
+		process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env,
+			"profiles", "switch", "not-an-agent-id", "reviewer", "--json",
+		)
+		assertOneFailure(t, process)
+	})
+
+	failingTMUX := filepath.Join(fixture.root, "tmux-terminal-failure")
+	failingScript := `#!/bin/sh
+if [ "${1:-}" = "-V" ]; then
+    printf 'tmux 3.4\n'
+    exit 0
+fi
+exit 64
+`
+	if err := os.WriteFile(failingTMUX, []byte(failingScript), 0o700); err != nil {
+		t.Fatalf("write failing tmux wrapper: %v", err)
+	}
+	failingEnv := mergeRobotProcessEnv(fixture.env, map[string]string{"NTM_TMUX_BINARY": failingTMUX})
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "session_list_failure_is_one_document", args: []string{"list", "--json"}},
+		{name: "session_status_failure_is_one_document", args: []string{"status", fixture.session, "--json"}},
+		{name: "session_create_failure_exits_nonzero", args: []string{"create", "terminal-create-failure", "--panes=1", "--json"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, failingEnv, test.args...)
+			assertOneFailure(t, process)
+		})
+	}
+
+	t.Run("profile_cancellation_is_one_document", func(t *testing.T) {
+		blockingTMUX := filepath.Join(fixture.root, "tmux-profile-cancel")
+		startedPath := filepath.Join(fixture.root, "profile-cancel-started")
+		blockingScript := `#!/bin/sh
+if [ "${1:-}" = "-V" ]; then
+    printf 'tmux 3.4\n'
+    exit 0
+fi
+printf 'started\n' > "$NTM_E2E_PROFILE_CANCEL_STARTED"
+exec sleep 30
+`
+		if err := os.WriteFile(blockingTMUX, []byte(blockingScript), 0o700); err != nil {
+			t.Fatalf("write blocking profile tmux wrapper: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY":                blockingTMUX,
+			"NTM_E2E_PROFILE_CANCEL_STARTED": startedPath,
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, fixture.ntmPath,
+			"profiles", "switch", "cod_1", "reviewer", "--session="+fixture.session, "--json",
+		)
+		cmd.Dir = fixture.projectDir
+		cmd.Env = append([]string(nil), env...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start cancelable profile switch: %v", err)
+		}
+		waitCh := make(chan error, 1)
+		go func() { waitCh <- cmd.Wait() }()
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			if data, err := os.ReadFile(startedPath); err == nil && strings.Contains(string(data), "started") {
+				break
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				cancel()
+				<-waitCh
+				t.Fatalf("read profile cancellation marker: %v", err)
+			}
+			select {
+			case earlyErr := <-waitCh:
+				t.Fatalf("profile switch exited before cancellation: %v stdout=%s stderr=%s", earlyErr, stdout.String(), stderr.String())
+			default:
+			}
+			if time.Now().After(deadline) {
+				cancel()
+				<-waitCh
+				t.Fatalf("timed out waiting for profile switch dependency: stdout=%s stderr=%s", stdout.String(), stderr.String())
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			cancel()
+			<-waitCh
+			t.Fatalf("signal profile switch: %v", err)
+		}
+		var waitErr error
+		select {
+		case waitErr = <-waitCh:
+		case <-ctx.Done():
+			waitErr = <-waitCh
+		}
+		if ctx.Err() != nil || cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
+			t.Fatalf("profile switch did not join after SIGINT: ctx=%v state=%v stdout=%s stderr=%s", ctx.Err(), cmd.ProcessState, stdout.String(), stderr.String())
+		}
+		exitCode := 0
+		if waitErr != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(waitErr, &exitErr) {
+				t.Fatalf("wait for canceled profile switch: %v", waitErr)
+			}
+			exitCode = exitErr.ExitCode()
+		}
+		assertOneFailure(t, robotBoundaryProcessResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), exitCode: exitCode})
+	})
+}
+
+func TestE2ERobotSpawnTerminalContractsBuiltBinary(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "spawn-terminal")
+
+	type assignmentDiagnostic struct {
+		Pane       string `json:"pane"`
+		ClaimError string `json:"claim_error"`
+	}
+	type agentDiagnostic struct {
+		Pane  string `json:"pane"`
+		Type  string `json:"type"`
+		Error string `json:"error"`
+	}
+	type spawnEnvelope struct {
+		Success      bool                   `json:"success"`
+		Timestamp    string                 `json:"timestamp"`
+		OutputFormat string                 `json:"output_format"`
+		Error        string                 `json:"error"`
+		ErrorCode    string                 `json:"error_code"`
+		Agents       []agentDiagnostic      `json:"agents"`
+		Assignments  []assignmentDiagnostic `json:"assignments"`
+	}
+	assertSpawnFailure := func(t *testing.T, process robotBoundaryProcessResult, wantCode string) spawnEnvelope {
+		t.Helper()
+		if process.exitCode != 1 {
+			t.Fatalf("exit=%d, want 1; stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+		}
+		if len(process.stderr) != 0 {
+			t.Fatalf("stderr=%q, want empty canonical robot boundary", process.stderr)
+		}
+		var envelope spawnEnvelope
+		decodeSingleRobotJSON(t, process.stdout, &envelope)
+		if envelope.Success || envelope.ErrorCode != wantCode || envelope.Error == "" || envelope.OutputFormat != "json" {
+			t.Fatalf("spawn envelope=%+v, want %s canonical JSON failure", envelope, wantCode)
+		}
+		if _, err := time.Parse(time.RFC3339, envelope.Timestamp); err != nil {
+			t.Fatalf("terminal timestamp %q is not RFC3339: %v", envelope.Timestamp, err)
+		}
+		return envelope
+	}
+	run := func(t *testing.T, env []string, args ...string) robotBoundaryProcessResult {
+		t.Helper()
+		return runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env, args...)
+	}
+	writeConfig := func(t *testing.T, name, command string) string {
+		t.Helper()
+		path := filepath.Join(fixture.root, name+".toml")
+		contents := fmt.Sprintf("[agents]\nclaude = %q\n\n[spawn_pacing]\nenabled = false\n", command)
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write spawn config: %v", err)
+		}
+		return path
+	}
+	writeLaunchMarkerConfig := func(t *testing.T, name string) (string, string) {
+		t.Helper()
+		markerPath := filepath.Join(fixture.root, name+"-launched")
+		agentPath := filepath.Join(fixture.root, name+"-agent")
+		agentScript := fmt.Sprintf("#!/bin/sh\nprintf 'launched\\n' > %q\nsleep 30\n", markerPath)
+		if err := os.WriteFile(agentPath, []byte(agentScript), 0o700); err != nil {
+			t.Fatalf("write launch-marker agent: %v", err)
+		}
+		return writeConfig(t, name, agentPath), markerPath
+	}
+	assertLaunchMarkerAbsent := func(t *testing.T, markerPath string) {
+		t.Helper()
+		if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("agent launch marker %s exists or is unreadable: %v", markerPath, err)
+		}
+	}
+	physicalPaneCount := func(t *testing.T, session string) int {
+		t.Helper()
+		output := strings.TrimSpace(fixture.mustTMUXOutput(t,
+			"list-panes", "-s", "-t", session, "-F", "#{pane_id}",
+		))
+		if output == "" {
+			return 0
+		}
+		return len(strings.Split(output, "\n"))
+	}
+	callLogCount := func(t *testing.T, path string) int {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatalf("read tmux call log %s: %v", path, err)
+		}
+		return len(bytes.Fields(data))
+	}
+
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "negative count",
+			args: []string{
+				"--robot-spawn=invalid-negative", "--spawn-cc=-1", "--spawn-cod=1", "--spawn-no-user", "--robot-format=json",
+			},
+		},
+		{
+			name: "zero agents",
+			args: []string{
+				"--robot-spawn=invalid-zero", "--spawn-no-user", "--robot-format=json",
+			},
+		},
+		{
+			name: "empty assignment strategy",
+			args: []string{
+				"--robot-spawn=invalid-strategy", "--spawn-cc=1", "--spawn-no-user", "--spawn-assign-work", "--strategy=", "--robot-format=json",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			envelope := assertSpawnFailure(t, run(t, fixture.env, test.args...), "INVALID_FLAG")
+			if envelope.Agents == nil || len(envelope.Agents) != 0 {
+				t.Fatalf("agents=%v, want initialized empty array", envelope.Agents)
+			}
+		})
+	}
+
+	t.Run("session probe infrastructure failure prevents creation", func(t *testing.T) {
+		session := fixture.session + "-probe-permission"
+		configPath := writeConfig(t, "probe-permission", "sleep 30")
+		createMarker := filepath.Join(fixture.root, "probe-permission-created")
+		wrapperPath := filepath.Join(fixture.root, "tmux-probe-permission")
+		wrapper := `#!/bin/sh
+if [ "${1:-}" = "has-session" ]; then
+    printf '%s\n' 'error connecting to /tmp/tmux-1000/default (Permission denied)' >&2
+    exit 1
+fi
+if [ "${1:-}" = "new-session" ]; then
+    : > "$NTM_E2E_CREATE_MARKER"
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+		if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o700); err != nil {
+			t.Fatalf("write session-probe tmux wrapper: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY":       wrapperPath,
+			"NTM_E2E_REAL_TMUX":     fixture.tmuxPath,
+			"NTM_E2E_CREATE_MARKER": createMarker,
+		})
+		envelope := assertSpawnFailure(t, run(t, env,
+			"--config="+configPath,
+			"--robot-spawn="+session,
+			"--spawn-cc=1",
+			"--spawn-no-user",
+			"--spawn-dir="+fixture.projectDir,
+			"--robot-format=json",
+		), "INTERNAL_ERROR")
+		if !strings.Contains(strings.ToLower(envelope.Error), "permission denied") {
+			t.Fatalf("session-probe error=%q, want permission diagnostic", envelope.Error)
+		}
+		if _, err := os.Stat(createMarker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("session creation marker exists or is unreadable after failed probe: %v", err)
+		}
+	})
+
+	t.Run("short topology fails before layout or launch", func(t *testing.T) {
+		session := fixture.session + "-short-topology"
+		configPath, launchMarker := writeLaunchMarkerConfig(t, "short-topology")
+		listCountPath := filepath.Join(fixture.root, "short-topology-list-count")
+		layoutLogPath := filepath.Join(fixture.root, "short-topology-layout-log")
+		wrapperPath := filepath.Join(fixture.root, "tmux-short-topology")
+		wrapper := `#!/bin/sh
+target=
+previous=
+for argument in "$@"; do
+    if [ "$previous" = "-t" ]; then
+        target=$argument
+    fi
+    previous=$argument
+done
+
+case "$target" in
+    "$NTM_E2E_TARGET_SESSION"|"$NTM_E2E_TARGET_SESSION":*)
+        if [ "${1:-}" = "select-layout" ]; then
+            printf 'layout\n' >> "$NTM_E2E_LAYOUT_LOG"
+        fi
+        ;;
+esac
+
+if [ "${1:-}" = "list-panes" ] && [ "$target" = "$NTM_E2E_TARGET_SESSION" ]; then
+    count=0
+    if [ -f "$NTM_E2E_LIST_COUNT" ]; then
+        read -r count < "$NTM_E2E_LIST_COUNT"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$NTM_E2E_LIST_COUNT"
+    if [ "$count" -ge 2 ]; then
+        output=$("$NTM_E2E_REAL_TMUX" "$@") || exit $?
+        printf '%s\n' "$output" | sed -n '1p'
+        exit 0
+    fi
+fi
+
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+		if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o700); err != nil {
+			t.Fatalf("write short-topology tmux wrapper: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY":        wrapperPath,
+			"NTM_E2E_REAL_TMUX":      fixture.tmuxPath,
+			"NTM_E2E_TARGET_SESSION": session,
+			"NTM_E2E_LIST_COUNT":     listCountPath,
+			"NTM_E2E_LAYOUT_LOG":     layoutLogPath,
+		})
+		envelope := assertSpawnFailure(t, run(t, env,
+			"--config="+configPath,
+			"--robot-spawn="+session,
+			"--spawn-cc=2",
+			"--spawn-no-user",
+			"--spawn-dir="+fixture.projectDir,
+			"--robot-format=json",
+		), "PANE_NOT_FOUND")
+		if !strings.Contains(envelope.Error, "1 pane") || !strings.Contains(envelope.Error, "2 are required") {
+			t.Fatalf("short-topology error=%q, want observed and required pane counts", envelope.Error)
+		}
+		if envelope.Agents == nil || len(envelope.Agents) != 0 {
+			t.Fatalf("agents=%v, want initialized empty array before launch", envelope.Agents)
+		}
+		if got := physicalPaneCount(t, session); got != 2 {
+			t.Fatalf("physical pane count=%d, want two panes retained after the real split", got)
+		}
+		if got := callLogCount(t, layoutLogPath); got != 1 {
+			t.Fatalf("layout calls=%d, want only the split-window layout before topology rejection", got)
+		}
+		assertLaunchMarkerAbsent(t, launchMarker)
+		time.Sleep(500 * time.Millisecond)
+		assertLaunchMarkerAbsent(t, launchMarker)
+		if got := physicalPaneCount(t, session); got != 2 {
+			t.Fatalf("late physical pane count=%d, want stable partial topology of two", got)
+		}
+		if got := callLogCount(t, layoutLogPath); got != 1 {
+			t.Fatalf("late layout calls=%d, want no final layout after topology rejection", got)
+		}
+	})
+
+	t.Run("layout failure prevents all launches", func(t *testing.T) {
+		session := fixture.session + "-layout-failure"
+		configPath, launchMarker := writeLaunchMarkerConfig(t, "layout-failure")
+		layoutLogPath := filepath.Join(fixture.root, "layout-failure-log")
+		wrapperPath := filepath.Join(fixture.root, "tmux-layout-failure")
+		wrapper := `#!/bin/sh
+target=
+previous=
+for argument in "$@"; do
+    if [ "$previous" = "-t" ]; then
+        target=$argument
+    fi
+    previous=$argument
+done
+
+case "$target" in
+    "$NTM_E2E_TARGET_SESSION"|"$NTM_E2E_TARGET_SESSION":*)
+        if [ "${1:-}" = "select-layout" ]; then
+            printf 'layout\n' >> "$NTM_E2E_LAYOUT_LOG"
+            printf 'injected robot spawn layout failure\n' >&2
+            exit 93
+        fi
+        ;;
+esac
+
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+		if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o700); err != nil {
+			t.Fatalf("write layout-failure tmux wrapper: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY":        wrapperPath,
+			"NTM_E2E_REAL_TMUX":      fixture.tmuxPath,
+			"NTM_E2E_TARGET_SESSION": session,
+			"NTM_E2E_LAYOUT_LOG":     layoutLogPath,
+		})
+		envelope := assertSpawnFailure(t, run(t, env,
+			"--config="+configPath,
+			"--robot-spawn="+session,
+			"--spawn-cc=1",
+			"--spawn-no-user",
+			"--spawn-dir="+fixture.projectDir,
+			"--robot-format=json",
+		), "INTERNAL_ERROR")
+		if !strings.Contains(envelope.Error, "applying tiled layout") || !strings.Contains(envelope.Error, "injected robot spawn layout failure") {
+			t.Fatalf("layout failure error=%q, want operation and injected cause", envelope.Error)
+		}
+		if envelope.Agents == nil || len(envelope.Agents) != 0 {
+			t.Fatalf("agents=%v, want initialized empty array before launch", envelope.Agents)
+		}
+		if got := physicalPaneCount(t, session); got != 1 {
+			t.Fatalf("physical pane count=%d, want created one-pane session retained", got)
+		}
+		if got := callLogCount(t, layoutLogPath); got != 1 {
+			t.Fatalf("layout calls=%d, want one failed final layout", got)
+		}
+		assertLaunchMarkerAbsent(t, launchMarker)
+		time.Sleep(500 * time.Millisecond)
+		assertLaunchMarkerAbsent(t, launchMarker)
+		if got := physicalPaneCount(t, session); got != 1 {
+			t.Fatalf("late physical pane count=%d, want stable one-pane partial topology", got)
+		}
+		if got := callLogCount(t, layoutLogPath); got != 1 {
+			t.Fatalf("late layout calls=%d, want no retry after terminal failure", got)
+		}
+	})
+
+	t.Run("launch failure retains per-agent diagnostics", func(t *testing.T) {
+		// A TOML multiline command reaches the production command sanitizer and
+		// deterministically fails before any agent input is sent to the pane.
+		configPath := filepath.Join(fixture.root, "launch-failure.toml")
+		configBody := "[agents]\nclaude = \"\"\"bad\ncommand\"\"\"\n\n[spawn_pacing]\nenabled = false\n"
+		if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+			t.Fatalf("write launch failure config: %v", err)
+		}
+		envelope := assertSpawnFailure(t, run(t, fixture.env,
+			"--config="+configPath,
+			"--robot-spawn="+fixture.session+"-launch",
+			"--spawn-cc=1",
+			"--spawn-no-user",
+			"--spawn-dir="+fixture.projectDir,
+			"--robot-format=json",
+		), "INTERNAL_ERROR")
+		if len(envelope.Agents) != 1 || envelope.Agents[0].Error == "" {
+			t.Fatalf("agents=%+v, want one per-agent launch diagnostic", envelope.Agents)
+		}
+	})
+
+	t.Run("subsecond readiness deadline is TIMEOUT", func(t *testing.T) {
+		scriptPath := filepath.Join(fixture.root, "agent-block")
+		script := "#!/bin/sh\nprintf 'booting\\n'\nsleep 30\n"
+		if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+			t.Fatalf("write blocking agent: %v", err)
+		}
+		captureMarker := filepath.Join(fixture.root, "readiness-capture-started")
+		tmuxWrapper := filepath.Join(fixture.root, "tmux-readiness")
+		wrapper := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "capture-pane" ] && [ ! -e %q ]; then
+  : > %q
+fi
+exec %q "$@"
+`, captureMarker, captureMarker, fixture.tmuxPath)
+		if err := os.WriteFile(tmuxWrapper, []byte(wrapper), 0o700); err != nil {
+			t.Fatalf("write readiness tmux wrapper: %v", err)
+		}
+		configPath := writeConfig(t, "readiness", scriptPath)
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{"NTM_TMUX_BINARY": tmuxWrapper})
+		started := time.Now()
+		envelope := assertSpawnFailure(t, run(t, env,
+			"--config="+configPath,
+			"--robot-spawn="+fixture.session+"-wait",
+			"--spawn-cc=1",
+			"--spawn-no-user",
+			"--spawn-dir="+fixture.projectDir,
+			"--spawn-wait",
+			"--timeout=500ms",
+			"--robot-format=json",
+		), "TIMEOUT")
+		finished := time.Now()
+		wallElapsed := finished.Sub(started)
+		markerInfo, err := os.Stat(captureMarker)
+		if err != nil {
+			t.Fatalf("stat readiness capture marker: %v", err)
+		}
+		readinessElapsed := finished.Sub(markerInfo.ModTime())
+		if readinessElapsed < 350*time.Millisecond || readinessElapsed > 3*time.Second {
+			t.Fatalf("500ms readiness timeout after launch=%s (total process time=%s)", readinessElapsed, wallElapsed)
+		}
+		if wallElapsed > 12*time.Second {
+			t.Fatalf("500ms readiness timeout total process time=%s, want bounded startup plus readiness", wallElapsed)
+		}
+		if len(envelope.Agents) != 1 {
+			t.Fatalf("agents=%+v, want launched agent retained", envelope.Agents)
+		}
+	})
+
+	t.Run("zero work items covers every agent and fails", func(t *testing.T) {
+		fakeBin := filepath.Join(fixture.root, "fake-bin")
+		if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+			t.Fatalf("create fake bin: %v", err)
+		}
+		bvPath := filepath.Join(fakeBin, "bv")
+		bvScript := "#!/bin/sh\nprintf '%s\\n' '{\"recommendations\":[],\"quick_wins\":[],\"blockers_to_clear\":[]}'\n"
+		if err := os.WriteFile(bvPath, []byte(bvScript), 0o700); err != nil {
+			t.Fatalf("write fake bv: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"PATH": fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		})
+		configPath := writeConfig(t, "zero-work", "sleep 30")
+		envelope := assertSpawnFailure(t, run(t, env,
+			"--config="+configPath,
+			"--robot-spawn="+fixture.session+"-assign",
+			"--spawn-cc=1",
+			"--spawn-no-user",
+			"--spawn-dir="+fixture.projectDir,
+			"--spawn-assign-work",
+			"--strategy=top-n",
+			"--robot-format=json",
+		), "ASSIGNMENT_FAILED")
+		if len(envelope.Agents) != 1 || len(envelope.Assignments) != 1 || envelope.Assignments[0].ClaimError == "" {
+			t.Fatalf("agents=%+v assignments=%+v, want complete zero-work diagnostics", envelope.Agents, envelope.Assignments)
+		}
 	})
 }
 

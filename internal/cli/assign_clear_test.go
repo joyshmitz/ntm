@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -425,17 +428,19 @@ func TestClearPaneSelectionAndFilteringUsePhysicalIdentity(t *testing.T) {
 	targetAssignment := assignment.Assignment{BeadID: "ntm-target", Pane: 1, OccupancyKey: "%40", DispatchTarget: "%40"}
 	otherWindowAssignment := assignment.Assignment{BeadID: "ntm-other", Pane: 1, OccupancyKey: "%41", DispatchTarget: "%41"}
 	legacyIndexOnly := assignment.Assignment{BeadID: "ntm-legacy", Pane: 1}
-	if !assignmentMatchesPhysicalPane(targetAssignment, target, true) {
+	windowPaneOnly := assignment.Assignment{BeadID: "ntm-window-pane", Pane: 1, OccupancyKey: "0.1", DispatchTarget: "0.1"}
+	if matches, matchErr := assignmentMatchesPhysicalPane(targetAssignment, target); matchErr != nil || !matches {
 		t.Fatal("target assignment did not match its physical pane")
 	}
-	if assignmentMatchesPhysicalPane(otherWindowAssignment, target, true) {
+	if matches, matchErr := assignmentMatchesPhysicalPane(otherWindowAssignment, target); matchErr != nil || matches {
 		t.Fatal("same local index in another window matched the target pane")
 	}
-	if assignmentMatchesPhysicalPane(legacyIndexOnly, target, true) {
-		t.Fatal("ambiguous legacy index-only assignment matched in multi-window topology")
-	}
-	if !assignmentMatchesPhysicalPane(legacyIndexOnly, target, false) {
-		t.Fatal("unambiguous single-window legacy assignment should remain clearable")
+	for _, malformed := range []assignment.Assignment{legacyIndexOnly, windowPaneOnly} {
+		matches, matchErr := assignmentMatchesPhysicalPane(malformed, target)
+		var migrationErr *assignment.PaneIdentityMigrationError
+		if matches || !errors.Is(matchErr, assignment.ErrPaneIdentityMigrationRequired) || !errors.As(matchErr, &migrationErr) {
+			t.Fatalf("malformed assignment %+v match=%v error=%v, want typed migration error", malformed, matches, matchErr)
+		}
 	}
 }
 
@@ -452,10 +457,10 @@ func TestFindAssignmentForPhysicalPaneDisambiguatesDuplicateIndexes(t *testing.T
 	}
 	firstPane := tmux.Pane{ID: "%40", WindowIndex: 0, Index: 1}
 	secondPane := tmux.Pane{ID: "%41", WindowIndex: 1, Index: 1}
-	if got := findAssignmentForPhysicalPane(store, firstPane, true); got == nil || got.BeadID != "ntm-first" {
+	if got, err := findAssignmentForPhysicalPane(store, firstPane); err != nil || got == nil || got.BeadID != "ntm-first" {
 		t.Fatalf("first physical pane assignment = %+v", got)
 	}
-	if got := findAssignmentForPhysicalPane(store, secondPane, true); got == nil || got.BeadID != "ntm-second" {
+	if got, err := findAssignmentForPhysicalPane(store, secondPane); err != nil || got == nil || got.BeadID != "ntm-second" {
 		t.Fatalf("second physical pane assignment = %+v", got)
 	}
 
@@ -463,11 +468,12 @@ func TestFindAssignmentForPhysicalPaneDisambiguatesDuplicateIndexes(t *testing.T
 	legacy.Assignments["ntm-legacy"] = &assignment.Assignment{
 		BeadID: "ntm-legacy", Pane: 1, Status: assignment.StatusAssigned, AssignedAt: time.Now().UTC(),
 	}
-	if got := findAssignmentForPhysicalPane(legacy, firstPane, true); got != nil {
-		t.Fatalf("multi-window lookup guessed legacy local index: %+v", got)
-	}
-	if got := findAssignmentForPhysicalPane(legacy, firstPane, false); got == nil || got.BeadID != "ntm-legacy" {
-		t.Fatalf("single-window legacy lookup = %+v", got)
+	for _, pane := range []tmux.Pane{firstPane, secondPane} {
+		got, err := findAssignmentForPhysicalPane(legacy, pane)
+		var migrationErr *assignment.PaneIdentityMigrationError
+		if got != nil || !errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) || !errors.As(err, &migrationErr) {
+			t.Fatalf("legacy local index lookup for %s = %+v, error=%v, want typed migration error", pane.ID, got, err)
+		}
 	}
 }
 
@@ -513,7 +519,7 @@ func TestRunClearFailedAssignmentsClearsOnlyFailedRows(t *testing.T) {
 	assignClearPane = ""
 	assignClearFailed = true
 	assignForce = false
-	releaseAssignmentLeases = func(string, *assignment.Assignment) ([]string, error) { return nil, nil }
+	releaseAssignmentLeases = func(context.Context, string, *assignment.Assignment) ([]string, error) { return nil, nil }
 
 	output, err := captureStdout(t, func() error {
 		return runClearAssignments(&cobra.Command{}, session)
@@ -541,6 +547,230 @@ func TestRunClearFailedAssignmentsClearsOnlyFailedRows(t *testing.T) {
 	}
 	if current := loaded.Get("ntm-working"); current == nil || current.Status != assignment.StatusWorking {
 		t.Fatalf("working row was changed by --clear-failed: %+v", current)
+	}
+}
+
+func TestRunClearSelectedAssignmentsCanceledJSONIsTimeoutWithoutMutation(t *testing.T) {
+	isolateSessionAgentStorage(t)
+	const (
+		session = "clear-canceled-json"
+		beadID  = "ntm-clear-canceled"
+	)
+	store := assignment.NewStore(session)
+	if _, err := store.Assign(beadID, "Canceled clear", 1, "codex", "BlueLake", "work"); err != nil {
+		t.Fatalf("assign canceled clear row: %v", err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("save canceled clear row: %v", err)
+	}
+
+	previousJSON := jsonOutput
+	previousForce := assignForce
+	previousRelease := releaseAssignmentLeases
+	t.Cleanup(func() {
+		jsonOutput = previousJSON
+		assignForce = previousForce
+		releaseAssignmentLeases = previousRelease
+	})
+	jsonOutput = true
+	assignForce = false
+	releaseAssignmentLeases = func(context.Context, string, *assignment.Assignment) ([]string, error) {
+		t.Fatal("canceled clear reached external lease release")
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	output, runErr := captureStdout(t, func() error {
+		return runClearSelectedAssignmentsFromStore(cmd, store, session, []string{beadID}, "clear")
+	})
+	if runErr == nil {
+		t.Fatal("canceled clear returned success")
+	}
+	var envelope ClearAssignmentsEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("decode canceled clear envelope: %v\noutput=%s", err, output)
+	}
+	if envelope.Success || envelope.Error == nil || envelope.Error.Code != "TIMEOUT" || envelope.Data == nil ||
+		len(envelope.Data.Cleared) != 1 || envelope.Data.Cleared[0].ErrorCode != "TIMEOUT" {
+		t.Fatalf("canceled clear envelope = %+v", envelope)
+	}
+
+	reloaded, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload canceled clear store: %v", err)
+	}
+	if current := reloaded.Get(beadID); current == nil || current.Status != assignment.StatusAssigned || current.ClearState != assignment.ClearStateNone {
+		t.Fatalf("canceled clear mutated durable assignment: %+v", current)
+	}
+}
+
+func TestRunClearPaneAssignmentsCancellationIsTypedAndRecoverable(t *testing.T) {
+	isolateSessionAgentStorage(t)
+	const (
+		session = "clear-pane-canceled-json"
+		beadID  = "ntm-clear-pane-canceled"
+	)
+	store := assignment.NewStore(session)
+	_, err := store.Assign(beadID, "Canceled pane clear", 1, "codex", "BlueLake", "work")
+	if err != nil {
+		t.Fatalf("assign canceled pane clear row: %v", err)
+	}
+	store.Assignments[beadID].DispatchTarget = "%71"
+	store.Assignments[beadID].OccupancyKey = "%71"
+	if err := store.Save(); err != nil {
+		t.Fatalf("save canceled pane clear row: %v", err)
+	}
+
+	previousJSON := jsonOutput
+	previousForce := assignForce
+	previousRelease := releaseAssignmentLeases
+	previousGetPanes := getClearPanePanes
+	t.Cleanup(func() {
+		jsonOutput = previousJSON
+		assignForce = previousForce
+		releaseAssignmentLeases = previousRelease
+		getClearPanePanes = previousGetPanes
+	})
+	jsonOutput = true
+	assignForce = false
+	getClearPanePanes = func(context.Context, string) ([]tmux.Pane, error) {
+		return []tmux.Pane{{ID: "%71", Index: 1, WindowIndex: 0, Type: tmux.AgentCodex}}, nil
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	releaseCalls := 0
+	releaseAssignmentLeases = func(context.Context, string, *assignment.Assignment) ([]string, error) {
+		releaseCalls++
+		cancel()
+		return nil, errors.New("agent mail release transport stopped")
+	}
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	output, runErr := captureStdout(t, func() error {
+		return runClearPaneAssignments(cmd, session, "%71")
+	})
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("canceled pane clear error = %v, want context.Canceled", runErr)
+	}
+	if releaseCalls != 1 {
+		t.Fatalf("pane clear release calls = %d, want 1", releaseCalls)
+	}
+	var envelope ClearAssignmentsEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("decode canceled pane clear envelope: %v\noutput=%s", err, output)
+	}
+	if envelope.Success || envelope.Error == nil || envelope.Error.Code != robot.ErrCodeTimeout || envelope.Data == nil ||
+		len(envelope.Data.Cleared) != 1 || envelope.Data.Cleared[0].ErrorCode != robot.ErrCodeTimeout {
+		t.Fatalf("canceled pane clear envelope = %+v", envelope)
+	}
+
+	reloaded, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload canceled pane clear store: %v", err)
+	}
+	if current := reloaded.Get(beadID); current == nil {
+		t.Fatal("canceled pane clear removed recoverable assignment")
+	}
+}
+
+func TestRunClearPaneAssignmentsPaneDiscoveryCancellationIsTimeout(t *testing.T) {
+	previousJSON := jsonOutput
+	previousGetPanes := getClearPanePanes
+	t.Cleanup(func() {
+		jsonOutput = previousJSON
+		getClearPanePanes = previousGetPanes
+	})
+	jsonOutput = true
+	ctx, cancel := context.WithCancel(t.Context())
+	getClearPanePanes = func(context.Context, string) ([]tmux.Pane, error) {
+		cancel()
+		return nil, errors.New("tmux transport stopped")
+	}
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	output, runErr := captureStdout(t, func() error {
+		return runClearPaneAssignments(cmd, "clear-pane-discovery-canceled", "%71")
+	})
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("canceled pane discovery error = %v, want context.Canceled", runErr)
+	}
+	var envelope ClearAssignmentsEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("decode canceled pane discovery envelope: %v\noutput=%s", err, output)
+	}
+	if envelope.Success || envelope.Error == nil || envelope.Error.Code != robot.ErrCodeTimeout {
+		t.Fatalf("canceled pane discovery envelope = %+v", envelope)
+	}
+}
+
+func TestRunClearFailedRejectsPendingCompletionEvent(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unleased", true: "leased"}[leased], func(t *testing.T) {
+			isolateSessionAgentStorage(t)
+			const (
+				session = "clear-failed-pending-completion"
+				beadID  = "ntm-clear-failed-pending-completion"
+				eventID = "clear-failed-pending-completion-event"
+			)
+			now := time.Now().UTC()
+			store := assignment.NewStore(session)
+			store.Assignments[beadID] = &assignment.Assignment{
+				BeadID: beadID, Status: assignment.StatusFailed, AssignedAt: now,
+				DispatchTarget: "%72", OccupancyKey: "%72",
+				PendingCompletionEventID: eventID, CompletionDetectedAt: &now,
+			}
+			if leased {
+				expiresAt := now.Add(time.Minute)
+				store.Assignments[beadID].CompletionConsumerToken = "clear-failed-consumer"
+				store.Assignments[beadID].CompletionLeaseExpiresAt = &expiresAt
+			}
+			if err := store.Save(); err != nil {
+				t.Fatalf("seed pending completion clear-failed: %v", err)
+			}
+			before := store.Get(beadID)
+
+			previousJSON := jsonOutput
+			previousForce := assignForce
+			previousRelease := releaseAssignmentLeases
+			t.Cleanup(func() {
+				jsonOutput = previousJSON
+				assignForce = previousForce
+				releaseAssignmentLeases = previousRelease
+			})
+			jsonOutput = true
+			assignForce = false
+			releaseAssignmentLeases = func(context.Context, string, *assignment.Assignment) ([]string, error) {
+				t.Fatal("pending completion clear crossed external release boundary")
+				return nil, nil
+			}
+
+			output, runErr := captureStdout(t, func() error {
+				return runClearFailedAssignments(&cobra.Command{}, session)
+			})
+			if !errors.Is(runErr, assignment.ErrCompletionEventPending) {
+				t.Fatalf("pending completion clear-failed error = %v, want ErrCompletionEventPending", runErr)
+			}
+			var envelope ClearAssignmentsEnvelope
+			if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+				t.Fatalf("decode pending completion clear-failed envelope: %v\noutput=%s", err, output)
+			}
+			if envelope.Success || envelope.Error == nil || envelope.Error.Code != clearErrCompletionPending || envelope.Data == nil ||
+				len(envelope.Data.Cleared) != 1 || envelope.Data.Cleared[0].ErrorCode != clearErrCompletionPending {
+				t.Fatalf("pending completion clear-failed envelope = %+v", envelope)
+			}
+			after, err := assignment.LoadStoreStrict(session)
+			if err != nil {
+				t.Fatalf("strict reload after refused completion clear: %v", err)
+			}
+			current := after.Get(beadID)
+			if current == nil || current.PendingCompletionEventID != before.PendingCompletionEventID ||
+				current.CompletionConsumerToken != before.CompletionConsumerToken || current.ClearState != before.ClearState {
+				t.Fatalf("refused pending completion clear mutated row: before=%+v after=%+v", before, current)
+			}
+		})
 	}
 }
 

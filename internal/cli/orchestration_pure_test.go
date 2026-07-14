@@ -490,13 +490,13 @@ func TestPrintRebalanceReport_NoPanic(t *testing.T) {
 		ImbalanceScore: 0.5,
 		Recommendation: "moderate",
 		Workloads: []RebalanceWorkload{
-			{Pane: 1, AgentType: "claude", TaskCount: 5, IsHealthy: true},
-			{Pane: 2, AgentType: "codex", TaskCount: 1, IsHealthy: true, IsIdle: true},
+			{Pane: 1, PaneTarget: "0.1", PaneID: "%11", AgentType: "claude", TaskCount: 5, IsHealthy: true},
+			{Pane: 2, PaneTarget: "0.2", PaneID: "%22", AgentType: "codex", TaskCount: 1, IsHealthy: true, IsIdle: true},
 		},
 		Transfers: []RebalanceTransfer{
-			{BeadID: "bd-123", BeadTitle: "Fix auth", FromPane: 1, FromAgent: "claude", ToPane: 2, ToAgent: "codex", Reason: "imbalance"},
+			{BeadID: "bd-123", BeadTitle: "Fix auth", FromPane: 1, FromTarget: "0.1", FromPaneID: "%11", FromAgent: "claude", ToPane: 2, ToTarget: "0.2", ToPaneID: "%22", ToAgent: "codex", Reason: "imbalance"},
 		},
-		After: map[int]int{1: 4, 2: 2},
+		After: map[string]int{"%11": 4, "%22": 2},
 	}
 	printRebalanceReport(resp)
 }
@@ -507,9 +507,9 @@ func TestPrintRebalanceReport_NoTransfers(t *testing.T) {
 		ImbalanceScore: 0.1,
 		Recommendation: "balanced",
 		Workloads: []RebalanceWorkload{
-			{Pane: 1, AgentType: "claude", TaskCount: 2, IsHealthy: true},
+			{Pane: 1, PaneTarget: "0.1", PaneID: "%11", AgentType: "claude", TaskCount: 2, IsHealthy: true},
 		},
-		After: map[int]int{},
+		After: map[string]int{},
 	}
 	printRebalanceReport(resp)
 }
@@ -520,9 +520,9 @@ func TestPrintRebalanceReport_HighImbalance(t *testing.T) {
 		ImbalanceScore: 0.9,
 		Recommendation: "critical",
 		Workloads: []RebalanceWorkload{
-			{Pane: 1, AgentType: "claude", TaskCount: 10, IsHealthy: false},
+			{Pane: 1, PaneTarget: "0.1", PaneID: "%11", AgentType: "claude", TaskCount: 10, IsHealthy: false},
 		},
-		After: map[int]int{1: 10},
+		After: map[string]int{"%11": 10},
 	}
 	printRebalanceReport(resp)
 }
@@ -533,7 +533,7 @@ func TestPrintRebalanceReport_EmptyWorkloads(t *testing.T) {
 		ImbalanceScore: 0.0,
 		Recommendation: "none",
 		Workloads:      []RebalanceWorkload{},
-		After:          map[int]int{},
+		After:          map[string]int{},
 	}
 	printRebalanceReport(resp)
 }

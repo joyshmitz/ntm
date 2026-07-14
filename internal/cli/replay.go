@@ -1,16 +1,73 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/history"
+	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+const replayErrCodeConfirmationRequired = "CONFIRMATION_REQUIRED"
+
+// ReplayResponse is the stable JSON result for the replay command.
+type ReplayResponse struct {
+	Success   bool     `json:"success"`
+	Timestamp string   `json:"timestamp"`
+	Session   string   `json:"session"`
+	Targets   []string `json:"targets"`
+	Delivered int      `json:"delivered"`
+	Failed    int      `json:"failed"`
+	DryRun    bool     `json:"dry_run"`
+	Warnings  []string `json:"warnings"`
+	ErrorCode string   `json:"error_code,omitempty"`
+	Error     string   `json:"error,omitempty"`
+}
+
+func newReplayResponse(dryRun bool) ReplayResponse {
+	return ReplayResponse{
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Targets:   []string{},
+		DryRun:    dryRun,
+		Warnings:  []string{},
+	}
+}
+
+func outputReplayFailure(response ReplayResponse, jsonOutput bool, code string, err error) error {
+	if err == nil {
+		err = errors.New("replay failed")
+	}
+	response.Success = false
+	response.ErrorCode = code
+	response.Error = err.Error()
+	if response.Targets == nil {
+		response.Targets = []string{}
+	}
+	if response.Warnings == nil {
+		response.Warnings = []string{}
+	}
+	if jsonOutput {
+		return emitJSONFailureEnvelope(response)
+	}
+	return err
+}
+
+func replayFailureCode(err error, fallback string) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return robot.ErrCodeTimeout
+	}
+	return fallback
+}
 
 func resolveReplaySession(entrySession, sessionOverride string) (string, error) {
 	session := strings.TrimSpace(entrySession)
@@ -26,6 +83,78 @@ func resolveReplaySession(entrySession, sessionOverride string) (string, error) 
 	return session, nil
 }
 
+func selectReplayEntry(entries []history.HistoryEntry, arg string, last bool) (*history.HistoryEntry, error) {
+	if len(entries) == 0 {
+		return nil, errors.New("no history entries found")
+	}
+	if last || strings.TrimSpace(arg) == "" {
+		return &entries[len(entries)-1], nil
+	}
+
+	if idx, err := strconv.Atoi(arg); err == nil && idx > 0 {
+		if idx > len(entries) {
+			return nil, fmt.Errorf("index %d out of range (have %d entries)", idx, len(entries))
+		}
+		return &entries[len(entries)-idx], nil
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if strings.HasPrefix(entries[i].ID, arg) {
+			return &entries[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no entry found matching ID prefix %q", arg)
+}
+
+func selectReplayTargets(panes []tmux.Pane, targetCC, targetCod, targetGmi, targetAgy, targetAll bool) []tmux.Pane {
+	targets := make([]tmux.Pane, 0, len(panes))
+	noFilter := !targetCC && !targetCod && !targetGmi && !targetAgy && !targetAll
+	for _, pane := range panes {
+		if targetAll || (noFilter && pane.Type != tmux.AgentUser) {
+			targets = append(targets, pane)
+			continue
+		}
+		if noFilter {
+			continue
+		}
+		if matchesLegacySendTypeFilter(pane, targetCC, targetCod, targetGmi) ||
+			(targetAgy && tmux.AgentType(pane.Type).Canonical() == tmux.AgentAntigravity) {
+			targets = append(targets, pane)
+		}
+	}
+	return targets
+}
+
+func replayTargetKeys(panes, targets []tmux.Pane) []string {
+	keys := make([]string, 0, len(targets))
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	for _, pane := range targets {
+		keys = append(keys, pane.Ref().Canonical(multiWindow))
+	}
+	return keys
+}
+
+func replayFailedCount(targetCount, delivered int) int {
+	failed := targetCount - delivered
+	if failed < 0 {
+		return 0
+	}
+	return failed
+}
+
+func replayHistoryWarnings(noHistory bool, session string, targetNames, targetAgentTypes []string, prompt string, appendEntry func(*history.HistoryEntry) error) []string {
+	warnings := []string{}
+	if noHistory {
+		return warnings
+	}
+	entry := history.NewEntry(session, targetNames, prompt, history.SourceReplay)
+	entry.SetAgentTypes(targetAgentTypes)
+	entry.SetSuccess()
+	if err := appendEntry(entry); err != nil {
+		warnings = append(warnings, fmt.Sprintf("failed to log replay: %v", err))
+	}
+	return warnings
+}
+
 func newReplayCmd() *cobra.Command {
 	var (
 		targetCC, targetCod, targetGmi, targetAgy, targetAll bool
@@ -34,6 +163,7 @@ func newReplayCmd() *cobra.Command {
 		dryRun                                               bool
 		noHistory                                            bool
 		last                                                 bool
+		yes                                                  bool
 	)
 
 	cmd := &cobra.Command{
@@ -52,143 +182,137 @@ Examples:
   ntm replay 01HXYZ               # Replay by ID prefix
   ntm replay 1 --edit             # Edit prompt before sending
   ntm replay 1 --dry-run          # Preview without sending
+  ntm replay 1 --yes              # Send without an interactive confirmation
   ntm replay 1 --session=other    # Send to different session
   ntm replay 1 --cc               # Send to Claude agents only`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Get entries from history
+			jsonMode := IsJSONOutput()
+			response := newReplayResponse(dryRun)
+			fail := func(code string, err error) error {
+				return outputReplayFailure(response, jsonMode, replayFailureCode(err, code), err)
+			}
+
+			if err := cmd.Context().Err(); err != nil {
+				return fail(robot.ErrCodeInternalError, err)
+			}
+
 			entries, err := history.ReadAll()
 			if err != nil {
-				return fmt.Errorf("reading history: %w", err)
-			}
-			if len(entries) == 0 {
-				return fmt.Errorf("no history entries found")
+				return fail(robot.ErrCodeInternalError, fmt.Errorf("reading history: %w", err))
 			}
 
-			// Find the target entry
-			var entry *history.HistoryEntry
-
-			if last || len(args) == 0 {
-				// Use most recent
-				entry = &entries[len(entries)-1]
-			} else {
-				arg := args[0]
-
-				// Try as index first
-				if idx, err := strconv.Atoi(arg); err == nil && idx > 0 {
-					// Index is 1-based from most recent
-					if idx > len(entries) {
-						return fmt.Errorf("index %d out of range (have %d entries)", idx, len(entries))
-					}
-					entry = &entries[len(entries)-idx]
-				} else {
-					// Try as ID prefix
-					for i := len(entries) - 1; i >= 0; i-- {
-						if strings.HasPrefix(entries[i].ID, arg) {
-							entry = &entries[i]
-							break
-						}
-					}
-					if entry == nil {
-						return fmt.Errorf("no entry found matching ID prefix %q", arg)
-					}
-				}
+			entryArg := ""
+			if len(args) > 0 {
+				entryArg = args[0]
+			}
+			entry, err := selectReplayEntry(entries, entryArg, last)
+			if err != nil {
+				return fail(robot.ErrCodeInvalidFlag, err)
 			}
 
-			// Determine session to use
 			session, err := resolveReplaySession(entry.Session, sessionOverride)
 			if err != nil {
-				return err
+				return fail(robot.ErrCodeInvalidFlag, err)
 			}
+			response.Session = session
 
-			// Get the prompt, optionally edit it
 			prompt := entry.Prompt
 			if edit {
+				if jsonMode {
+					return fail(robot.ErrCodeInvalidFlag, errors.New("--edit cannot be used with --json"))
+				}
 				edited, err := editPrompt(prompt)
 				if err != nil {
-					return fmt.Errorf("editing prompt: %w", err)
+					return fail(robot.ErrCodeInternalError, fmt.Errorf("editing prompt: %w", err))
 				}
 				prompt = edited
 			}
 
-			// Show what will be sent
-			fmt.Printf("Replaying prompt from %s\n", entry.Timestamp.Format("2006-01-02 15:04:05"))
-			fmt.Printf("Session: %s\n", session)
-			fmt.Printf("Prompt: %s\n", truncatePrompt(prompt, 80))
+			if !jsonMode {
+				fmt.Printf("Replaying prompt from %s\n", entry.Timestamp.Format("2006-01-02 15:04:05"))
+				fmt.Printf("Session: %s\n", session)
+				fmt.Printf("Prompt: %s\n", truncatePrompt(prompt, 80))
+			}
+
+			if !dryRun {
+				if jsonMode && !yes {
+					return fail(replayErrCodeConfirmationRequired, errors.New("replay execution requires --yes in JSON mode"))
+				}
+				if !jsonMode && !yes && !confirm("Send this prompt?") {
+					fmt.Println("Cancelled.")
+					return nil
+				}
+			}
+
+			exists, err := tmux.SessionExistsContext(cmd.Context(), session)
+			if err != nil {
+				return fail(robot.ErrCodeInternalError, fmt.Errorf("checking replay session: %w", err))
+			}
+			if !exists {
+				return fail(robot.ErrCodeSessionNotFound, fmt.Errorf("session %q not found", session))
+			}
+
+			panes, err := tmux.GetPanesContext(cmd.Context(), session)
+			if err != nil {
+				return fail(robot.ErrCodeInternalError, fmt.Errorf("getting panes: %w", err))
+			}
+
+			targets := selectReplayTargets(panes, targetCC, targetCod, targetGmi, targetAgy, targetAll)
+			response.Targets = replayTargetKeys(panes, targets)
+			if len(targets) == 0 {
+				return fail(robot.ErrCodePaneNotFound, errors.New("no matching panes found"))
+			}
 
 			if dryRun {
+				response.Success = true
+				if jsonMode {
+					return output.PrintJSON(response)
+				}
 				fmt.Println("\n(dry-run mode - not sending)")
 				return nil
 			}
 
-			// Confirm before sending
-			if !confirm("Send this prompt?") {
-				fmt.Println("Cancelled.")
-				return nil
-			}
-
-			// Check session exists
-			if !tmux.SessionExists(session) {
-				return fmt.Errorf("session %q not found", session)
-			}
-
-			// Determine target panes
-			panes, err := tmux.GetPanes(session)
+			promptService, err := dispatchsvc.NewService(dispatchsvc.Ports{
+				Redactor:  shellFinalMessageRedactor(activeShellDispatchRedactionConfig()),
+				Protocols: shellDispatchProtocolPlanner{},
+				Deliverer: dispatchsvc.TMUXDeliverer{},
+				Lifecycle: dispatchsvc.LifecycleHooks{
+					AfterReceipt: func(_ context.Context, delivery dispatchsvc.Delivery, receipt dispatchsvc.Receipt) {
+						if receipt.Status == dispatchsvc.ReceiptDelivered {
+							addTimelinePromptMarker(session, delivery.Target.Pane, delivery.Message)
+						}
+					},
+				},
+			})
 			if err != nil {
-				return fmt.Errorf("getting panes: %w", err)
+				return fail(robot.ErrCodeInternalError, fmt.Errorf("preparing replay dispatch: %w", err))
+			}
+			result, err := dispatchReplayPrompt(cmd.Context(), promptService, session, panes, targets, prompt)
+			response.Delivered = result.Delivered
+			response.Failed = replayFailedCount(len(targets), result.Delivered)
+			if err != nil || result.Delivered != len(targets) {
+				if err == nil {
+					err = fmt.Errorf("replaying prompt delivered to %d of %d panes", result.Delivered, len(targets))
+				}
+				return fail(robot.ErrCodePromptSendFailed, fmt.Errorf("replaying prompt: %w", err))
 			}
 
-			// Filter panes based on flags
-			var targets []tmux.Pane
-			noFilter := !targetCC && !targetCod && !targetGmi && !targetAgy && !targetAll
-
-			for _, p := range panes {
-				if targetAll {
-					targets = append(targets, p)
-					continue
-				}
-
-				if noFilter {
-					// Default: all agent panes (exclude user panes)
-					if p.Type != tmux.AgentUser {
-						targets = append(targets, p)
-					}
-					continue
-				}
-
-				// Apply specific filters
-				if matchesLegacySendTypeFilter(p, targetCC, targetCod, targetGmi) ||
-					(targetAgy && tmux.AgentType(p.Type).Canonical() == tmux.AgentAntigravity) {
-					targets = append(targets, p)
-				}
-			}
-
-			if len(targets) == 0 {
-				return fmt.Errorf("no matching panes found")
-			}
-
-			// Send to all targets
-			var targetNames []string
-			var targetAgentTypes []string
+			targetAgentTypes := make([]string, 0, len(targets))
 			for _, p := range targets {
-				if err := sendPromptToPane(session, p, prompt); err != nil {
-					return fmt.Errorf("sending to pane %d: %w", p.Index, err)
-				}
-				targetNames = append(targetNames, fmt.Sprintf("%d", p.Index))
 				targetAgentTypes = append(targetAgentTypes, p.Type.String())
 			}
 
-			// Log to history (unless disabled)
-			if !noHistory {
-				newEntry := history.NewEntry(session, targetNames, prompt, history.SourceReplay)
-				newEntry.SetAgentTypes(targetAgentTypes)
-				newEntry.SetSuccess()
-				if err := history.Append(newEntry); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: failed to log replay: %v\n", err)
-				}
-			}
+			response.Warnings = replayHistoryWarnings(noHistory, session, response.Targets, targetAgentTypes, prompt, history.Append)
 
-			fmt.Printf("Sent to %d pane(s)\n", len(targets))
+			response.Success = true
+			if jsonMode {
+				return output.PrintJSON(response)
+			}
+			for _, warning := range response.Warnings {
+				fmt.Printf("Warning: %s\n", warning)
+			}
+			fmt.Printf("Sent to %d pane(s)\n", response.Delivered)
 			return nil
 		},
 	}
@@ -203,8 +327,21 @@ Examples:
 	cmd.Flags().BoolVar(&edit, "edit", false, "edit prompt before sending")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be sent without sending")
 	cmd.Flags().BoolVar(&noHistory, "no-history", false, "don't log this replay to history")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "send without interactive confirmation")
 
 	return cmd
+}
+
+func dispatchReplayPrompt(ctx context.Context, service *dispatchsvc.Service, session string, panes, targets []tmux.Pane, prompt string) (dispatchsvc.Result, error) {
+	return service.Execute(ctx, dispatchsvc.Request{
+		Session:       session,
+		Panes:         panes,
+		Selectors:     shellDispatchSelectors(targets),
+		IncludeUser:   true,
+		Message:       prompt,
+		Submit:        true,
+		StopOnFailure: true,
+	})
 }
 
 // editPrompt opens the prompt in an editor and returns the modified content.

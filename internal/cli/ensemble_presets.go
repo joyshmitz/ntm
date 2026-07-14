@@ -170,7 +170,13 @@ func runEnsemblePresets(w io.Writer, opts ensemblePresetsOptions) error {
 	if err != nil {
 		slog.Default().Error("ensemble presets: failed to load registry", "error", err)
 		if format == "json" {
-			return output.WriteJSON(w, output.NewError(err.Error()), true)
+			return emitJSONFailureEnvelopeToWithCause(w, struct {
+				Success bool   `json:"success"`
+				Error   string `json:"error"`
+			}{
+				Success: false,
+				Error:   err.Error(),
+			}, err)
 		}
 		return fmt.Errorf("load ensemble registry: %w", err)
 	}

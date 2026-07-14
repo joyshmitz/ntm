@@ -644,37 +644,37 @@ Examples:
 					exists, existsErr := storage.HasCheckpointPath(sessionName, checkpointRef)
 					if existsErr != nil {
 						if jsonOutput {
-							_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+							cause := fmt.Errorf("finding checkpoint: %w", existsErr)
+							return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 								"success":        false,
 								"session":        sessionName,
 								"checkpoint_ref": checkpointRef,
 								"error":          existsErr.Error(),
-							})
-							return fmt.Errorf("finding checkpoint: %w", existsErr)
+							}, cause)
 						}
 						return fmt.Errorf("finding checkpoint: %w", existsErr)
 					}
 					if exists {
 						if jsonOutput {
-							_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+							cause := fmt.Errorf("loading checkpoint: %w", err)
+							return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 								"success":        false,
 								"session":        sessionName,
 								"checkpoint_ref": checkpointRef,
 								"error":          err.Error(),
-							})
-							return fmt.Errorf("loading checkpoint: %w", err)
+							}, cause)
 						}
 						return fmt.Errorf("loading checkpoint: %w", err)
 					}
 				}
 				if jsonOutput {
-					_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+					cause := fmt.Errorf("finding checkpoint: %w", err)
+					return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 						"success":        false,
 						"session":        sessionName,
 						"checkpoint_ref": checkpointRef,
 						"error":          err.Error(),
-					})
-					return fmt.Errorf("finding checkpoint: %w", err)
+					}, cause)
 				}
 				return fmt.Errorf("finding checkpoint: %w", err)
 			}
@@ -698,14 +698,14 @@ Examples:
 			result, err := restorer.RestoreFromCheckpoint(cp, opts)
 			if err != nil {
 				if jsonOutput {
-					_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+					cause := fmt.Errorf("restoring checkpoint: %w", err)
+					return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 						"success":        false,
 						"session":        sessionName,
 						"checkpoint_ref": checkpointRef,
 						"checkpoint_id":  cp.ID,
 						"error":          err.Error(),
-					})
-					return fmt.Errorf("restoring checkpoint: %w", err)
+					}, cause)
 				}
 				return fmt.Errorf("restoring checkpoint: %w", err)
 			}
@@ -866,18 +866,19 @@ func verifySingleCheckpoint(storage *checkpoint.Storage, session, id string) err
 	result := checkpoint.VerifyStoredCheckpoint(storage, session, id)
 
 	if jsonOutput {
-		if err := json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+		response := map[string]interface{}{
+			"success": result.Valid,
 			"session": session,
 			"id":      id,
 			"valid":   result.Valid,
 			"checks":  result,
-		}); err != nil {
-			return err
 		}
 		if !result.Valid {
-			return fmt.Errorf("verification failed with %d error(s)", len(result.Errors))
+			cause := fmt.Errorf("verification failed with %d error(s)", len(result.Errors))
+			response["error"] = cause.Error()
+			return emitJSONFailureEnvelopeWithCause(response, cause)
 		}
-		return nil
+		return json.NewEncoder(os.Stdout).Encode(response)
 	}
 
 	t := theme.Current()
@@ -941,6 +942,7 @@ func verifyAllCheckpoints(storage *checkpoint.Storage, session string) error {
 	if len(results) == 0 {
 		if jsonOutput {
 			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+				"success":     true,
 				"session":     session,
 				"checkpoints": []interface{}{},
 				"valid_count": 0,
@@ -959,18 +961,19 @@ func verifyAllCheckpoints(storage *checkpoint.Storage, session string) error {
 	}
 
 	if jsonOutput {
-		if err := json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+		response := map[string]interface{}{
+			"success":     validCount == len(results),
 			"session":     session,
 			"checkpoints": results,
 			"valid_count": validCount,
 			"total_count": len(results),
-		}); err != nil {
-			return err
 		}
 		if validCount < len(results) {
-			return fmt.Errorf("%d checkpoint(s) failed verification", len(results)-validCount)
+			cause := fmt.Errorf("%d checkpoint(s) failed verification", len(results)-validCount)
+			response["error"] = cause.Error()
+			return emitJSONFailureEnvelopeWithCause(response, cause)
 		}
-		return nil
+		return json.NewEncoder(os.Stdout).Encode(response)
 	}
 
 	t := theme.Current()

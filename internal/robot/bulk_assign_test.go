@@ -51,6 +51,33 @@ func TestDecodeBulkAssignTriageInvalid(t *testing.T) {
 	}
 }
 
+func TestGetBulkAssignRejectsInvalidStrategyBeforeExternalWork(t *testing.T) {
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{Session: "proj", FromBV: true, Strategy: "fastest"})
+	if err != nil {
+		t.Fatalf("GetBulkAssign transport error: %v", err)
+	}
+	if output.Success || output.ErrorCode != ErrCodeInvalidFlag || output.Assignments == nil {
+		t.Fatalf("invalid strategy output = %+v", output)
+	}
+}
+
+func TestGetBulkAssignPreservesDependencyLocalDeadline(t *testing.T) {
+	deps := BulkAssignDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex}}, nil
+		},
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) { return t.TempDir(), nil },
+		FetchTriage:    func(context.Context, string) (*bv.TriageResponse, error) { return nil, context.DeadlineExceeded },
+	}
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{Session: "proj", FromBV: true, Strategy: "impact", Deps: &deps})
+	if err != nil {
+		t.Fatalf("GetBulkAssign transport error: %v", err)
+	}
+	if output.Success || output.ErrorCode != ErrCodeTimeout {
+		t.Fatalf("dependency deadline output = %+v, want TIMEOUT", output)
+	}
+}
+
 func TestBulkAssignImpactStrategySorting(t *testing.T) {
 	triage := mockTriage(nil, []bv.BlockerToClear{
 		{ID: "bd-1", Title: "A", UnblocksCount: 2},
@@ -322,25 +349,40 @@ func TestLoadBulkAssignTemplateConfiguredFileError(t *testing.T) {
 	}
 }
 
+func bulkTestDeliverer(t *testing.T, deliver func(dispatchsvc.Delivery) error) dispatchsvc.Deliverer {
+	t.Helper()
+	return dispatchsvc.DelivererFunc(func(ctx context.Context, delivery dispatchsvc.Delivery) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if delivery.Protocol != dispatchsvc.ProtocolDoubleEnter {
+			t.Fatalf("bulk delivery protocol = %q, want %q", delivery.Protocol, dispatchsvc.ProtocolDoubleEnter)
+		}
+		if delivery.Target.Ref.ID == "" {
+			t.Fatal("bulk delivery omitted canonical physical pane ID")
+		}
+		return deliver(delivery)
+	})
+}
+
 func TestBulkAssignSequentialDeliveryOrdering(t *testing.T) {
 	allocation := `{"2":"bd-2","1":"bd-1"}`
 	panes := mockPanes("proj", []int{1, 2})
 	callOrder := []string{}
 	deps := BulkAssignDependencies{
-		FetchBeadTitle: func(_ string, beadID string) (string, error) { return "Title " + beadID, nil },
+		FetchBeadTitle: func(_ context.Context, _ string, beadID string) (string, error) { return "Title " + beadID, nil },
 		Cwd:            func() (string, error) { return "/tmp", nil },
-		Now:            func() time.Time { return time.Date(2026, 1, 20, 0, 0, 0, 0, time.UTC) },
 		ReadFile:       func(path string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 	}
 
-	plan := planBulkAssignFromAllocation(BulkAssignOptions{}, bulkAssignDeps(&deps), panes, mustParseAllocation(t, allocation))
+	plan := planBulkAssignFromAllocation(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), panes, mustParseAllocation(t, allocation))
 	output := BulkAssignOutput{Session: "proj"}
-	deps.SendKeys = func(paneID, message string, enter bool) error {
-		callOrder = append(callOrder, paneID)
+	deps.DispatchDeliverer = bulkTestDeliverer(t, func(delivery dispatchsvc.Delivery) error {
+		callOrder = append(callOrder, delivery.Target.Ref.ID)
 		return nil
-	}
+	})
 	deps = bulkAtomicTestDeps(t, "proj", plan, deps)
-	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
 
 	expectedOrder := []string{"%1", "%2"}
 	if !reflect.DeepEqual(callOrder, expectedOrder) {
@@ -356,10 +398,10 @@ func TestPlanBulkAssignFromAllocationDeduplicatesPhysicalAliases(t *testing.T) {
 		{Ref: tmux.PaneRef{ID: "%11", WindowIndex: 1, PaneIndex: 0}, AgentType: "claude", Title: "proj__cc_2"},
 	}
 	deps := bulkAssignDeps(&BulkAssignDependencies{
-		FetchBeadTitle: func(_ string, beadID string) (string, error) { return "Title " + beadID, nil },
+		FetchBeadTitle: func(_ context.Context, _ string, beadID string) (string, error) { return "Title " + beadID, nil },
 	})
 
-	plan := planBulkAssignFromAllocation(BulkAssignOptions{}, deps, panes, map[string]string{
+	plan := planBulkAssignFromAllocation(t.Context(), BulkAssignOptions{}, deps, panes, map[string]string{
 		"1.0": "bd-same",
 		"%11": "bd-same",
 	})
@@ -382,10 +424,10 @@ func TestPlanBulkAssignFromAllocationRejectsConflictingPhysicalAliases(t *testin
 		{Ref: tmux.PaneRef{ID: "%11", WindowIndex: 1, PaneIndex: 0}, AgentType: "claude", Title: "proj__cc_2"},
 	}
 	deps := bulkAssignDeps(&BulkAssignDependencies{
-		FetchBeadTitle: func(_ string, beadID string) (string, error) { return "Title " + beadID, nil },
+		FetchBeadTitle: func(_ context.Context, _ string, beadID string) (string, error) { return "Title " + beadID, nil },
 	})
 
-	plan := planBulkAssignFromAllocation(BulkAssignOptions{}, deps, panes, map[string]string{
+	plan := planBulkAssignFromAllocation(t.Context(), BulkAssignOptions{}, deps, panes, map[string]string{
 		"1.0": "bd-one",
 		"%11": "bd-two",
 	})
@@ -405,10 +447,10 @@ func TestBulkAssignStaggerOnlyPacesBetweenAtomicDispatchAttempts(t *testing.T) {
 	plan := allocateBulkAssignBeads(panes, []bulkBead{{ID: "bd-1", Title: "One"}, {ID: "bd-2", Title: "Two"}})
 	var events []string
 	deps := BulkAssignDependencies{
-		SendKeys: func(paneID, _ string, _ bool) error {
-			events = append(events, paneID)
+		DispatchDeliverer: bulkTestDeliverer(t, func(delivery dispatchsvc.Delivery) error {
+			events = append(events, delivery.Target.Ref.ID)
 			return nil
-		},
+		}),
 		Wait: func(_ context.Context, delay time.Duration) error {
 			events = append(events, "wait:"+delay.String())
 			return nil
@@ -417,10 +459,185 @@ func TestBulkAssignStaggerOnlyPacesBetweenAtomicDispatchAttempts(t *testing.T) {
 	}
 	deps = bulkAtomicTestDeps(t, "proj", plan, deps)
 	output := BulkAssignOutput{Session: "proj"}
-	applyBulkAssignPlan(BulkAssignOptions{Stagger: 25 * time.Millisecond}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{Stagger: 25 * time.Millisecond}, bulkAssignDeps(&deps), &output, plan)
 	want := []string{"%1", "wait:25ms", "%2"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events=%v, want %v", events, want)
+	}
+}
+
+func TestBulkAssignSequentialCancellationStopsLaterClaimAndDispatch(t *testing.T) {
+	panes := mockPanes("proj", []int{1, 2})
+	plan := allocateBulkAssignBeads(panes, []bulkBead{{ID: "bd-1", Title: "One"}, {ID: "bd-2", Title: "Two"}})
+	ctx, cancel := context.WithCancel(t.Context())
+	var sends atomic.Int32
+	deps := BulkAssignDependencies{
+		DispatchDeliverer: bulkTestDeliverer(t, func(dispatchsvc.Delivery) error {
+			sends.Add(1)
+			cancel()
+			return nil
+		}),
+		ReadFile: func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+	}
+	deps = bulkAtomicTestDeps(t, "proj", plan, deps)
+	originalClaim := deps.ClaimBead
+	var claims atomic.Int32
+	deps.ClaimBead = func(ctx context.Context, dir, beadID, actor string) (bv.BeadClaimResult, error) {
+		claims.Add(1)
+		return originalClaim(ctx, dir, beadID, actor)
+	}
+	output := BulkAssignOutput{Session: "proj"}
+	applyBulkAssignPlan(ctx, BulkAssignOptions{Stagger: time.Hour}, bulkAssignDeps(&deps), &output, plan)
+
+	if got := sends.Load(); got != 1 {
+		t.Fatalf("dispatches after cancellation = %d, want exactly first dispatch", got)
+	}
+	if got := claims.Load(); got != 1 {
+		t.Fatalf("claims after cancellation = %d, want exactly first claim", got)
+	}
+	if len(output.Assignments) != 2 || !strings.Contains(output.Assignments[1].Error, "canceled") || output.Assignments[1].PromptSent {
+		t.Fatalf("second assignment after cancellation = %+v", output.Assignments)
+	}
+}
+
+func TestBulkAssignCancellationPropagatesToTriageDependency(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	started := make(chan struct{})
+	inProgressCalls := atomic.Int32{}
+	projectDir := t.TempDir()
+	deps := BulkAssignDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return mockTmuxPanesForList([]int{1}), nil
+		},
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) {
+			return projectDir, nil
+		},
+		FetchTriage: func(callCtx context.Context, _ string) (*bv.TriageResponse, error) {
+			close(started)
+			<-callCtx.Done()
+			return nil, callCtx.Err()
+		},
+		FetchInProgress: func(context.Context, string, int) ([]bv.BeadInProgress, error) {
+			inProgressCalls.Add(1)
+			return nil, nil
+		},
+	}
+	type result struct {
+		output *BulkAssignOutput
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		output, err := GetBulkAssign(ctx, BulkAssignOptions{Session: "bulk-cancel-triage", FromBV: true, Deps: &deps})
+		done <- result{output: output, err: err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("bulk triage dependency did not start")
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("GetBulkAssign returned transport error: %v", got.err)
+		}
+		if got.output == nil || got.output.Success || got.output.ErrorCode != ErrCodeTimeout {
+			t.Fatalf("canceled triage output = %+v, want structured TIMEOUT failure", got.output)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bulk triage dependency ignored caller cancellation")
+	}
+	if got := inProgressCalls.Load(); got != 0 {
+		t.Fatalf("in-progress read after triage cancellation = %d", got)
+	}
+}
+
+func TestBulkAssignCancellationPropagatesToLiveProjectLookup(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	started := make(chan struct{})
+	deps := BulkAssignDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return mockTmuxPanesForList([]int{1}), nil
+		},
+		PaneCurrentPath: func(callCtx context.Context, _ string) (string, error) {
+			close(started)
+			<-callCtx.Done()
+			return "", callCtx.Err()
+		},
+	}
+	type result struct {
+		output *BulkAssignOutput
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		output, err := GetBulkAssign(ctx, BulkAssignOptions{Session: "bulk-cancel-project", FromBV: true, Deps: &deps})
+		done <- result{output: output, err: err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("bulk live-project lookup did not start")
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("GetBulkAssign returned transport error: %v", got.err)
+		}
+		if got.output == nil || got.output.Success || got.output.ErrorCode != ErrCodeTimeout {
+			t.Fatalf("canceled live-project output = %+v, want structured TIMEOUT failure", got.output)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bulk live-project lookup ignored caller cancellation")
+	}
+}
+
+func TestBulkAssignParallelCancellationJoinsAllWorkers(t *testing.T) {
+	panes := mockPanes("proj", []int{1, 2})
+	plan := allocateBulkAssignBeads(panes, []bulkBead{{ID: "bd-1", Title: "One"}, {ID: "bd-2", Title: "Two"}})
+	ctx, cancel := context.WithCancel(t.Context())
+	started := make(chan struct{}, 2)
+	var active atomic.Int32
+	var calls atomic.Int32
+	deps := BulkAssignDependencies{
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(ctx context.Context, _ dispatchsvc.Delivery) error {
+			calls.Add(1)
+			active.Add(1)
+			defer active.Add(-1)
+			started <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}),
+		ReadFile: func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+	}
+	deps = bulkAtomicTestDeps(t, "proj", plan, deps)
+	output := BulkAssignOutput{Session: "proj"}
+	done := make(chan struct{})
+	go func() {
+		applyBulkAssignPlan(ctx, BulkAssignOptions{Parallel: true}, bulkAssignDeps(&deps), &output, plan)
+		close(done)
+	}()
+
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("parallel bulk worker did not reach dispatch")
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("parallel bulk assignment did not join canceled workers")
+	}
+	if got := active.Load(); got != 0 {
+		t.Fatalf("active workers after return = %d", got)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("dispatch calls after joined return = %d, want 2", got)
 	}
 }
 
@@ -435,22 +652,22 @@ func TestBulkAssignUsesPaneTargetWhenAvailable(t *testing.T) {
 
 	var gotTarget string
 	deps := BulkAssignDependencies{
-		SendKeys: func(paneID, message string, enter bool) error {
-			gotTarget = paneID
+		DispatchDeliverer: bulkTestDeliverer(t, func(delivery dispatchsvc.Delivery) error {
+			gotTarget = delivery.Target.Ref.ID
 			return nil
-		},
+		}),
 		ReadFile: func(path string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 	}
 	output := BulkAssignOutput{Session: "proj"}
 	deps = bulkAtomicTestDeps(t, "proj", plan, deps)
-	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
 
 	if gotTarget != "%11" {
 		t.Fatalf("expected send target %%11, got %q", gotTarget)
 	}
 }
 
-func TestBulkAssignUsesAgentAwareSend(t *testing.T) {
+func TestBulkAssignUsesAgentAwareCanonicalDelivery(t *testing.T) {
 	panes := []bulkPane{
 		{Ref: tmux.PaneRef{ID: "%21", WindowIndex: 0, PaneIndex: 1}, AgentType: "codex"},
 	}
@@ -459,27 +676,19 @@ func TestBulkAssignUsesAgentAwareSend(t *testing.T) {
 	var (
 		gotTarget    string
 		gotAgentType tmux.AgentType
-		fallbackUsed bool
 	)
 	deps := BulkAssignDependencies{
-		SendKeys: func(paneID, message string, enter bool) error {
-			fallbackUsed = true
+		DispatchDeliverer: bulkTestDeliverer(t, func(delivery dispatchsvc.Delivery) error {
+			gotTarget = delivery.Target.Ref.ID
+			gotAgentType = delivery.Target.AgentType
 			return nil
-		},
-		SendKeysForAgent: func(paneID, message string, enter bool, agentType tmux.AgentType) error {
-			gotTarget = paneID
-			gotAgentType = agentType
-			return nil
-		},
+		}),
 		ReadFile: func(path string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 	}
 	output := BulkAssignOutput{Session: "proj"}
 	deps = bulkAtomicTestDeps(t, "proj", plan, deps)
-	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
 
-	if fallbackUsed {
-		t.Fatal("expected agent-aware send path, but fallback SendKeys was used")
-	}
 	if gotTarget != "%21" {
 		t.Fatalf("expected send target %%21, got %q", gotTarget)
 	}
@@ -488,7 +697,7 @@ func TestBulkAssignUsesAgentAwareSend(t *testing.T) {
 	}
 }
 
-func TestBulkAssignCustomSendKeysStillWorksWithoutAgentAwareStub(t *testing.T) {
+func TestBulkAssignCanonicalDelivererSubmitsPrompt(t *testing.T) {
 	panes := []bulkPane{
 		{Ref: tmux.PaneRef{ID: "%31", WindowIndex: 0, PaneIndex: 1}, AgentType: "codex"},
 	}
@@ -496,30 +705,30 @@ func TestBulkAssignCustomSendKeysStillWorksWithoutAgentAwareStub(t *testing.T) {
 
 	var (
 		gotTarget string
-		gotEnter  bool
+		gotPrompt string
 		gotCalls  int
 	)
 	deps := BulkAssignDependencies{
-		SendKeys: func(paneID, message string, enter bool) error {
-			gotTarget = paneID
-			gotEnter = enter
+		DispatchDeliverer: bulkTestDeliverer(t, func(delivery dispatchsvc.Delivery) error {
+			gotTarget = delivery.Target.Ref.ID
+			gotPrompt = delivery.Message
 			gotCalls++
 			return nil
-		},
+		}),
 		ReadFile: func(path string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 	}
 	output := BulkAssignOutput{Session: "proj"}
 	deps = bulkAtomicTestDeps(t, "proj", plan, deps)
-	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
 
 	if gotCalls != 1 {
-		t.Fatalf("expected custom SendKeys to be called once, got %d", gotCalls)
+		t.Fatalf("expected canonical deliverer to be called once, got %d", gotCalls)
 	}
 	if gotTarget != "%31" {
 		t.Fatalf("expected send target %%31, got %q", gotTarget)
 	}
-	if !gotEnter {
-		t.Fatal("expected enter=true for bulk assign prompt send")
+	if !strings.Contains(gotPrompt, "bd-1") || !strings.Contains(gotPrompt, "Title1") {
+		t.Fatalf("canonical delivery prompt = %q, want bead identity and title", gotPrompt)
 	}
 	if output.Assignments[0].Status != "assigned" {
 		t.Fatalf("expected assigned status, got %q", output.Assignments[0].Status)
@@ -532,17 +741,17 @@ func TestBulkAssignFailedDelivery(t *testing.T) {
 	plan := allocateBulkAssignBeads(panes, beads)
 
 	deps := BulkAssignDependencies{
-		SendKeys: func(paneID, message string, enter bool) error {
-			if paneID == "%2" {
+		DispatchDeliverer: bulkTestDeliverer(t, func(delivery dispatchsvc.Delivery) error {
+			if delivery.Target.Ref.ID == "%2" {
 				return errors.New("send failed")
 			}
 			return nil
-		},
+		}),
 		ReadFile: func(path string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 	}
 	output := BulkAssignOutput{Session: "proj"}
 	deps = bulkAtomicTestDeps(t, "proj", plan, deps)
-	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
 
 	if output.Summary.Failed != 1 {
 		t.Fatalf("expected 1 failed assignment, got %d", output.Summary.Failed)
@@ -561,15 +770,15 @@ func TestBulkAssignDryRunSkipsPromptSend(t *testing.T) {
 
 	sent := false
 	deps := BulkAssignDependencies{
-		SendKeys: func(paneID, message string, enter bool) error {
+		DispatchDeliverer: bulkTestDeliverer(t, func(dispatchsvc.Delivery) error {
 			sent = true
 			return nil
-		},
+		}),
 		ReadFile: func(path string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 	}
 
 	output := BulkAssignOutput{Session: "proj"}
-	applyBulkAssignPlan(BulkAssignOptions{DryRun: true}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{DryRun: true}, bulkAssignDeps(&deps), &output, plan)
 
 	if sent {
 		t.Fatal("expected no send calls in dry run")
@@ -598,7 +807,7 @@ func TestBulkAssignAtomicOrderAndDurableReplay(t *testing.T) {
 	deps := BulkAssignDependencies{
 		ReadFile: func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 		Cwd:      func() (string, error) { return t.TempDir(), nil },
-		ListPanes: func(string) ([]tmux.Pane, error) {
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
 			return []tmux.Pane{{ID: "%21", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex}}, nil
 		},
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
@@ -648,9 +857,9 @@ func TestBulkAssignAtomicOrderAndDurableReplay(t *testing.T) {
 
 	first := BulkAssignOutput{Session: "bulk-atomic"}
 	reservationPaths := []string{"internal/robot/**"}
-	applyBulkAssignPlan(BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths}, bulkAssignDeps(&deps), &first, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths}, bulkAssignDeps(&deps), &first, plan)
 	second := BulkAssignOutput{Session: "bulk-atomic"}
-	applyBulkAssignPlan(BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths}, bulkAssignDeps(&deps), &second, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths}, bulkAssignDeps(&deps), &second, plan)
 	if len(first.Assignments) != 1 || !first.Assignments[0].Claimed || !first.Assignments[0].PromptSent || first.Assignments[0].DispatchReceiptID == "" {
 		t.Fatalf("first assignments=%+v", first.Assignments)
 	}
@@ -708,7 +917,7 @@ func TestRobotAtomicPaneDispatchRevalidatesFreshIdleBeforeActuation(t *testing.T
 			deliveries := 0
 			port := newRobotAtomicPaneDispatchPort(
 				"dispatch-guard",
-				func(string) ([]tmux.Pane, error) { return []tmux.Pane{pane}, nil },
+				func(context.Context, string) ([]tmux.Pane, error) { return []tmux.Pane{pane}, nil },
 				test.observe,
 				redaction.Config{Mode: redaction.ModeOff},
 				dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
@@ -730,6 +939,52 @@ func TestRobotAtomicPaneDispatchRevalidatesFreshIdleBeforeActuation(t *testing.T
 	}
 }
 
+func TestRobotAtomicPreflightBlocksSensitiveReservationPathBeforeTopologyLookup(t *testing.T) {
+	port := newRobotAtomicPaneDispatchPort(
+		"sensitive-path", nil, nil, redaction.DefaultConfig(), nil, nil,
+	)
+	_, err := port.Preflight(t.Context(), assignment.DispatchRequest{
+		BeadID: "ntm-sensitive-path", BeadTitle: "Safe title", Target: "%31", Prompt: "safe prompt",
+		RequestedPaths: []string{"internal/" + "sk-proj-FAKEtestkey1234567890123456789012345678901234" + ".txt"},
+	})
+	var dispatchErr *dispatchsvc.Error
+	if !errors.As(err, &dispatchErr) || dispatchErr.Code != dispatchsvc.ErrRedactionBlocked || !strings.Contains(err.Error(), "reservation path") {
+		t.Fatalf("sensitive path preflight error=%v", err)
+	}
+}
+
+func TestBulkAssignDryRunSanitizesTitlesAndBlocksSensitiveReservationPaths(t *testing.T) {
+	const secret = "sk-proj-FAKEtestkey1234567890123456789012345678901234"
+	deps := bulkAssignDeps(&BulkAssignDependencies{
+		LoadRedaction: func(string) (redaction.Config, error) { return redaction.DefaultConfig(), nil },
+	})
+
+	t.Run("title", func(t *testing.T) {
+		output := &BulkAssignOutput{RobotResponse: NewRobotResponse(true), Session: "dry-title", DryRun: true}
+		plan := bulkAssignPlan{Assignments: []BulkAssignAssignment{{
+			Pane: "1", PaneID: "%31", Bead: "bd-title", BeadTitle: "Fix " + secret, AgentType: "cod", Status: "planned",
+		}}}
+		applyBulkAssignPlan(t.Context(), BulkAssignOptions{DryRun: true, projectDir: "/project"}, deps, output, plan)
+		if len(output.Assignments) != 1 || strings.Contains(output.Assignments[0].BeadTitle, secret) || !strings.Contains(output.Assignments[0].BeadTitle, "[REDACTED:") {
+			t.Fatalf("dry-run title output=%+v", output.Assignments)
+		}
+	})
+
+	t.Run("reservation path", func(t *testing.T) {
+		output := &BulkAssignOutput{RobotResponse: NewRobotResponse(true), Session: "dry-path", DryRun: true}
+		plan := bulkAssignPlan{Assignments: []BulkAssignAssignment{{
+			Pane: "1", PaneID: "%31", Bead: "bd-path", BeadTitle: "Safe title", AgentType: "cod", Status: "planned",
+		}}}
+		applyBulkAssignPlan(t.Context(), BulkAssignOptions{
+			DryRun: true, RequireReservation: true, ReservationPaths: []string{"internal/" + secret + ".txt"}, projectDir: "/project",
+		}, deps, output, plan)
+		if output.Success || len(output.Assignments) != 1 || output.Assignments[0].Status != "failed" ||
+			!strings.Contains(output.Assignments[0].Error, "reservation path") || strings.Contains(fmt.Sprint(output), secret) {
+			t.Fatalf("sensitive path dry-run output=%+v", output)
+		}
+	})
+}
+
 func TestRobotAtomicReplayMatchesRawIntentAgainstRedactedDurablePrompt(t *testing.T) {
 	store := assignment.NewStore("redacted-replay")
 	rawPrompt := "token=raw-secret"
@@ -742,13 +997,13 @@ func TestRobotAtomicReplayMatchesRawIntentAgainstRedactedDurablePrompt(t *testin
 	}
 	keyCalls := 0
 	key, err := robotAtomicIdempotencyKey(
-		store, "bd-redacted", "%44", 1, "codex", "ExactAgent", rawPrompt, false, nil,
+		store, "bd-redacted", "%44", 9, "codex", "ExactAgent", rawPrompt, false, nil,
 		func() (string, error) { keyCalls++; return "new-key", nil },
 	)
 	if err != nil || key != "existing-key" || keyCalls != 0 {
 		t.Fatalf("key=%q calls=%d err=%v", key, keyCalls, err)
 	}
-	if replay := robotAtomicReplayIntent(store, "bd-redacted", "%44", 1, "codex", rawPrompt, false, nil); replay == nil || replay.IdempotencyKey != key {
+	if replay := robotAtomicReplayIntent(store, "bd-redacted", "%44", 9, "codex", rawPrompt, false, nil); replay == nil || replay.IdempotencyKey != key || replay.Pane != 1 {
 		t.Fatalf("raw intent did not match redacted durable replay: %+v", replay)
 	}
 }
@@ -806,6 +1061,44 @@ func TestBulkAtomicRuntimeSharesFreshObservationAcrossConcurrentAssignments(t *t
 	}
 }
 
+func TestApplyBulkAtomicExecutionResultKeepsDurableReceiptAuthoritativeAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	output := &BulkAssignAssignment{
+		Pane: "0", PaneID: "%41", Bead: "bd-post-success-cancel", BeadTitle: "Original", Status: "planned",
+	}
+	record := &assignment.Assignment{
+		BeadID: "bd-post-success-cancel", BeadTitle: "Durable", IdempotencyKey: "post-success-key",
+		Status: assignment.StatusAssigned, ClaimState: assignment.ClaimClaimed, ClaimActor: "ExactAgent",
+		DispatchState: assignment.DispatchSent, DispatchReceiptID: "receipt-post-success",
+	}
+	applyBulkAtomicExecutionResult(ctx, output, "post-success-key", assignment.AtomicResult{
+		Assignment: record,
+		Sent:       true,
+		Dispatch:   assignment.DispatchReceipt{DeliveryID: "receipt-post-success"},
+	}, nil)
+
+	if output.Status != "assigned" || !output.PromptSent || !output.Claimed || output.ClaimActor != "ExactAgent" ||
+		output.DispatchReceiptID != "receipt-post-success" || output.Error != "" || output.failureCause != nil {
+		t.Fatalf("post-success cancellation overwrote authoritative receipt: %+v", output)
+	}
+
+	unstarted := &BulkAssignAssignment{Pane: "1", PaneID: "%42", Bead: "bd-unstarted-cancel", Status: "planned"}
+	applyBulkAtomicExecutionResult(ctx, unstarted, "unstarted-key", assignment.AtomicResult{}, nil)
+	if unstarted.Status != "failed" || unstarted.PromptSent || unstarted.failureCode != ErrCodeTimeout || !errors.Is(unstarted.failureCause, context.Canceled) {
+		t.Fatalf("unstarted canceled assignment = %+v", unstarted)
+	}
+}
+
+func TestBulkAssignFailureClassReportsAmbiguousDispatchTruthfully(t *testing.T) {
+	code, hint := bulkAssignFailureClass([]BulkAssignAssignment{{
+		Status: "failed", failureCause: assignment.ErrDispatchOutcomeUnknown,
+	}})
+	if code != ErrCodeDispatchUnknown || !strings.Contains(hint, "outcome is unknown") || strings.Contains(hint, "no failed target was dispatched") {
+		t.Fatalf("ambiguous dispatch classification code=%q hint=%q", code, hint)
+	}
+}
+
 func TestBulkAssignClaimConflictNeverReservesOrDispatches(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	plan := allocateBulkAssignBeads(
@@ -817,7 +1110,7 @@ func TestBulkAssignClaimConflictNeverReservesOrDispatches(t *testing.T) {
 	deps := BulkAssignDependencies{
 		ReadFile: func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 		Cwd:      func() (string, error) { return t.TempDir(), nil },
-		ListPanes: func(string) ([]tmux.Pane, error) {
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
 			return []tmux.Pane{{ID: "%7", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude}}, nil
 		},
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("bulk-conflict"), nil },
@@ -839,12 +1132,24 @@ func TestBulkAssignClaimConflictNeverReservesOrDispatches(t *testing.T) {
 		LoadRedaction: func(string) (redaction.Config, error) { return redaction.Config{Mode: redaction.ModeOff}, nil },
 	}
 	output := BulkAssignOutput{Session: "bulk-conflict"}
-	applyBulkAssignPlan(BulkAssignOptions{RequireReservation: true, ReservationPaths: []string{"internal/robot/**"}}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: []string{"internal/robot/**"}}, bulkAssignDeps(&deps), &output, plan)
 	if len(output.Assignments) != 1 || output.Assignments[0].Status != "failed" || output.Assignments[0].PromptSent || output.Assignments[0].Claimed {
 		t.Fatalf("output=%+v", output.Assignments)
 	}
 	if reserveCalls != 0 || deliverCalls != 0 {
 		t.Fatalf("reserve=%d dispatch=%d, want zero", reserveCalls, deliverCalls)
+	}
+}
+
+func TestRobotAtomicClaimPortMapsAssignmentEligibilityRejection(t *testing.T) {
+	port := newRobotAtomicClaimPort(t.TempDir(), func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+		return bv.BeadClaimResult{}, &bv.AssignmentEligibilityError{
+			BeadID: "bd-gated", Status: "open", OperatorLabels: []string{"operator-gated"},
+		}
+	})
+	_, err := port.Claim(t.Context(), "bd-gated", "StableActor")
+	if !errors.Is(err, assignment.ErrClaimIneligible) || errors.Is(err, assignment.ErrClaimConflict) {
+		t.Fatalf("robot atomic claim error=%v, want ineligible only", err)
 	}
 }
 
@@ -873,7 +1178,7 @@ func TestBulkAssignDryRunHasNoAtomicOrPacingSideEffects(t *testing.T) {
 		Wait:              func(context.Context, time.Duration) error { calls++; return nil },
 	}
 	output := BulkAssignOutput{Session: "bulk-dry"}
-	applyBulkAssignPlan(BulkAssignOptions{DryRun: true, RequireReservation: true, ReservationPaths: []string{"internal/robot/**"}, Stagger: time.Hour}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{DryRun: true, RequireReservation: true, ReservationPaths: []string{"internal/robot/**"}, Stagger: time.Hour}, bulkAssignDeps(&deps), &output, plan)
 	if calls != 0 || len(output.Assignments) != 1 || output.Assignments[0].Status != "planned" {
 		t.Fatalf("calls=%d output=%+v", calls, output.Assignments)
 	}
@@ -936,9 +1241,9 @@ func TestBulkAssignTerminalGenerationRequiresReopenedBead(t *testing.T) {
 	deps := BulkAssignDependencies{
 		ReadFile:       func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 		Cwd:            func() (string, error) { return t.TempDir(), nil },
-		ListPanes:      func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		ListPanes:      func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
 		LoadStore:      func(string) (*assignment.AssignmentStore, error) { return store, nil },
-		GetBeadStatus:  func(string, string) (string, error) { return "closed", nil },
+		GetBeadStatus:  func(context.Context, string, string) (string, error) { return "closed", nil },
 		ObserveSession: bulkSafeObserver(panes),
 		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
 			claimCalls++
@@ -952,7 +1257,7 @@ func TestBulkAssignTerminalGenerationRequiresReopenedBead(t *testing.T) {
 		}),
 	}
 	output := BulkAssignOutput{Session: session}
-	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
 	if len(output.Assignments) != 1 || output.Assignments[0].Status != "failed" ||
 		!strings.Contains(output.Assignments[0].Error, "tracker status is \"closed\"") || output.Assignments[0].PromptSent {
 		t.Fatalf("closed terminal assignment output=%+v", output.Assignments)
@@ -984,59 +1289,8 @@ func TestBulkAssignAllocationInvalidJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
-}
-
-func TestBulkAssignSkipPanesParsing(t *testing.T) {
-	values, err := parseBulkAssignSkipPanes("1, 3,5")
-	if err != nil {
-		t.Fatalf("parseBulkAssignSkipPanes failed: %v", err)
-	}
-	sort.Strings(values)
-	expected := []string{"1", "3", "5"}
-	if !reflect.DeepEqual(values, expected) {
-		t.Fatalf("skip panes mismatch: got %v want %v", values, expected)
-	}
-}
-
-func TestParseBulkAssignSkipPanes_EdgeCases(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		want    []string
-		wantErr bool
-	}{
-		{"empty string", "", nil, false},
-		{"whitespace only", "   ", nil, false},
-		{"single value", "5", []string{"5"}, false},
-		{"window and id selectors", "1.3,%7", []string{"%7", "1.3"}, false},
-		{"with empty parts", "1,,3", nil, true},
-		{"trailing comma", "1,2,", nil, true},
-		{"leading comma", ",1,2", nil, true},
-		{"negative value", "-1,2", nil, true},
-		{"non-numeric", "abc", nil, true},
-		{"mixed valid invalid", "1,abc,3", nil, true},
-		{"zero value", "0", []string{"0"}, false},
-		{"spaces around values", " 1 , 2 , 3 ", []string{"1", "2", "3"}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseBulkAssignSkipPanes(tt.input)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("parseBulkAssignSkipPanes(%q) expected error, got nil", tt.input)
-				}
-				return
-			}
-			if err != nil {
-				t.Errorf("parseBulkAssignSkipPanes(%q) unexpected error: %v", tt.input, err)
-				return
-			}
-			sort.Strings(got)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("parseBulkAssignSkipPanes(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
+	if _, err := parseBulkAssignAllocation(`{}`); err == nil || !strings.Contains(err.Error(), "at least one") {
+		t.Fatalf("empty allocation error = %v, want non-empty allocation validation", err)
 	}
 }
 
@@ -1112,13 +1366,13 @@ func TestBulkAssignInvalidBeadIDInAllocation(t *testing.T) {
 	allocation := map[string]string{"1": "bd-missing"}
 	panes := mockPanes("proj", []int{1})
 	deps := BulkAssignDependencies{
-		FetchBeadTitle: func(_ string, beadID string) (string, error) {
+		FetchBeadTitle: func(_ context.Context, _ string, beadID string) (string, error) {
 			return "", fmt.Errorf("bead %s not found", beadID)
 		},
 		Cwd: func() (string, error) { return "/tmp", nil },
 	}
 
-	plan := planBulkAssignFromAllocation(BulkAssignOptions{}, bulkAssignDeps(&deps), panes, allocation)
+	plan := planBulkAssignFromAllocation(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), panes, allocation)
 	if plan.Assignments[0].Status != "failed" {
 		t.Fatalf("expected failed status, got %q", plan.Assignments[0].Status)
 	}
@@ -1128,21 +1382,20 @@ func TestBulkAssignInvalidBeadIDInAllocation(t *testing.T) {
 
 func TestBulkAssignBVFailure(t *testing.T) {
 	deps := BulkAssignDependencies{
-		FetchTriage: func(_ string) (*bv.TriageResponse, error) {
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 			return nil, errors.New("bv failed")
 		},
-		FetchInProgress: func(_ string, _ int) ([]bv.BeadInProgress, error) {
+		FetchInProgress: func(context.Context, string, int) ([]bv.BeadInProgress, error) {
 			return nil, nil
 		},
-		ListPanes: func(_ string) ([]tmux.Pane, error) {
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
 			return mockTmuxPanesForList([]int{1}), nil
 		},
-		Now: func() time.Time { return time.Date(2026, 1, 20, 0, 0, 0, 0, time.UTC) },
 		Cwd: func() (string, error) { return "/tmp", nil },
 	}
 
 	output, err := captureStdout(t, func() error {
-		return PrintBulkAssign(BulkAssignOptions{Session: "proj", FromBV: true, Deps: &deps})
+		return PrintBulkAssign(t.Context(), BulkAssignOptions{Session: "proj", FromBV: true, Deps: &deps})
 	})
 	var exitErr *ProcessExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
@@ -1170,7 +1423,7 @@ func TestBulkAssignUsesAuthoritativeSessionProjectForBVPlanning(t *testing.T) {
 	var triageDir, inProgressDir string
 	cwdCalls := 0
 	deps := BulkAssignDependencies{
-		ResolveProject: func(session string, _ []tmux.Pane) (string, error) {
+		ResolveProject: func(_ context.Context, session string, _ []tmux.Pane) (string, error) {
 			if session != "authoritative-session" {
 				t.Fatalf("ResolveProject session = %q", session)
 			}
@@ -1180,21 +1433,20 @@ func TestBulkAssignUsesAuthoritativeSessionProjectForBVPlanning(t *testing.T) {
 			cwdCalls++
 			return wrongCWD, nil
 		},
-		FetchTriage: func(dir string) (*bv.TriageResponse, error) {
+		FetchTriage: func(_ context.Context, dir string) (*bv.TriageResponse, error) {
 			triageDir = dir
 			return mockTriage([]bv.TriageRecommendation{{ID: "bd-auth", Title: "Scoped work", Status: "open", Priority: 1}}, nil), nil
 		},
-		FetchInProgress: func(dir string, _ int) ([]bv.BeadInProgress, error) {
+		FetchInProgress: func(_ context.Context, dir string, _ int) ([]bv.BeadInProgress, error) {
 			inProgressDir = dir
 			return nil, nil
 		},
-		ListPanes: func(string) ([]tmux.Pane, error) {
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
 			return mockTmuxPanesForList([]int{1}), nil
 		},
-		Now: func() time.Time { return time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC) },
 	}
 
-	output, err := GetBulkAssign(BulkAssignOptions{
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{
 		Session: "authoritative-session", FromBV: true, DryRun: true, Deps: &deps,
 	})
 	if err != nil {
@@ -1231,26 +1483,26 @@ func TestBulkAssignLiveSessionProjectOverridesCallerCWDWithoutSavedMetadata(t *t
 	panes := mockTmuxPanesForList([]int{1})
 	deps := BulkAssignDependencies{
 		Cwd: func() (string, error) { return callerProject, nil },
-		PaneCurrentPath: func(paneID string) (string, error) {
+		PaneCurrentPath: func(_ context.Context, paneID string) (string, error) {
 			if paneID != "%1" {
 				t.Fatalf("pane path lookup = %q, want %%1", paneID)
 			}
 			return filepath.Join(sessionProject, "internal", "robot"), nil
 		},
-		ListPanes: func(gotSession string) ([]tmux.Pane, error) {
+		ListPanes: func(_ context.Context, gotSession string) ([]tmux.Pane, error) {
 			if gotSession != session {
 				t.Fatalf("ListPanes session = %q, want exact %q", gotSession, session)
 			}
 			return panes, nil
 		},
-		FetchTriage: func(dir string) (*bv.TriageResponse, error) {
+		FetchTriage: func(_ context.Context, dir string) (*bv.TriageResponse, error) {
 			triageDir = dir
 			return mockTriage([]bv.TriageRecommendation{{ID: "bd-live", Title: "Live scoped work", Status: "open", Priority: 1}}, nil), nil
 		},
-		FetchInProgress: func(string, int) ([]bv.BeadInProgress, error) { return nil, nil },
+		FetchInProgress: func(context.Context, string, int) ([]bv.BeadInProgress, error) { return nil, nil },
 	}
 
-	output, err := GetBulkAssign(BulkAssignOptions{Session: session, FromBV: true, DryRun: true, Deps: &deps})
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{Session: session, FromBV: true, DryRun: true, Deps: &deps})
 	if err != nil {
 		t.Fatalf("GetBulkAssign: %v", err)
 	}
@@ -1274,20 +1526,20 @@ func TestBulkAssignRejectsLiveSessionWithMultipleProjectRoots(t *testing.T) {
 	panes := mockTmuxPanesForList([]int{1, 2})
 	deps := BulkAssignDependencies{
 		Cwd: func() (string, error) { return secondProject, nil },
-		PaneCurrentPath: func(paneID string) (string, error) {
+		PaneCurrentPath: func(_ context.Context, paneID string) (string, error) {
 			if paneID == "%1" {
 				return firstProject, nil
 			}
 			return secondProject, nil
 		},
-		ListPanes: func(string) ([]tmux.Pane, error) { return panes, nil },
-		FetchTriage: func(string) (*bv.TriageResponse, error) {
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 			t.Fatal("triage must not run for ambiguous live project roots")
 			return nil, nil
 		},
 	}
 
-	output, err := GetBulkAssign(BulkAssignOptions{Session: "mixed-live-session", FromBV: true, DryRun: true, Deps: &deps})
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{Session: "mixed-live-session", FromBV: true, DryRun: true, Deps: &deps})
 	if err != nil {
 		t.Fatalf("GetBulkAssign: %v", err)
 	}
@@ -1305,16 +1557,16 @@ func TestBulkAssignUsesAuthoritativeSessionProjectForActuation(t *testing.T) {
 	cwdCalls := 0
 	panes := mockTmuxPanesForList([]int{1})
 	deps := BulkAssignDependencies{
-		ResolveProject: func(string, []tmux.Pane) (string, error) { return authoritative, nil },
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) { return authoritative, nil },
 		Cwd: func() (string, error) {
 			cwdCalls++
 			return wrongCWD, nil
 		},
-		FetchBeadTitle: func(dir, beadID string) (string, error) {
+		FetchBeadTitle: func(_ context.Context, dir, beadID string) (string, error) {
 			titleDir = dir
 			return "Scoped " + beadID, nil
 		},
-		ListPanes: func(string) ([]tmux.Pane, error) { return panes, nil },
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
 		ReadFile:  func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
 		ClaimBead: func(_ context.Context, dir, beadID, actor string) (bv.BeadClaimResult, error) {
@@ -1333,7 +1585,7 @@ func TestBulkAssignUsesAuthoritativeSessionProjectForActuation(t *testing.T) {
 		},
 	}
 
-	output, err := GetBulkAssign(BulkAssignOptions{
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{
 		Session: "authoritative-actuation", AllocationJSON: `{"1":"bd-auth"}`, Deps: &deps,
 	})
 	if err != nil {
@@ -1372,9 +1624,11 @@ func TestRobotReservationPreflightFailuresGuaranteeNoLease(t *testing.T) {
 }
 
 func TestRobotReservationPartialConflictPreservesLeaseHandles(t *testing.T) {
+	expiresAt := time.Now().UTC().Add(time.Hour)
 	client := &fakeRobotReservationClient{reserveResult: &agentmail.ReservationResult{
 		Granted: []agentmail.FileReservation{{
 			ID: 41, PathPattern: "internal/robot/**", AgentName: "KnownAgent", ProjectID: 7, Exclusive: true,
+			Reason: "bead assignment: bd-partial", ExpiresTS: agentmail.FlexTime{Time: expiresAt},
 		}},
 		Conflicts: []agentmail.ReservationConflict{{Path: "internal/cli/**", Holders: []string{"OtherAgent"}}},
 	}}
@@ -1394,14 +1648,57 @@ func TestRobotReservationPartialConflictPreservesLeaseHandles(t *testing.T) {
 	}
 }
 
+func TestRobotReservationRejectsMalformedGrantReceipts(t *testing.T) {
+	valid := agentmail.FileReservation{
+		ID: 42, PathPattern: "internal/robot/**", AgentName: "KnownAgent", ProjectID: 7, Exclusive: true,
+		Reason: "bead assignment: bd-malformed", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*agentmail.FileReservation)
+	}{
+		{name: "wrong reason", mutate: func(row *agentmail.FileReservation) { row.Reason = "bead assignment: other" }},
+		{name: "already released", mutate: func(row *agentmail.FileReservation) {
+			released := agentmail.FlexTime{Time: time.Now().UTC()}
+			row.ReleasedTS = &released
+		}},
+		{name: "missing expiry", mutate: func(row *agentmail.FileReservation) { row.ExpiresTS = agentmail.FlexTime{} }},
+		{name: "expired", mutate: func(row *agentmail.FileReservation) {
+			row.ExpiresTS = agentmail.FlexTime{Time: time.Now().UTC().Add(-time.Second)}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			row := valid
+			test.mutate(&row)
+			runtime := &robotAgentMailReservationRuntime{
+				client:     &fakeRobotReservationClient{reserveResult: &agentmail.ReservationResult{Granted: []agentmail.FileReservation{row}}},
+				projectKey: "/project", projectID: 7,
+				registered: map[string]agentmail.Agent{"KnownAgent": {Name: "KnownAgent", ProjectID: 7}},
+			}
+			lease, err := runtime.Reserve(t.Context(), assignment.ReservationRequest{
+				BeadID: "bd-malformed", AgentName: "KnownAgent", Target: "%1", RequestedPaths: []string{"internal/robot/**"},
+			})
+			if err == nil {
+				t.Fatal("malformed grant was accepted")
+			}
+			if !reflect.DeepEqual(lease.ReservationIDs, []int{42}) || !reflect.DeepEqual(lease.Granted, []string{"internal/robot/**"}) {
+				t.Fatalf("malformed grant lost cleanup handles: %+v", lease)
+			}
+		})
+	}
+}
+
 func TestRobotReservationReconciliationDistinguishesAbsentPartialAndReserved(t *testing.T) {
 	base := agentmail.FileReservation{
 		ID: 51, PathPattern: "internal/robot/**", AgentName: "KnownAgent", ProjectID: 7,
 		Exclusive: true, Reason: "bead assignment: bd-reconcile",
+		ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
 	}
 	second := base
 	second.ID = 52
 	second.PathPattern = "internal/cli/**"
+	missingExpiry := base
+	missingExpiry.ExpiresTS = agentmail.FlexTime{}
 	request := assignment.ReservationRequest{
 		BeadID: "bd-reconcile", AgentName: "KnownAgent", Target: "%1",
 		RequestedPaths: []string{"internal/robot/**", "internal/cli/**"},
@@ -1413,6 +1710,7 @@ func TestRobotReservationReconciliationDistinguishesAbsentPartialAndReserved(t *
 	}{
 		{name: "absent", want: assignment.ReservationReconciliationAbsent},
 		{name: "partial", reservations: []agentmail.FileReservation{base}, want: assignment.ReservationReconciliationUnknown},
+		{name: "one missing expiry", reservations: []agentmail.FileReservation{missingExpiry, second}, want: assignment.ReservationReconciliationUnknown},
 		{name: "reserved", reservations: []agentmail.FileReservation{base, second}, want: assignment.ReservationReconciliationReserved},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1426,6 +1724,9 @@ func TestRobotReservationReconciliationDistinguishesAbsentPartialAndReserved(t *
 			}
 			if got.State != test.want {
 				t.Fatalf("state = %q, want %q; lease=%+v", got.State, test.want, got.Lease)
+			}
+			if test.name == "one missing expiry" && !reflect.DeepEqual(got.Lease.ReservationIDs, []int{51}) {
+				t.Fatalf("malformed reconciliation lost cleanup handle: %+v", got.Lease)
 			}
 			if test.want == assignment.ReservationReconciliationReserved && len(got.Lease.ReservationIDs) != 2 {
 				t.Fatalf("reserved lease = %+v", got.Lease)
@@ -1445,16 +1746,20 @@ func TestBulkAssignPaneListMapsMissingSessionAndTimeout(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			startedAt := time.Now().UTC()
 			deps := BulkAssignDependencies{
-				ListPanes: func(string) ([]tmux.Pane, error) { return nil, test.err },
-				Now:       func() time.Time { return time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC) },
+				ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return nil, test.err },
 			}
-			output, err := GetBulkAssign(BulkAssignOptions{Session: "absent", AllocationJSON: `{}`, Deps: &deps})
+			output, err := GetBulkAssign(t.Context(), BulkAssignOptions{Session: "absent", AllocationJSON: `{}`, Deps: &deps})
 			if err != nil {
 				t.Fatalf("GetBulkAssign returned transport error: %v", err)
 			}
 			if output.Success || output.ErrorCode != test.code || output.Assignments == nil {
 				t.Fatalf("response=%+v, want success=false code=%s and non-nil assignments", output, test.code)
+			}
+			timestamp, parseErr := time.Parse(time.RFC3339Nano, output.Timestamp)
+			if parseErr != nil || timestamp.Before(startedAt.Add(-time.Second)) || timestamp.After(time.Now().UTC().Add(time.Second)) {
+				t.Fatalf("early failure timestamp = %q parsed=%v err=%v", output.Timestamp, timestamp, parseErr)
 			}
 		})
 	}
@@ -1599,10 +1904,12 @@ func bulkAtomicTestDeps(t *testing.T, session string, plan bulkAssignPlan, deps 
 				Type: bulkAssignTMUXAgentType(planned.AgentType),
 			})
 		}
-		deps.ListPanes = func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil }
+		deps.ListPanes = func(context.Context, string) ([]tmux.Pane, error) {
+			return append([]tmux.Pane(nil), panes...), nil
+		}
 	}
 	deps.ObserveSession = func(_ context.Context, observedSession string) (statuspkg.SessionObservation, error) {
-		panes, err := deps.ListPanes(observedSession)
+		panes, err := deps.ListPanes(context.Background(), observedSession)
 		if err != nil {
 			return statuspkg.SessionObservation{}, err
 		}

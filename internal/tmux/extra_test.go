@@ -96,6 +96,11 @@ func TestClassifyCommandError(t *testing.T) {
 			want: CommandErrorClass{Kind: CommandErrorPermissionDenied, Infrastructure: true},
 		},
 		{
+			name: "permission denied while connecting",
+			err:  fmt.Errorf("tmux has-session: %w: error connecting to /tmp/tmux-1000/default (Permission denied)", exit1),
+			want: CommandErrorClass{Kind: CommandErrorPermissionDenied, Infrastructure: true},
+		},
+		{
 			name: "missing session",
 			err:  fmt.Errorf("tmux list-panes: %w: can't find session: missing", exit1),
 			want: CommandErrorClass{Kind: CommandErrorSessionNotFound},

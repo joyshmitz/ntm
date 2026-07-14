@@ -41,6 +41,7 @@ type mailStub struct {
 	renewCalls         []renewCall
 	forceReleaseCalls  []forceReleaseCall
 	releaseResult      agentmail.ReleaseReservationsResult
+	keepOnRelease      bool
 	renewResult        agentmail.RenewReservationsResult
 	forceReleaseResult agentmail.ForceReleaseResult
 	failIDs            map[int]string // messageID -> error message
@@ -277,12 +278,32 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 			}
 			writeResponse(map[string]interface{}{})
 		case "release_file_reservations":
-			stub.releaseCalls = append(stub.releaseCalls, releaseCall{
+			call := releaseCall{
 				Agent:   toString(args["agent_name"]),
 				Project: toString(args["project_key"]),
 				Paths:   toStringSlice(args["paths"]),
 				IDs:     toIntSlice(args["file_reservation_ids"]),
-			})
+			}
+			stub.releaseCalls = append(stub.releaseCalls, call)
+			if stub.releaseResult.Released > 0 && !stub.keepOnRelease {
+				ids := make(map[int]struct{}, len(call.IDs))
+				for _, id := range call.IDs {
+					ids[id] = struct{}{}
+				}
+				paths := make(map[string]struct{}, len(call.Paths))
+				for _, path := range call.Paths {
+					paths[path] = struct{}{}
+				}
+				remaining := stub.reservations[:0]
+				for _, reservation := range stub.reservations {
+					_, releaseID := ids[reservation.ID]
+					_, releasePath := paths[reservation.PathPattern]
+					if reservation.AgentName != call.Agent || (!releaseID && !releasePath) {
+						remaining = append(remaining, reservation)
+					}
+				}
+				stub.reservations = remaining
+			}
 			writeResponse(stub.releaseResult)
 		case "file_reservation_paths":
 			call := reserveCall{
@@ -303,8 +324,8 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 					"project_id":   1,
 					"exclusive":    call.Exclusive,
 					"reason":       call.Reason,
-					"expires_ts":   "2026-02-01T01:00:00Z",
-					"created_ts":   "2026-02-01T00:00:00Z",
+					"expires_ts":   "2030-02-01T01:00:00Z",
+					"created_ts":   "2030-02-01T00:00:00Z",
 				})
 			}
 			writeResponse(map[string]interface{}{
@@ -1389,6 +1410,7 @@ func TestResolveAgentMailScopeWithPreferenceNormalizesExplicitPrefix(t *testing.
 
 func TestResolveAgentMailScopeWithPreferenceRejectsWorkspaceFallbackForExplicitSession(t *testing.T) {
 	isolateSessionAgentStorage(t)
+	session := "ntm-mail-explicit-missing-project-test"
 
 	origCfg := cfg
 	origWd, _ := os.Getwd()
@@ -1407,7 +1429,7 @@ func TestResolveAgentMailScopeWithPreferenceRejectsWorkspaceFallbackForExplicitS
 		t.Fatalf("chdir: %v", err)
 	}
 
-	_, _, err := resolveAgentMailScopeWithPreference("ntm", true)
+	_, _, err := resolveAgentMailScopeWithPreference(session, true)
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}

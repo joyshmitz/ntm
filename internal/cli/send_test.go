@@ -15,13 +15,119 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
+
+func TestExecuteDistributeDispatchRejectsCanceledContextBeforeTopologyOrSend(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := executeDistributeDispatch(ctx, "unused", robot.DistributeRecommendation{BeadID: "bd-cancel", PaneID: "%1"}, "must not send")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("executeDistributeDispatch error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRunCodexGoalSendValidationOwnsOneJSONFailure(t *testing.T) {
+	previousJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = previousJSON })
+
+	tests := []struct {
+		name string
+		pane string
+		body string
+	}{
+		{name: "missing pane", body: "goal"},
+		{name: "missing body", pane: "%1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stdout, err := captureStdout(t, func() error {
+				return runCodexGoalSend(t.Context(), "proj", test.pane, test.body)
+			})
+			if !errors.Is(err, errJSONFailure) {
+				t.Fatalf("runCodexGoalSend error = %v, want owned JSON failure", err)
+			}
+			var output CodexGoalSendResult
+			if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+				t.Fatalf("decode exactly one JSON document: %v output=%q", err, stdout)
+			}
+			if output.Success || output.ErrorCode != robot.ErrCodeInvalidFlag || output.State != "failed" {
+				t.Fatalf("validation output = %+v", output)
+			}
+		})
+	}
+}
+
+func TestRunCodexGoalSendPreCanceledContextReturnsTimeoutJSON(t *testing.T) {
+	previousJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = previousJSON })
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	stdout, err := captureStdout(t, func() error {
+		return runCodexGoalSend(ctx, "proj", "%1", "goal")
+	})
+	if !errors.Is(err, errJSONFailure) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("runCodexGoalSend error = %v, want owned canceled failure", err)
+	}
+	var output CodexGoalSendResult
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode timeout JSON: %v output=%q", err, stdout)
+	}
+	if output.Success || output.ErrorCode != robot.ErrCodeTimeout {
+		t.Fatalf("timeout output = %+v", output)
+	}
+}
+
+func TestEmitCodexGoalSendResultSurfacesEncoderFailure(t *testing.T) {
+	originalStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create pipe: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = originalStdout
+		_ = reader.Close()
+	})
+	err = emitCodexGoalSendResult(CodexGoalSendResult{RobotResponse: robot.NewRobotResponse(true)}, nil, "", "", true)
+	if err == nil || errors.Is(err, errJSONFailure) || !strings.Contains(err.Error(), "encode Codex goal-send response") {
+		t.Fatalf("encoder error = %v, want surfaced encode failure", err)
+	}
+}
+
+func TestWaitCodexGoalContextCancelsWithoutDelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	started := time.Now()
+	if err := waitCodexGoalContext(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("canceled wait took %s", elapsed)
+	}
+}
+
+func TestResolveSendSessionForCommandContextRejectsCanceledContextBeforeTopology(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, err := resolveSendSessionForCommandContext(ctx, "unused")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveSendSessionForCommandContext error = %v, want context.Canceled", err)
+	}
+}
 
 func TestShellDispatchOrdererPreservesSelectedOrder(t *testing.T) {
 	t.Parallel()
@@ -103,6 +209,131 @@ func TestShellDispatchRequestUsesStableSelectorsAndFailurePolicy(t *testing.T) {
 	}
 }
 
+func TestFinishSendResultCollectsWithoutGlobalJSONMode(t *testing.T) {
+	oldJSONOutput := jsonOutput
+	jsonOutput = false
+	t.Cleanup(func() { jsonOutput = oldJSONOutput })
+
+	cause := errors.New("delivery failed")
+	collected := &sendExecutionResult{}
+	err := finishSendResult(SendOptions{
+		executionPolicy: sendExecutionCollect,
+		executionResult: collected,
+	}, SendResult{
+		Success: false,
+		Session: "proj--b",
+		Failed:  1,
+		Error:   cause.Error(),
+	}, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("finishSendResult error = %v, want original cause", err)
+	}
+	if !collected.recorded || collected.result.Success || collected.result.Session != "proj--b" {
+		t.Fatalf("collected result = %+v, want recorded failure", collected)
+	}
+	if collected.result.Targets == nil || len(collected.result.Targets) != 0 {
+		t.Fatalf("collected targets = %#v, want non-nil empty slice", collected.result.Targets)
+	}
+}
+
+func TestEmitBatchResultPreservesFailureCause(t *testing.T) {
+	cause := errors.New("pane delivery failed")
+	stdout, err := captureStdout(t, func() error {
+		return emitBatchResult(BatchResult{
+			Success: false,
+			Session: "proj",
+			Total:   1,
+			Failed:  1,
+			Results: []BatchPromptResult{},
+		}, cause)
+	})
+	if !errors.Is(err, errJSONFailure) || !errors.Is(err, cause) {
+		t.Fatalf("emitBatchResult error = %v, want terminal sentinel and original cause", err)
+	}
+
+	var result BatchResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode exactly one batch failure document: %v; stdout=%q", err, stdout)
+	}
+	if result.Success || result.Failed != 1 || result.Session != "proj" {
+		t.Fatalf("batch failure result = %+v", result)
+	}
+}
+
+func TestFinishSendDryRunResultCollectsDeliverySummary(t *testing.T) {
+	collected := &sendExecutionResult{}
+	err := finishSendDryRunResult(SendOptions{
+		executionPolicy: sendExecutionCollect,
+		executionResult: collected,
+	}, SendDryRunResult{
+		Success: true,
+		DryRun:  true,
+		Session: "proj--a",
+		Total:   2,
+		WouldSend: []SendDryRunEntry{
+			{Pane: "0.1"},
+			{Pane: "1.0"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("finishSendDryRunResult error = %v", err)
+	}
+	if !collected.recorded || !collected.dryRun || collected.wouldSend != 2 || !collected.result.Success {
+		t.Fatalf("collected dry-run result = %+v", collected)
+	}
+	if want := []string{"0.1", "1.0"}; !reflect.DeepEqual(collected.result.Targets, want) {
+		t.Fatalf("collected dry-run targets = %v, want %v", collected.result.Targets, want)
+	}
+}
+
+func TestBuildSendProjectResultAggregatesAndSortsReceipts(t *testing.T) {
+	input := []sendProjectSessionResult{
+		{Session: "proj--z", Success: false, Failed: 1, ErrorCode: robot.ErrCodeTimeout, Error: "canceled"},
+		{Session: "proj--a", Success: true, Targets: []string{"0"}, Delivered: 2},
+		{Session: "proj--m", Success: false, Targets: []string{"1"}, Delivered: 1, Failed: 3, ErrorCode: sendErrorCodeFailed, Error: "delivery failed"},
+	}
+
+	result := buildSendProjectResult("proj", input)
+	if result.Success || result.Project != "proj" || result.MatchedSessions != 3 || result.SucceededSessions != 1 || result.FailedSessions != 2 {
+		t.Fatalf("project aggregate = %+v", result)
+	}
+	if result.Delivered != 3 || result.FailedDeliveries != 4 || result.ErrorCode != robot.ErrCodeTimeout || result.Error == "" {
+		t.Fatalf("project delivery summary = %+v", result)
+	}
+	gotOrder := []string{result.Sessions[0].Session, result.Sessions[1].Session, result.Sessions[2].Session}
+	if want := []string{"proj--a", "proj--m", "proj--z"}; !reflect.DeepEqual(gotOrder, want) {
+		t.Fatalf("project session order = %v, want %v", gotOrder, want)
+	}
+	if result.Sessions[2].Targets == nil || len(result.Sessions[2].Targets) != 0 {
+		t.Fatalf("timeout targets = %#v, want non-nil empty slice", result.Sessions[2].Targets)
+	}
+	if input[0].Targets != nil {
+		t.Fatalf("buildSendProjectResult mutated caller input: %+v", input[0])
+	}
+}
+
+func TestSendProjectSessionFromExecutionClassifiesCancellation(t *testing.T) {
+	cause := fmt.Errorf("dispatch interrupted: %w", context.DeadlineExceeded)
+	collected := &sendExecutionResult{
+		recorded: true,
+		result: SendResult{
+			Success:   false,
+			Session:   "proj--a",
+			Targets:   []string{"0"},
+			ErrorCode: sendErrorCodeFailed,
+			Error:     cause.Error(),
+		},
+	}
+
+	result, err := sendProjectSessionFromExecution("proj--a", collected, cause)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("session result error = %v, want deadline exceeded", err)
+	}
+	if result.Success || result.ErrorCode != robot.ErrCodeTimeout || result.Session != "proj--a" {
+		t.Fatalf("session cancellation result = %+v", result)
+	}
+}
+
 func TestExecuteShellDispatchDryRunPreflightsFinalRedaction(t *testing.T) {
 	oldCfg := cfg
 	cfg = config.Default()
@@ -128,6 +359,153 @@ func TestExecuteShellDispatchDryRunPreflightsFinalRedaction(t *testing.T) {
 	}
 	if result.Success || result.Delivered != 0 || result.Blocked != 1 {
 		t.Fatalf("dry-run blocked result = %+v", result)
+	}
+}
+
+func TestResolveDistributeRecommendationPaneUsesExactIDAcrossDuplicateLocalIndexes(t *testing.T) {
+	t.Parallel()
+	panes := []tmux.Pane{
+		{ID: "%41", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude},
+		{ID: "%91", WindowIndex: 1, Index: 1, Type: tmux.AgentClaude},
+	}
+	rec := robot.DistributeRecommendation{BeadID: "ntm-window-one", PaneID: "%91", PaneTarget: "1.1", AgentType: "claude"}
+	target, err := resolveDistributeRecommendationPane(rec, panes)
+	if err != nil {
+		t.Fatalf("resolve exact distribute target: %v", err)
+	}
+	if target.ID != "%91" || target.WindowIndex != 1 || target.Index != 1 {
+		t.Fatalf("resolved target=%+v, want window-one pane ID", target)
+	}
+
+	for name, invalid := range map[string]robot.DistributeRecommendation{
+		"missing id":    {BeadID: rec.BeadID, PaneTarget: rec.PaneTarget, AgentType: rec.AgentType},
+		"unknown id":    {BeadID: rec.BeadID, PaneID: "%404", PaneTarget: rec.PaneTarget, AgentType: rec.AgentType},
+		"agent changed": {BeadID: rec.BeadID, PaneID: rec.PaneID, PaneTarget: rec.PaneTarget, AgentType: "codex"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := resolveDistributeRecommendationPane(invalid, panes); err == nil {
+				t.Fatalf("resolveDistributeRecommendationPane(%+v) succeeded", invalid)
+			}
+		})
+	}
+}
+
+func TestDistributeDispatchGateRequiresFreshConfidentIdleObservation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now().UTC()
+	original := newAssignSessionObserver
+	t.Cleanup(func() { newAssignSessionObserver = original })
+	setObservation := func(state statuspkg.AgentState, freshness statuspkg.ObservationFreshness, confidence float64, observedAt time.Time, observationErr string) {
+		newAssignSessionObserver = func() assignSessionObserver {
+			return fixedAssignSessionObserver{observation: statuspkg.SessionObservation{
+				Session:    "proj",
+				ObservedAt: observedAt,
+				Panes: []statuspkg.PaneObservation{{
+					Pane: tmux.PaneRef{ID: "%91", WindowIndex: 1, PaneIndex: 1},
+					Current: statuspkg.StateObservation{
+						Status: statuspkg.AgentStatus{State: state}, ObservedAt: observedAt,
+						Freshness: freshness, Confidence: confidence, Error: observationErr,
+					},
+				}},
+			}}
+		}
+	}
+	delivery := dispatchsvc.Delivery{Target: dispatchsvc.Target{
+		Pane: tmux.Pane{ID: "%91", WindowIndex: 1, Index: 1, Type: tmux.AgentClaude},
+		Ref:  tmux.PaneRef{ID: "%91", WindowIndex: 1, PaneIndex: 1}, Address: "1.1",
+	}}
+	gate := distributeDispatchGate("proj")
+
+	setObservation(statuspkg.StateIdle, statuspkg.FreshnessFresh, 0.99, now, "")
+	if err := gate(t.Context(), dispatchsvc.Request{}, []dispatchsvc.Delivery{delivery}); err != nil {
+		t.Fatalf("fresh idle gate: %v", err)
+	}
+
+	for name, setup := range map[string]func(){
+		"busy": func() { setObservation(statuspkg.StateWorking, statuspkg.FreshnessFresh, 0.99, now, "") },
+		"stale": func() {
+			setObservation(statuspkg.StateIdle, statuspkg.FreshnessStale, 0.99, now.Add(-statuspkg.DispatchObservationMaxAge-time.Second), "")
+		},
+		"capture failure": func() {
+			setObservation(statuspkg.StateUnknown, statuspkg.FreshnessUnavailable, 0, now, "capture unavailable")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setup()
+			if err := gate(t.Context(), dispatchsvc.Request{}, []dispatchsvc.Delivery{delivery}); err == nil {
+				t.Fatalf("%s observation passed distribute gate", name)
+			}
+		})
+	}
+}
+
+func TestDistributeDispatchGateRejectsExactDurableOccupancyAcrossDuplicateLocalIndexes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now().UTC()
+	original := newAssignSessionObserver
+	t.Cleanup(func() { newAssignSessionObserver = original })
+	newAssignSessionObserver = func() assignSessionObserver {
+		return fixedAssignSessionObserver{observation: statuspkg.SessionObservation{
+			Session: "proj", ObservedAt: now,
+			Panes: []statuspkg.PaneObservation{{
+				Pane: tmux.PaneRef{ID: "%91", WindowIndex: 1, PaneIndex: 1},
+				Current: statuspkg.StateObservation{
+					Status: statuspkg.AgentStatus{State: statuspkg.StateIdle}, ObservedAt: now,
+					Freshness: statuspkg.FreshnessFresh, Confidence: 0.99,
+				},
+			}},
+		}}
+	}
+	delivery := dispatchsvc.Delivery{Target: dispatchsvc.Target{
+		Pane: tmux.Pane{ID: "%91", WindowIndex: 1, Index: 1, Type: tmux.AgentClaude},
+		Ref:  tmux.PaneRef{ID: "%91", WindowIndex: 1, PaneIndex: 1}, Address: "1.1",
+	}}
+	store := assignment.NewStore("proj")
+	store.Assignments["ntm-other-window"] = &assignment.Assignment{
+		BeadID: "ntm-other-window", Pane: 1, Status: assignment.StatusAssigned, AssignedAt: now,
+		OccupancyKey: "%90", DispatchTarget: "%90",
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed other-window assignment: %v", err)
+	}
+	gate := distributeDispatchGate("proj")
+	if err := gate(t.Context(), dispatchsvc.Request{}, []dispatchsvc.Delivery{delivery}); err != nil {
+		t.Fatalf("same local index in another physical pane blocked dispatch: %v", err)
+	}
+
+	store.Assignments["ntm-target"] = &assignment.Assignment{
+		BeadID: "ntm-target", Pane: 1, Status: assignment.StatusAssigned, AssignedAt: now,
+		OccupancyKey: "%91", DispatchTarget: "%91",
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed exact target assignment: %v", err)
+	}
+	if err := gate(t.Context(), dispatchsvc.Request{}, []dispatchsvc.Delivery{delivery}); err == nil || !strings.Contains(err.Error(), "durable active assignment") {
+		t.Fatalf("exact active occupancy error=%v", err)
+	}
+}
+
+func TestUnifiedDistributeServiceStopsBeforeDeliveryWhenIdleGateFails(t *testing.T) {
+	oldCfg := cfg
+	cfg = config.Default()
+	t.Cleanup(func() { cfg = oldCfg })
+	pane := tmux.Pane{ID: "%999999", WindowIndex: 1, Index: 1, Type: tmux.AgentClaude}
+	gateCalls := 0
+	service, err := newShellDispatchServiceWithGate("proj", []tmux.Pane{pane}, activeShellDispatchRedactionConfig(),
+		func(context.Context, dispatchsvc.Request, []dispatchsvc.Delivery) error {
+			gateCalls++
+			return errors.New("target became busy")
+		})
+	if err != nil {
+		t.Fatalf("newShellDispatchServiceWithGate: %v", err)
+	}
+	result, err := service.Execute(t.Context(), shellDispatchRequest("proj", []tmux.Pane{pane}, []tmux.Pane{pane}, "work", true))
+	var dispatchErr *dispatchsvc.Error
+	if !errors.As(err, &dispatchErr) || dispatchErr.Code != dispatchsvc.ErrLifecycle {
+		t.Fatalf("busy gate error=%v, want lifecycle failure", err)
+	}
+	if gateCalls != 1 || result.Delivered != 0 || result.Skipped != 1 || result.Failed != 0 {
+		t.Fatalf("busy gate calls=%d result=%+v", gateCalls, result)
 	}
 }
 
@@ -181,7 +559,7 @@ func TestSendRealSession(t *testing.T) {
 		CCCount:  1,
 		UserPane: true,
 	}
-	err = spawnSessionLogic(opts)
+	err = spawnSessionLogicContext(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
@@ -355,6 +733,7 @@ func TestGetPromptContentFromArgs(t *testing.T) {
 
 func TestGetSessionWorkingDirRejectsWorkspaceFallbackForExplicitSession(t *testing.T) {
 	isolateSessionAgentStorage(t)
+	session := fmt.Sprintf("missing-send-project-%d", time.Now().UnixNano())
 
 	origCfg := cfg
 	origDir, _ := os.Getwd()
@@ -376,7 +755,7 @@ func TestGetSessionWorkingDirRejectsWorkspaceFallbackForExplicitSession(t *testi
 		t.Fatal(err)
 	}
 
-	if got := getSessionWorkingDir("ntm", false); got != "" {
+	if got := getSessionWorkingDir(session, false); got != "" {
 		t.Fatalf("getSessionWorkingDir explicit = %q, want empty", got)
 	}
 }
@@ -955,7 +1334,7 @@ func TestSendDryRunDoesNotSendToPane(t *testing.T) {
 		CCCount:  1,
 		UserPane: true,
 	}
-	err = spawnSessionLogic(opts)
+	err = spawnSessionLogicContext(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
@@ -1036,7 +1415,7 @@ func TestSendDefaultTargetsAllAgentsWithoutUserPane(t *testing.T) {
 		{Type: AgentTypeClaude, Index: 1, Model: "test-model"},
 		{Type: AgentTypeClaude, Index: 2, Model: "test-model"},
 	}
-	if err := spawnSessionLogic(SpawnOptions{
+	if err := spawnSessionLogicContext(t.Context(), SpawnOptions{
 		Session:  sessionName,
 		Agents:   agents,
 		CCCount:  2,
@@ -1356,7 +1735,7 @@ func TestSendSmartRouteIsDisabledWhenPanesSpecified(t *testing.T) {
 		CCCount:  1,
 		UserPane: true,
 	}
-	err = spawnSessionLogic(opts)
+	err = spawnSessionLogicContext(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}

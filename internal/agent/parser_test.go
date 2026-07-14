@@ -1719,3 +1719,49 @@ func TestClaudeComposeBoxFooter_FreshSpawnIdle(t *testing.T) {
 		t.Errorf("compose box with active spinner must be classified working")
 	}
 }
+
+func TestCodexActivelyWorkingUsesOnlyStructuralLiveTailMarkers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name: "working spinner outranks persistent prompt chrome",
+			output: "\x1b[33m• Working (4m 51s • esc to interrupt)\x1b[0m\n" +
+				"› queued input\n47% context left · ? for shortcuts",
+			want: true,
+		},
+		{
+			name:   "waiting for background spinner",
+			output: "· Waiting for background terminal (12s)",
+			want:   true,
+		},
+		{
+			name:   "truncated interrupt hint",
+			output: "running command (15s · esc to i…)",
+			want:   true,
+		},
+		{
+			name: "stale spinner outside live tail",
+			output: "• Working (10s • esc to interrupt)\n" +
+				strings.Repeat("completed output line\n", codexLiveTailLines+1) +
+				"codex>",
+		},
+		{
+			name:   "working word in prose is not structural",
+			output: "The previous command was working correctly before completion.",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CodexActivelyWorking(test.output); got != test.want {
+				t.Fatalf("CodexActivelyWorking() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}

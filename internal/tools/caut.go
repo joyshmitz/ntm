@@ -185,8 +185,11 @@ var (
 	cautAvailabilityMutex  sync.RWMutex
 	cautAvailabilityTTL    = 5 * time.Minute
 	cautMinVersion         = Version{Major: 0, Minor: 1, Patch: 0}
-	cautLogger             = slog.Default().With("component", "tools.caut")
 )
+
+func cautLogger() *slog.Logger {
+	return slog.Default().With("component", "tools.caut")
+}
 
 // GetAvailability returns whether caut is available and compatible, with caching.
 func (a *CautAdapter) GetAvailability(ctx context.Context) (*CautAvailability, error) {
@@ -248,7 +251,7 @@ func (a *CautAdapter) fetchAvailability(ctx context.Context) *CautAvailability {
 	path, err := exec.LookPath(a.BinaryName())
 	if err != nil {
 		availability.Error = err.Error()
-		cautLogger.Debug("caut binary not found", "error", err)
+		cautLogger().Debug("caut binary not found", "error", err)
 		return availability
 	}
 
@@ -258,13 +261,13 @@ func (a *CautAdapter) fetchAvailability(ctx context.Context) *CautAvailability {
 	version, err := a.Version(ctx)
 	if err != nil {
 		availability.Error = err.Error()
-		cautLogger.Warn("caut version check failed", "path", path, "error", err)
+		cautLogger().Warn("caut version check failed", "path", path, "error", err)
 		return availability
 	}
 
 	availability.Version = version
 	if !cautCompatible(version) {
-		cautLogger.Warn("caut version incompatible", "path", path, "version", version.String(), "min_version", cautMinVersion.String())
+		cautLogger().Warn("caut version incompatible", "path", path, "version", version.String(), "min_version", cautMinVersion.String())
 		return availability
 	}
 

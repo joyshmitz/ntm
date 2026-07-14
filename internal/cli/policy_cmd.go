@@ -253,7 +253,9 @@ func newPolicyValidateCmd() *cobra.Command {
 // PolicyValidateResponse is the JSON output for policy validate.
 type PolicyValidateResponse struct {
 	output.TimestampedResponse
+	Success    bool     `json:"success"`
 	Valid      bool     `json:"valid"`
+	Error      string   `json:"error,omitempty"`
 	PolicyPath string   `json:"policy_path"`
 	Errors     []string `json:"errors,omitempty"`
 	Warnings   []string `json:"warnings,omitempty"`
@@ -313,13 +315,20 @@ func runPolicyValidate(policyFile string) error {
 
 func outputValidationResult(policyPath string, valid bool, errors, warnings []string) error {
 	if IsJSONOutput() {
-		return output.PrintJSON(PolicyValidateResponse{
+		response := PolicyValidateResponse{
 			TimestampedResponse: output.NewTimestamped(),
+			Success:             valid,
 			Valid:               valid,
 			PolicyPath:          policyPath,
 			Errors:              errors,
 			Warnings:            warnings,
-		})
+		}
+		if !valid {
+			cause := fmt.Errorf("policy validation failed: %s", strings.Join(errors, "; "))
+			response.Error = cause.Error()
+			return emitJSONFailureEnvelopeWithCause(response, cause)
+		}
+		return output.PrintJSON(response)
 	}
 
 	// TUI output

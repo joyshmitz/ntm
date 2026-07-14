@@ -406,6 +406,19 @@ func TestPreflightStrictMode_BlocksDestructive(t *testing.T) {
 	if result == nil {
 		t.Fatalf("[E2E-PREFLIGHT] Failed to parse result: %v", err)
 	}
+	if err == nil {
+		t.Fatal("[E2E-PREFLIGHT] strict blocked result exited 0")
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() == 0 {
+		t.Fatalf("[E2E-PREFLIGHT] strict blocked process error = %v, want nonzero exit", err)
+	}
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("[E2E-PREFLIGHT] strict JSON failure wrote stderr: %s", stderr)
+	}
+	if !json.Valid([]byte(strings.TrimSpace(stdout))) {
+		t.Fatalf("[E2E-PREFLIGHT] strict failure is not exactly one JSON document: %s", stdout)
+	}
 
 	// Verify destructive command was detected with error severity
 	finding := suite.findingByID(result, "destructive_command")

@@ -271,14 +271,19 @@ func (a *WorkCoordinationAdapter) Name() string {
 
 // Available returns true when at least one work/coordination source should be readable.
 func (a *WorkCoordinationAdapter) Available(ctx context.Context) bool {
-	_ = ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
 	if a.config.ProjectDir == "" {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(a.config.ProjectDir, ".beads")); err == nil {
 		return true
 	}
-	if client := a.mailClient(); client != nil && client.IsAvailable() {
+	if client := a.mailClient(); client != nil && client.IsAvailableContext(ctx) {
 		return true
 	}
 	if handoff, _, err := handoffReaderForProject(a.config.ProjectDir).FindLatestAny(); err == nil && handoff != nil {
@@ -289,8 +294,11 @@ func (a *WorkCoordinationAdapter) Available(ctx context.Context) bool {
 
 // Collect gathers the live work and coordination sections.
 func (a *WorkCoordinationAdapter) Collect(ctx context.Context) (*SignalBatch, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	now := time.Now()
-	work := a.collectWork()
+	work, workErr := a.collectWork(ctx)
 	coordination := a.collectCoordination(ctx, now)
 
 	batch := &SignalBatch{
@@ -298,6 +306,14 @@ func (a *WorkCoordinationAdapter) Collect(ctx context.Context) (*SignalBatch, er
 		CollectedAt:  now,
 		Work:         work,
 		Coordination: coordination,
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		a.lastErr = ctxErr
+		return batch, ctxErr
+	}
+	if workErr != nil {
+		a.lastErr = workErr
+		return batch, workErr
 	}
 
 	if (work == nil || !work.Available) && (coordination == nil || !coordination.Available) {
@@ -314,19 +330,35 @@ func (a *WorkCoordinationAdapter) LastError() error {
 	return a.lastErr
 }
 
-func (a *WorkCoordinationAdapter) collectWork() *WorkSection {
-	triage, _ := bv.GetTriage(a.config.ProjectDir)
-	summary := bv.GetBeadsSummary(a.config.ProjectDir, a.config.WorkItemLimit)
+func (a *WorkCoordinationAdapter) collectWork(ctx context.Context) (*WorkSection, error) {
+	triage, _ := bv.GetTriageContext(ctx, a.config.ProjectDir)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	summary, err := bv.GetBeadsSummaryContext(ctx, a.config.ProjectDir, a.config.WorkItemLimit)
+	if err != nil {
+		return nil, err
+	}
+	blocked, blockedErr := bv.GetBlockedListContext(ctx, a.config.ProjectDir, a.config.WorkItemLimit)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if blockedErr != nil {
+		blocked = nil
+	}
 	return NormalizeWork(WorkInputs{
 		Summary:    summary,
 		Ready:      readyItems(summary),
-		Blocked:    bv.GetBlockedList(a.config.ProjectDir, a.config.WorkItemLimit),
+		Blocked:    blocked,
 		InProgress: inProgressItems(summary),
 		Triage:     triage,
-	})
+	}), nil
 }
 
 func (a *WorkCoordinationAdapter) collectCoordination(ctx context.Context, now time.Time) *CoordinationSection {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	inputs := CoordinationInputs{
 		FileConflicts:             tracker.DetectConflictsRecent(a.config.ConflictWindow),
 		Handoff:                   latestHandoff(a.config.ProjectDir, a.config.SessionName),
@@ -337,7 +369,7 @@ func (a *WorkCoordinationAdapter) collectCoordination(ctx context.Context, now t
 	}
 
 	client := a.mailClient()
-	if client == nil || !client.IsAvailable() {
+	if client == nil || !client.IsAvailableContext(ctx) {
 		inputs.Reason = "agent mail unavailable"
 		return NormalizeCoordination(inputs)
 	}

@@ -3,7 +3,9 @@ package cli
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -247,6 +249,25 @@ func runAuditSearch(pattern, sessions, evTypes, actors, target string, days, lim
 }
 
 func runAuditVerify(session string) error {
+	return runAuditVerifyTo(os.Stdout, session)
+}
+
+type auditVerifyFileResult struct {
+	File     string `json:"file"`
+	Status   string `json:"status"`
+	Verified bool   `json:"verified"`
+	Error    string `json:"error,omitempty"`
+}
+
+type auditVerifyResult struct {
+	Success  bool                    `json:"success"`
+	Session  string                  `json:"session"`
+	Verified bool                    `json:"verified"`
+	Files    []auditVerifyFileResult `json:"files"`
+	Error    string                  `json:"error,omitempty"`
+}
+
+func runAuditVerifyTo(w io.Writer, session string) error {
 	searcher, err := newAuditSearcherFunc()
 	if err != nil {
 		return fmt.Errorf("failed to create searcher: %w", err)
@@ -263,37 +284,46 @@ func runAuditVerify(session string) error {
 	}
 
 	t := theme.Current()
-	allPassed := true
+	result := auditVerifyResult{
+		Success:  true,
+		Session:  session,
+		Verified: true,
+		Files:    make([]auditVerifyFileResult, 0, len(matches)),
+	}
+	var verificationErrors []error
 
 	for _, logPath := range matches {
 		fname := filepath.Base(logPath)
 		if err := audit.VerifyIntegrity(logPath); err != nil {
-			allPassed = false
-			if jsonOutput {
-				_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-					"file":     fname,
-					"status":   "FAIL",
-					"error":    err.Error(),
-					"verified": false,
-				})
-			} else {
+			result.Success = false
+			result.Verified = false
+			result.Files = append(result.Files, auditVerifyFileResult{
+				File: fname, Status: "FAIL", Verified: false, Error: err.Error(),
+			})
+			verificationErrors = append(verificationErrors, fmt.Errorf("%s: %w", fname, err))
+			if !jsonOutput {
 				fmt.Printf("%s✗%s %s: FAIL - %v\n", colorize(t.Error), "\033[0m", fname, err)
 			}
 		} else {
-			if jsonOutput {
-				_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-					"file":     fname,
-					"status":   "PASS",
-					"verified": true,
-				})
-			} else {
+			result.Files = append(result.Files, auditVerifyFileResult{
+				File: fname, Status: "PASS", Verified: true,
+			})
+			if !jsonOutput {
 				fmt.Printf("%s✓%s %s: PASS\n", colorize(t.Success), "\033[0m", fname)
 			}
 		}
 	}
 
-	if !allPassed {
-		return fmt.Errorf("integrity verification failed for one or more files")
+	if !result.Success {
+		result.Error = "integrity verification failed for one or more files"
+		cause := errors.Join(verificationErrors...)
+		if jsonOutput {
+			return emitJSONFailureEnvelopeToWithCause(w, result, cause)
+		}
+		return fmt.Errorf("%s: %w", result.Error, cause)
+	}
+	if jsonOutput {
+		return json.NewEncoder(w).Encode(result)
 	}
 	return nil
 }

@@ -116,7 +116,8 @@ func runView(w io.Writer, session string) error {
 
 	if !tmux.SessionExists(session) {
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(fmt.Sprintf("session '%s' not found", session)))
+			cause := fmt.Errorf("session '%s' not found", session)
+			return emitJSONFailureEnvelopeWithCause(output.NewError(cause.Error()), cause)
 		}
 		cliErr := output.SessionNotFoundError(session)
 		output.PrintCLIError(cliErr)
@@ -126,7 +127,7 @@ func runView(w io.Writer, session string) error {
 	result, err := kernel.Run(context.Background(), "sessions.view", SessionViewInput{Session: session})
 	if err != nil {
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return err
 	}
@@ -134,7 +135,7 @@ func runView(w io.Writer, session string) error {
 	if IsJSONOutput() {
 		resp, err := coerceSuccessResponse(result, "sessions.view")
 		if err != nil {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return output.PrintJSON(resp)
 	}

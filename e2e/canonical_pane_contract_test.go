@@ -76,6 +76,68 @@ type sendProcessOutput struct {
 	} `json:"failed"`
 }
 
+type cliSendProcessOutput struct {
+	Success   bool     `json:"success"`
+	Session   string   `json:"session"`
+	Targets   []string `json:"targets"`
+	Delivered int      `json:"delivered"`
+	Failed    int      `json:"failed"`
+	ErrorCode string   `json:"error_code,omitempty"`
+	Error     string   `json:"error,omitempty"`
+}
+
+type replayProcessOutput struct {
+	Success   bool     `json:"success"`
+	Timestamp string   `json:"timestamp"`
+	Session   string   `json:"session"`
+	Targets   []string `json:"targets"`
+	Delivered int      `json:"delivered"`
+	Failed    int      `json:"failed"`
+	DryRun    bool     `json:"dry_run"`
+	Warnings  []string `json:"warnings"`
+	ErrorCode string   `json:"error_code,omitempty"`
+	Error     string   `json:"error,omitempty"`
+}
+
+type projectSendSessionOutput struct {
+	Session   string   `json:"session"`
+	Success   bool     `json:"success"`
+	Targets   []string `json:"targets"`
+	Delivered int      `json:"delivered"`
+	Failed    int      `json:"failed"`
+	ErrorCode string   `json:"error_code,omitempty"`
+	Error     string   `json:"error,omitempty"`
+}
+
+type projectSendProcessOutput struct {
+	Success           bool                       `json:"success"`
+	GeneratedAt       string                     `json:"generated_at"`
+	Project           string                     `json:"project"`
+	Sessions          []projectSendSessionOutput `json:"sessions"`
+	MatchedSessions   int                        `json:"matched_sessions"`
+	SucceededSessions int                        `json:"succeeded_sessions"`
+	FailedSessions    int                        `json:"failed_sessions"`
+	Delivered         int                        `json:"delivered"`
+	FailedDeliveries  int                        `json:"failed_deliveries"`
+	ErrorCode         string                     `json:"error_code,omitempty"`
+	Error             string                     `json:"error,omitempty"`
+}
+
+type scaleProcessOutput struct {
+	Success bool           `json:"success"`
+	Session string         `json:"session"`
+	Before  map[string]int `json:"before"`
+	After   map[string]int `json:"after"`
+	Actions []struct {
+		ActionType string   `json:"type"`
+		AgentType  string   `json:"agent_type"`
+		Count      int      `json:"count"`
+		Agents     []string `json:"agents"`
+	} `json:"actions"`
+	Errors    []string `json:"errors,omitempty"`
+	ErrorCode string   `json:"error_code,omitempty"`
+}
+
 type tailPaneOutput struct {
 	State                 string   `json:"state"`
 	Lines                 []string `json:"lines"`
@@ -315,6 +377,39 @@ func TestE2ECanonicalPaneContract(t *testing.T) {
 
 	fixture := newCanonicalPaneFixture(t)
 
+	t.Run("status_json_preserves_multi_window_physical_identity", func(t *testing.T) {
+		result := fixture.runNTM(t, nil, "--json", "status", fixture.session)
+		var response struct {
+			Exists bool `json:"exists"`
+			Panes  []struct {
+				PaneID      string `json:"pane_id"`
+				PaneTarget  string `json:"pane_target"`
+				WindowIndex int    `json:"window_index"`
+				Index       int    `json:"index"`
+			} `json:"panes"`
+		}
+		decodeCLIJSONSuccess(t, result, &response)
+		if !response.Exists || len(response.Panes) != len(fixture.panes) {
+			t.Fatalf("status topology=%+v, want %d panes", response, len(fixture.panes))
+		}
+		seen := make(map[string]string, len(response.Panes))
+		for _, pane := range response.Panes {
+			wantTarget := fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
+			if pane.PaneTarget != wantTarget || !strings.HasPrefix(pane.PaneID, "%") {
+				t.Fatalf("status pane identity=%+v, want target %s and %%N ID", pane, wantTarget)
+			}
+			seen[pane.PaneTarget] = pane.PaneID
+		}
+		for target, endpoint := range fixture.panes {
+			if seen[target] != endpoint.ID {
+				t.Fatalf("status target %s pane_id=%q, want %q; all=%v", target, seen[target], endpoint.ID, seen)
+			}
+		}
+		if seen["0.0"] == seen["1.0"] {
+			t.Fatalf("duplicate local index panes collapsed to one identity: %v", seen)
+		}
+	})
+
 	t.Run("startup_errors_are_single_json_documents", func(t *testing.T) {
 		cases := []struct {
 			name     string
@@ -331,6 +426,41 @@ func TestE2ECanonicalPaneContract(t *testing.T) {
 			t.Run(test.name, func(t *testing.T) {
 				result := fixture.runNTM(t, test.extraEnv, test.args...)
 				assertRobotFailure(t, result, "INVALID_FLAG")
+			})
+		}
+	})
+
+	t.Run("distribute_preflight_errors_are_single_json_documents", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			args    []string
+			wantErr string
+		}{
+			{name: "pane", args: []string{"--pane=0"}, wantErr: "cannot combine --distribute with --pane"},
+			{name: "panes", args: []string{"--panes=0,1"}, wantErr: "cannot combine --distribute with --pane"},
+			{name: "skip_first", args: []string{"--skip-first"}, wantErr: "cannot combine --distribute with --skip-first"},
+			{name: "dry_run_auto", args: []string{"--dry-run", "--dist-auto"}, wantErr: "cannot use --dry-run with --dist-auto"},
+		}
+		for _, test := range cases {
+			t.Run(test.name, func(t *testing.T) {
+				args := []string{"--json", "send", fixture.session, "--distribute"}
+				args = append(args, test.args...)
+				result := fixture.runNTM(t, nil, args...)
+				if result.exitCode != 1 || len(bytes.TrimSpace(result.stderr)) != 0 {
+					t.Fatalf("distribute preflight exit=%d, want 1; stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+				}
+				var envelope struct {
+					Success bool     `json:"success"`
+					Session string   `json:"session"`
+					Targets []string `json:"targets"`
+					Error   string   `json:"error"`
+				}
+				if err := json.Unmarshal(result.stdout, &envelope); err != nil {
+					t.Fatalf("distribute preflight must emit exactly one JSON document: %v; output=%s", err, result.stdout)
+				}
+				if envelope.Success || envelope.Session != fixture.session || envelope.Targets == nil || len(envelope.Targets) != 0 || !strings.Contains(envelope.Error, test.wantErr) {
+					t.Fatalf("distribute preflight envelope=%+v, want error containing %q", envelope, test.wantErr)
+				}
 			})
 		}
 	})
@@ -471,6 +601,311 @@ func TestE2ECanonicalPaneContract(t *testing.T) {
 			fixture.waitForMarkers(t, marker, []string{"0.1"})
 			fixture.assertMarkerOnlyIn(t, marker, []string{"0.1"})
 		})
+	})
+
+	t.Run("send_json_emits_one_truthful_terminal_document", func(t *testing.T) {
+		t.Run("direct_no_matching_panes", func(t *testing.T) {
+			result := fixture.runNTM(t, nil,
+				"--json",
+				"send",
+				fixture.session,
+				"--tag=ntm-e2e-never-matches",
+				"--no-cass-check",
+				"--no-hooks",
+				"no matching pane contract",
+			)
+			var output cliSendProcessOutput
+			decodeCLIJSONFailure(t, result, &output)
+			if output.Success || output.Session != fixture.session || output.ErrorCode != "NO_MATCHING_PANES" || output.Error == "" {
+				t.Fatalf("no-target send output = %+v", output)
+			}
+			if output.Targets == nil || len(output.Targets) != 0 || output.Delivered != 0 || output.Failed != 0 {
+				t.Fatalf("no-target delivery summary = %+v, want non-nil empty targets and zero counts", output)
+			}
+		})
+
+		failingTmux := fixture.writeFailingTmuxWrapper(t)
+
+		t.Run("direct_partial_delivery_failure", func(t *testing.T) {
+			result := fixture.runNTM(t, map[string]string{
+				"NTM_TMUX_BINARY":      failingTmux,
+				"NTM_E2E_REAL_TMUX":    fixture.tmuxPath,
+				"NTM_E2E_FAIL_PANE_ID": fixture.panes["0.1"].ID,
+			},
+				"--json",
+				"send",
+				fixture.session,
+				"--all",
+				"--no-cass-check",
+				"--no-hooks",
+				shellMarkerCommand(fixture.uniqueMarker("CLI_SEND_PARTIAL")),
+			)
+			var output cliSendProcessOutput
+			decodeCLIJSONFailure(t, result, &output)
+			if output.Success || output.Session != fixture.session || output.ErrorCode != "SEND_FAILED" || output.Error == "" {
+				t.Fatalf("partial send output = %+v", output)
+			}
+			if output.Targets == nil || len(output.Targets) != len(fixture.panes) || output.Delivered == 0 || output.Failed == 0 {
+				t.Fatalf("partial send delivery summary = %+v, want both delivered and failed panes", output)
+			}
+		})
+
+		t.Run("project_aggregate_is_sorted_and_failure_aware", func(t *testing.T) {
+			project := fixture.session + "-project"
+			sessionA := project + "--a"
+			sessionB := project + "--b"
+			// Create sessions out of order, then make the lexicographically second fail.
+			failedPaneID := fixture.createSinglePaneAgentSession(t, sessionB)
+			fixture.createSinglePaneAgentSession(t, sessionA)
+
+			successResult := fixture.runNTM(t, nil,
+				"--json",
+				"send",
+				"--project="+project,
+				"--all",
+				"--no-cass-check",
+				"--no-hooks",
+				shellMarkerCommand(fixture.uniqueMarker("PROJECT_SEND_SUCCESS")),
+			)
+			var successOutput projectSendProcessOutput
+			decodeCLIJSONSuccess(t, successResult, &successOutput)
+			if !successOutput.Success || successOutput.GeneratedAt == "" || successOutput.Project != project || successOutput.ErrorCode != "" || successOutput.Error != "" {
+				t.Fatalf("successful project send aggregate = %+v", successOutput)
+			}
+			if successOutput.MatchedSessions != 2 || successOutput.SucceededSessions != 2 || successOutput.FailedSessions != 0 || successOutput.Delivered != 2 || successOutput.FailedDeliveries != 0 {
+				t.Fatalf("successful project send counts = %+v", successOutput)
+			}
+			if len(successOutput.Sessions) != 2 || successOutput.Sessions[0].Session != sessionA || successOutput.Sessions[1].Session != sessionB || !successOutput.Sessions[0].Success || !successOutput.Sessions[1].Success {
+				t.Fatalf("successful project session receipts = %+v", successOutput.Sessions)
+			}
+
+			result := fixture.runNTM(t, map[string]string{
+				"NTM_TMUX_BINARY":      failingTmux,
+				"NTM_E2E_REAL_TMUX":    fixture.tmuxPath,
+				"NTM_E2E_FAIL_PANE_ID": failedPaneID,
+			},
+				"--json",
+				"send",
+				"--project="+project,
+				"--all",
+				"--no-cass-check",
+				"--no-hooks",
+				shellMarkerCommand(fixture.uniqueMarker("PROJECT_SEND")),
+			)
+			var output projectSendProcessOutput
+			decodeCLIJSONFailure(t, result, &output)
+			if output.Success || output.GeneratedAt == "" || output.Project != project || output.ErrorCode != "SEND_FAILED" || output.Error == "" {
+				t.Fatalf("project send aggregate = %+v", output)
+			}
+			if output.MatchedSessions != 2 || output.SucceededSessions != 1 || output.FailedSessions != 1 || output.Delivered != 1 || output.FailedDeliveries != 1 {
+				t.Fatalf("project send counts = %+v", output)
+			}
+			if len(output.Sessions) != 2 || output.Sessions[0].Session != sessionA || output.Sessions[1].Session != sessionB {
+				t.Fatalf("project session order = %+v, want [%s %s]", output.Sessions, sessionA, sessionB)
+			}
+			if !output.Sessions[0].Success || output.Sessions[0].Delivered != 1 || output.Sessions[0].Failed != 0 {
+				t.Fatalf("successful project receipt = %+v", output.Sessions[0])
+			}
+			if output.Sessions[1].Success || output.Sessions[1].Delivered != 0 || output.Sessions[1].Failed != 1 || output.Sessions[1].ErrorCode != "SEND_FAILED" || output.Sessions[1].Error == "" {
+				t.Fatalf("failed project receipt = %+v", output.Sessions[1])
+			}
+			for _, session := range output.Sessions {
+				if session.Targets == nil {
+					t.Fatalf("project receipt %s omitted targets", session.Session)
+				}
+			}
+		})
+	})
+
+	t.Run("scale_json_owns_nested_add_failure", func(t *testing.T) {
+		session := fmt.Sprintf("ntm-e2e-scale-json-%d-%d", os.Getpid(), time.Now().UnixNano())
+		fixture.createSinglePaneAgentSession(t, session)
+
+		wrapperPath := filepath.Join(fixture.runtimeRoot, "bin", "tmux-fail-scale-split")
+		wrapper := `#!/bin/sh
+if [ "${1:-}" = "split-window" ]; then
+    printf 'injected scale split failure\n' >&2
+    exit 92
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+		if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o700); err != nil {
+			t.Fatalf("write scale tmux wrapper: %v", err)
+		}
+
+		result := fixture.runNTM(t, map[string]string{
+			"NTM_TMUX_BINARY":   wrapperPath,
+			"NTM_E2E_REAL_TMUX": fixture.tmuxPath,
+		}, "--json", "scale", session, "--cc=2")
+		if result.exitCode != 1 || len(bytes.TrimSpace(result.stderr)) != 0 {
+			t.Fatalf("scale nested-add failure exit=%d, want 1; stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+		}
+
+		var output scaleProcessOutput
+		if err := json.Unmarshal(result.stdout, &output); err != nil {
+			t.Fatalf("scale failure must be one JSON document: %v; output=%s", err, result.stdout)
+		}
+		if output.Success || output.Session != session || output.ErrorCode != "INTERNAL_ERROR" || len(output.Errors) == 0 {
+			t.Fatalf("scale failure output=%+v", output)
+		}
+		if output.Before["cc"] != 1 || output.After["cc"] != 1 || len(output.Actions) != 1 ||
+			output.Actions[0].ActionType != "spawn" || output.Actions[0].AgentType != "cc" || output.Actions[0].Count != 1 {
+			t.Fatalf("scale failure state/action=%+v", output)
+		}
+		if output.Actions[0].Agents == nil || len(output.Actions[0].Agents) != 0 {
+			t.Fatalf("scale spawn action agents=%v, want checked-empty []", output.Actions[0].Agents)
+		}
+		if bytes.Contains(result.stdout, []byte(`"added_claude"`)) || bytes.Contains(result.stdout, []byte(`"total_added"`)) {
+			t.Fatalf("scale leaked nested AddResponse: %s", result.stdout)
+		}
+	})
+
+	t.Run("scale_final_layout_failure_reports_partial_state_without_late_mutation", func(t *testing.T) {
+		session := fmt.Sprintf("ntm-e2e-scale-layout-fail-%d-%d", os.Getpid(), time.Now().UnixNano())
+		fixture.createSinglePaneAgentSession(t, session)
+		wrapperPath, stateRoot := fixture.writeScaleLayoutWrapper(t, "fail")
+
+		result := fixture.runNTM(t, map[string]string{
+			"NTM_TMUX_BINARY":            wrapperPath,
+			"NTM_E2E_REAL_TMUX":          fixture.tmuxPath,
+			"NTM_E2E_SCALE_LAYOUT_MODE":  "fail",
+			"NTM_E2E_SCALE_LAYOUT_STATE": stateRoot,
+		}, "--json", "scale", session, "--cc=2")
+
+		var output scaleProcessOutput
+		decodeCLIJSONFailure(t, result, &output)
+		if output.Success || output.Session != session || output.ErrorCode != "INTERNAL_ERROR" || len(output.Errors) != 1 ||
+			!strings.Contains(output.Errors[0], "apply tiled layout") || !strings.Contains(output.Errors[0], "injected final layout failure") {
+			t.Fatalf("final-layout failure output=%+v", output)
+		}
+		assertScaleUpPartialResponse(t, output)
+
+		if _, err := os.Stat(filepath.Join(stateRoot, "final-layout-started")); err != nil {
+			t.Fatalf("final layout failure was not reached: %v", err)
+		}
+		beforeWait := fixture.sessionPaneSnapshot(t, session)
+		assertScaleUpPaneSnapshot(t, session, beforeWait)
+		logBeforeWait, err := os.ReadFile(filepath.Join(stateRoot, "commands.log"))
+		if err != nil {
+			t.Fatalf("read final-layout failure command log: %v", err)
+		}
+		if got := strings.Count(string(logBeforeWait), "select-layout"); got != 2 {
+			t.Fatalf("final-layout failure select-layout calls=%d, want split plus final; log=%s", got, logBeforeWait)
+		}
+
+		time.Sleep(tmux.DoubleEnterFirstDelay + tmux.DoubleEnterSecondDelay + 250*time.Millisecond)
+		afterWait := fixture.sessionPaneSnapshot(t, session)
+		if !reflect.DeepEqual(afterWait, beforeWait) {
+			t.Fatalf("scale mutated panes after terminal failure: before=%v after=%v", beforeWait, afterWait)
+		}
+		logAfterWait, err := os.ReadFile(filepath.Join(stateRoot, "commands.log"))
+		if err != nil {
+			t.Fatalf("reread final-layout failure command log: %v", err)
+		}
+		if !bytes.Equal(logAfterWait, logBeforeWait) {
+			t.Fatalf("scale issued tmux commands after terminal failure: before=%q after=%q", logBeforeWait, logAfterWait)
+		}
+	})
+
+	t.Run("scale_sigint_during_final_layout_reports_timeout_without_late_side_effects", func(t *testing.T) {
+		session := fmt.Sprintf("ntm-e2e-scale-layout-cancel-%d-%d", os.Getpid(), time.Now().UnixNano())
+		fixture.createSinglePaneAgentSession(t, session)
+		wrapperPath, stateRoot := fixture.writeScaleLayoutWrapper(t, "block")
+
+		cmd := exec.Command(fixture.ntmPath, "--json", "scale", session, "--cc=2")
+		cmd.Env = mergeProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY":            wrapperPath,
+			"NTM_E2E_REAL_TMUX":          fixture.tmuxPath,
+			"NTM_E2E_SCALE_LAYOUT_MODE":  "block",
+			"NTM_E2E_SCALE_LAYOUT_STATE": stateRoot,
+		})
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start scale cancellation process: %v", err)
+		}
+		waited := make(chan error, 1)
+		go func() { waited <- cmd.Wait() }()
+		finished := false
+		defer func() {
+			if !finished {
+				_ = cmd.Process.Kill()
+				<-waited
+			}
+		}()
+
+		startedPath := filepath.Join(stateRoot, "final-layout-started")
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			if _, err := os.Stat(startedPath); err == nil {
+				break
+			}
+			select {
+			case waitErr := <-waited:
+				finished = true
+				t.Fatalf("scale exited before final layout could be interrupted: %v; stdout=%s stderr=%s", waitErr, stdout.String(), stderr.String())
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("scale did not reach final layout; stdout=%s stderr=%s", stdout.String(), stderr.String())
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			t.Fatalf("interrupt scale during final layout: %v", err)
+		}
+		var waitErr error
+		select {
+		case waitErr = <-waited:
+			finished = true
+		case <-time.After(10 * time.Second):
+			t.Fatal("scale did not return after final-layout cancellation")
+		}
+		if waitErr == nil {
+			t.Fatalf("canceled scale exited successfully: stdout=%s stderr=%s", stdout.String(), stderr.String())
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			t.Fatalf("canceled scale returned no process status: %v", waitErr)
+		}
+
+		var output scaleProcessOutput
+		decodeCLIJSONFailure(t, robotProcessResult{
+			stdout:   stdout.Bytes(),
+			stderr:   stderr.Bytes(),
+			exitCode: exitErr.ExitCode(),
+		}, &output)
+		if output.Success || output.Session != session || output.ErrorCode != "TIMEOUT" || len(output.Errors) != 1 ||
+			!strings.Contains(output.Errors[0], "apply tiled layout") || !strings.Contains(output.Errors[0], "context canceled") {
+			t.Fatalf("final-layout cancellation output=%+v", output)
+		}
+		assertScaleUpPartialResponse(t, output)
+
+		beforeWait := fixture.sessionPaneSnapshot(t, session)
+		assertScaleUpPaneSnapshot(t, session, beforeWait)
+		logBeforeWait, err := os.ReadFile(filepath.Join(stateRoot, "commands.log"))
+		if err != nil {
+			t.Fatalf("read final-layout cancellation command log: %v", err)
+		}
+		if got := strings.Count(string(logBeforeWait), "select-layout"); got != 2 {
+			t.Fatalf("final-layout cancellation select-layout calls=%d, want split plus final; log=%s", got, logBeforeWait)
+		}
+
+		time.Sleep(tmux.DoubleEnterFirstDelay + tmux.DoubleEnterSecondDelay + 250*time.Millisecond)
+		afterWait := fixture.sessionPaneSnapshot(t, session)
+		if !reflect.DeepEqual(afterWait, beforeWait) {
+			t.Fatalf("scale mutated panes after cancellation response: before=%v after=%v", beforeWait, afterWait)
+		}
+		logAfterWait, err := os.ReadFile(filepath.Join(stateRoot, "commands.log"))
+		if err != nil {
+			t.Fatalf("reread final-layout cancellation command log: %v", err)
+		}
+		if !bytes.Equal(logAfterWait, logBeforeWait) {
+			t.Fatalf("scale issued tmux commands after cancellation response: before=%q after=%q", logBeforeWait, logAfterWait)
+		}
 	})
 
 	t.Run("tail_uses_canonical_keys_and_deduplicates_aliases", func(t *testing.T) {
@@ -934,6 +1369,758 @@ func TestE2ECanonicalPaneContract(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("distribute_targets_duplicate_local_indexes_by_pane_id", func(t *testing.T) {
+		fixture.respawnUserShells(t, "")
+		targets := []struct {
+			address string
+			title   string
+			beadID  string
+		}{
+			{address: "0.1", title: fixture.session + "__cc_2", beadID: "ntm-e2e-distribute-w0"},
+			{address: "1.1", title: fixture.session + "__cc_4", beadID: "ntm-e2e-distribute-w1"},
+		}
+
+		for _, target := range targets {
+			endpoint := fixture.panes[target.address]
+			fixture.mustTMUX(t, "select-pane", "-t", endpoint.ID, "-T", target.title)
+			endpoint.Title = target.title
+			endpoint.Type = tmux.AgentClaude
+			fixture.panes[target.address] = endpoint
+			fixture.sendPaneCommand(t, endpoint.ID, "cc")
+			fixture.waitForPaneContains(t, target.address, "claude>")
+		}
+
+		fakeBin := filepath.Join(fixture.runtimeRoot, "bin")
+		if err := os.WriteFile(filepath.Join(fakeBin, "bv"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatalf("write deterministic distribute bv: %v", err)
+		}
+		readyJSON := fmt.Sprintf(
+			`[{"id":%q,"title":%q,"priority":1},{"id":%q,"title":%q,"priority":1}]`,
+			targets[0].beadID, "Window zero assignment", targets[1].beadID, "Window one assignment",
+		)
+		fakeBR := fmt.Sprintf("#!/bin/sh\nif [ \"${1:-}\" = --lock-timeout ]; then shift 2; fi\ncase \"${1:-}\" in\n  ready) printf '%%s\\n' '%s' ;;\n  list|blocked) printf '[]\\n' ;;\n  *) echo \"unexpected br args: $*\" >&2; exit 64 ;;\nesac\n", readyJSON)
+		if err := os.WriteFile(filepath.Join(fakeBin, "br"), []byte(fakeBR), 0o700); err != nil {
+			t.Fatalf("write deterministic distribute br: %v", err)
+		}
+		extraEnv := map[string]string{"PATH": fakeBin + string(os.PathListSeparator) + os.Getenv("PATH")}
+		robotAssign := fixture.runRobot(t, extraEnv, "--robot-assign="+fixture.session, "--strategy=balanced")
+		if robotAssign.exitCode != 0 {
+			t.Fatalf("robot assign inspection exit=%d stdout=%s stderr=%s", robotAssign.exitCode, robotAssign.stdout, robotAssign.stderr)
+		}
+		var assignInspection struct {
+			IdleAgents      []string `json:"idle_agents"`
+			Recommendations []struct {
+				PaneID     string `json:"pane_id"`
+				PaneTarget string `json:"pane_target"`
+			} `json:"recommendations"`
+		}
+		if err := json.Unmarshal(robotAssign.stdout, &assignInspection); err != nil {
+			t.Fatalf("decode robot assign inspection: %v; output=%s", err, robotAssign.stdout)
+		}
+		if len(assignInspection.IdleAgents) != len(targets) || len(assignInspection.Recommendations) != len(targets) {
+			t.Fatalf("robot assign inspection idle=%v recommendations=%+v; output=%s", assignInspection.IdleAgents, assignInspection.Recommendations, robotAssign.stdout)
+		}
+
+		preview := fixture.runNTM(t, extraEnv,
+			"--json", "send", fixture.session, "--distribute", "--dist-limit=2",
+		)
+		if preview.exitCode != 0 {
+			t.Fatalf("distribute preview exit=%d stdout=%s stderr=%s", preview.exitCode, preview.stdout, preview.stderr)
+		}
+		var previewOutput struct {
+			Success         bool             `json:"success"`
+			Recommendations []map[string]any `json:"recommendations"`
+		}
+		if err := json.Unmarshal(preview.stdout, &previewOutput); err != nil {
+			t.Fatalf("decode distribute preview: %v; output=%s", err, preview.stdout)
+		}
+		if !previewOutput.Success || len(previewOutput.Recommendations) != len(targets) {
+			t.Fatalf("distribute preview = success:%v recommendations:%+v", previewOutput.Success, previewOutput.Recommendations)
+		}
+		for i, target := range targets {
+			recommendation := previewOutput.Recommendations[i]
+			endpoint := fixture.panes[target.address]
+			if recommendation["bead_id"] != target.beadID || recommendation["pane_id"] != endpoint.ID || recommendation["pane_target"] != target.address {
+				t.Fatalf("recommendation %d = %+v, want bead %s on %s (%s)", i, recommendation, target.beadID, target.address, endpoint.ID)
+			}
+			if _, legacy := recommendation["pane_index"]; legacy {
+				t.Fatalf("recommendation %d leaked ambiguous pane_index: %+v", i, recommendation)
+			}
+		}
+
+		dispatched := fixture.runNTM(t, extraEnv,
+			"--json", "send", fixture.session, "--distribute", "--dist-limit=2", "--dist-auto",
+		)
+		if dispatched.exitCode != 0 {
+			t.Fatalf("distribute execution exit=%d stdout=%s stderr=%s", dispatched.exitCode, dispatched.stdout, dispatched.stderr)
+		}
+		var execution struct {
+			Success   bool `json:"success"`
+			Delivered int  `json:"delivered"`
+			Failed    int  `json:"failed"`
+			Receipts  []struct {
+				BeadID     string `json:"bead_id"`
+				PaneID     string `json:"pane_id"`
+				PaneTarget string `json:"pane_target"`
+				Status     string `json:"status"`
+				Protocol   string `json:"protocol"`
+				Redaction  struct {
+					Mode     string `json:"mode"`
+					Findings int    `json:"findings"`
+					Blocked  bool   `json:"blocked"`
+				} `json:"redaction"`
+			} `json:"receipts"`
+		}
+		if err := json.Unmarshal(dispatched.stdout, &execution); err != nil {
+			t.Fatalf("decode distribute execution: %v; output=%s", err, dispatched.stdout)
+		}
+		if !execution.Success || execution.Delivered != len(targets) || execution.Failed != 0 || len(execution.Receipts) != len(targets) {
+			t.Fatalf("distribute unified execution=%+v", execution)
+		}
+		for i, target := range targets {
+			receipt := execution.Receipts[i]
+			endpoint := fixture.panes[target.address]
+			if receipt.BeadID != target.beadID || receipt.PaneID != endpoint.ID || receipt.PaneTarget != target.address ||
+				receipt.Status != "delivered" || receipt.Protocol != "double_enter" || receipt.Redaction.Blocked {
+				t.Fatalf("unified distribute receipt %d=%+v, want delivered %s on %s (%s)", i, receipt, target.beadID, target.address, endpoint.ID)
+			}
+		}
+		for _, target := range targets {
+			fixture.waitForPaneContains(t, target.address, target.beadID)
+			for address := range fixture.panes {
+				contains := strings.Contains(fixture.capturePane(t, address), target.beadID)
+				if address == target.address && !contains {
+					t.Errorf("bead %s was not delivered to %s", target.beadID, address)
+				}
+				if address != target.address && contains {
+					t.Errorf("bead %s leaked from %s to %s", target.beadID, target.address, address)
+				}
+			}
+		}
+	})
+
+	t.Run("robot_and_distribute_use_session_project_and_fail_loud", func(t *testing.T) {
+		targetProject := filepath.Join(fixture.runtimeRoot, "session-project")
+		decoyProject := filepath.Join(fixture.runtimeRoot, "caller-project")
+		for _, projectDir := range []string{targetProject, decoyProject} {
+			if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o700); err != nil {
+				t.Fatalf("create project marker in %s: %v", projectDir, err)
+			}
+		}
+
+		fixture.respawnUserShells(t, targetProject)
+		for i, address := range []string{"0.1", "1.1"} {
+			endpoint := fixture.panes[address]
+			endpoint.Title = fmt.Sprintf("%s__cc_%d", fixture.session, 2*(i+1))
+			endpoint.Type = tmux.AgentClaude
+			fixture.mustTMUX(t, "select-pane", "-t", endpoint.ID, "-T", endpoint.Title)
+			fixture.panes[address] = endpoint
+			fixture.sendPaneCommand(t, endpoint.ID, "cc")
+			fixture.waitForPaneContains(t, address, "claude>")
+		}
+		deadline := time.Now().Add(8 * time.Second)
+		for {
+			allScoped := true
+			for _, endpoint := range fixture.panes {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				output, err := fixture.tmuxOutput(ctx, "display-message", "-p", "-t", endpoint.ID, "#{pane_current_path}")
+				cancel()
+				if err != nil || filepath.Clean(strings.TrimSpace(string(output))) != targetProject {
+					allScoped = false
+					break
+				}
+			}
+			if allScoped {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("tmux panes did not enter the target session project")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		targetIDs := []string{"ntm-e2e-session-project-a", "ntm-e2e-session-project-b"}
+		decoyIDs := []string{"ntm-e2e-caller-project-a", "ntm-e2e-caller-project-b"}
+		readyRows := func(ids []string) string {
+			return fmt.Sprintf(`[{"id":%q,"title":%q,"priority":1},{"id":%q,"title":%q,"priority":1}]`,
+				ids[0], "Session project A", ids[1], "Session project B")
+		}
+		fakeBin := filepath.Join(fixture.runtimeRoot, "bin")
+		goodBR := fmt.Sprintf(`#!/bin/sh
+if [ "${1:-}" = --lock-timeout ]; then shift 2; fi
+case "$PWD" in
+  %q) rows='%s' ;;
+  %q) rows='%s' ;;
+  *) echo "unexpected br cwd: $PWD" >&2; exit 65 ;;
+esac
+case "$1" in
+  ready) printf '%%s\n' "$rows" ;;
+  list|blocked) printf '[]\n' ;;
+  *) echo "unexpected br args: $*" >&2; exit 64 ;;
+esac
+`, targetProject, readyRows(targetIDs), decoyProject, readyRows(decoyIDs))
+		if err := os.WriteFile(filepath.Join(fakeBin, "br"), []byte(goodBR), 0o700); err != nil {
+			t.Fatalf("write project-scoped br: %v", err)
+		}
+		extraEnv := map[string]string{"PATH": fakeBin + string(os.PathListSeparator) + os.Getenv("PATH")}
+
+		robotAssign := fixture.runNTMInDir(t, decoyProject, extraEnv,
+			"--robot-format=json", "--robot-assign="+fixture.session, "--strategy=balanced",
+		)
+		if robotAssign.exitCode != 0 {
+			t.Fatalf("project-scoped robot assign exit=%d stdout=%s stderr=%s", robotAssign.exitCode, robotAssign.stdout, robotAssign.stderr)
+		}
+		for _, beadID := range targetIDs {
+			if !bytes.Contains(robotAssign.stdout, []byte(beadID)) {
+				t.Fatalf("robot assign omitted session-project bead %s: %s", beadID, robotAssign.stdout)
+			}
+		}
+		for _, beadID := range decoyIDs {
+			if bytes.Contains(robotAssign.stdout, []byte(beadID)) {
+				t.Fatalf("robot assign leaked caller-CWD bead %s: %s", beadID, robotAssign.stdout)
+			}
+		}
+
+		preview := fixture.runNTMInDir(t, decoyProject, extraEnv,
+			"--json", "send", fixture.session, "--distribute", "--dist-limit=2",
+		)
+		if preview.exitCode != 0 {
+			t.Fatalf("project-scoped distribute preview exit=%d stdout=%s stderr=%s", preview.exitCode, preview.stdout, preview.stderr)
+		}
+		for _, beadID := range targetIDs {
+			if !bytes.Contains(preview.stdout, []byte(beadID)) {
+				t.Fatalf("distribute preview omitted session-project bead %s: %s", beadID, preview.stdout)
+			}
+		}
+		for _, beadID := range decoyIDs {
+			if bytes.Contains(preview.stdout, []byte(beadID)) {
+				t.Fatalf("distribute preview leaked caller-CWD bead %s: %s", beadID, preview.stdout)
+			}
+		}
+
+		first := fixture.panes["0.1"]
+		second := fixture.panes["1.1"]
+		fixture.sendPaneCommand(t, first.ID, fmt.Sprintf("Please() { tmux kill-pane -t %s; }", second.ID))
+		partial := fixture.runNTMInDir(t, decoyProject, extraEnv,
+			"--json", "send", fixture.session, "--distribute", "--dist-limit=2", "--dist-auto",
+		)
+		if partial.exitCode != 1 || len(bytes.TrimSpace(partial.stderr)) != 0 {
+			t.Fatalf("partial distribute exit=%d, want 1: stdout=%s stderr=%s", partial.exitCode, partial.stdout, partial.stderr)
+		}
+		var partialOutput struct {
+			Success   bool `json:"success"`
+			Delivered int  `json:"delivered"`
+			Failed    int  `json:"failed"`
+			Receipts  []struct {
+				BeadID string `json:"bead_id"`
+				Status string `json:"status"`
+				Error  string `json:"error"`
+			} `json:"receipts"`
+		}
+		if err := json.Unmarshal(partial.stdout, &partialOutput); err != nil {
+			t.Fatalf("partial distribute must emit one JSON document: %v; output=%s", err, partial.stdout)
+		}
+		if partialOutput.Success || partialOutput.Delivered != 1 || partialOutput.Failed != 1 || len(partialOutput.Receipts) != 2 ||
+			partialOutput.Receipts[0].Status != "delivered" || partialOutput.Receipts[1].Status != "failed" || partialOutput.Receipts[1].Error == "" {
+			t.Fatalf("partial distribute output=%+v", partialOutput)
+		}
+
+		malformedBR := "#!/bin/sh\nif [ \"${1:-}\" = --lock-timeout ]; then shift 2; fi\ncase \"${1:-}\" in\n  ready) printf '{malformed\\n' ;;\n  list|blocked) printf '[]\\n' ;;\n  *) exit 64 ;;\nesac\n"
+		if err := os.WriteFile(filepath.Join(fakeBin, "br"), []byte(malformedBR), 0o700); err != nil {
+			t.Fatalf("write malformed br: %v", err)
+		}
+		malformedRobot := fixture.runNTMInDir(t, decoyProject, extraEnv,
+			"--robot-format=json", "--robot-assign="+fixture.session, "--strategy=balanced",
+		)
+		if malformedRobot.exitCode != 1 || len(bytes.TrimSpace(malformedRobot.stderr)) != 0 {
+			t.Fatalf("malformed robot assign exit=%d, want 1: stdout=%s stderr=%s", malformedRobot.exitCode, malformedRobot.stdout, malformedRobot.stderr)
+		}
+		var robotFailure struct {
+			Success         bool             `json:"success"`
+			Error           string           `json:"error"`
+			Recommendations []map[string]any `json:"recommendations"`
+			BlockedBeads    []map[string]any `json:"blocked_beads"`
+		}
+		if err := json.Unmarshal(malformedRobot.stdout, &robotFailure); err != nil {
+			t.Fatalf("malformed robot assign must emit one JSON document: %v; output=%s", err, malformedRobot.stdout)
+		}
+		if robotFailure.Success || robotFailure.Error == "" || robotFailure.Recommendations == nil || robotFailure.BlockedBeads == nil {
+			t.Fatalf("malformed robot assignment output=%+v", robotFailure)
+		}
+
+		malformedDistribute := fixture.runNTMInDir(t, decoyProject, extraEnv,
+			"--json", "send", fixture.session, "--distribute", "--dist-limit=2",
+		)
+		if malformedDistribute.exitCode != 1 || len(bytes.TrimSpace(malformedDistribute.stderr)) != 0 {
+			t.Fatalf("malformed distribute exit=%d, want 1: stdout=%s stderr=%s", malformedDistribute.exitCode, malformedDistribute.stdout, malformedDistribute.stderr)
+		}
+		var distributeFailure struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}
+		if err := json.Unmarshal(malformedDistribute.stdout, &distributeFailure); err != nil {
+			t.Fatalf("malformed distribute must emit one JSON document: %v; output=%s", err, malformedDistribute.stdout)
+		}
+		if distributeFailure.Success || distributeFailure.Error == "" {
+			t.Fatalf("malformed distribute output=%+v", distributeFailure)
+		}
+	})
+}
+
+// TestE2EProjectSendCancellationAggregation interrupts a built project
+// broadcast after its first real tmux target has been staged. The terminal
+// response must preserve the failed in-flight receipt, synthesize a typed
+// pending receipt for the untouched session, and join the delivery protocol so
+// neither a delayed Enter nor a second-session stage can occur after return.
+func TestE2EProjectSendCancellationAggregation(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newCanonicalPaneFixture(t)
+	project := fixture.session + "-cancel-project"
+	sessionA := project + "--a"
+	sessionB := project + "--b"
+	paneA := fixture.createSinglePaneAgentSession(t, sessionA)
+	paneB := fixture.createSinglePaneAgentSession(t, sessionB)
+	marker := fixture.uniqueMarker("PROJECT_SEND_CANCEL")
+
+	stateRoot := filepath.Join(fixture.runtimeRoot, fmt.Sprintf("project-send-cancel-%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatalf("create project send cancellation state: %v", err)
+	}
+	stagePath := filepath.Join(stateRoot, "staged")
+	enterLog := filepath.Join(stateRoot, "enter.log")
+	commandLog := filepath.Join(stateRoot, "commands.log")
+	wrapper := filepath.Join(fixture.runtimeRoot, "bin", fmt.Sprintf("tmux-project-send-cancel-%d", time.Now().UnixNano()))
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$NTM_E2E_PROJECT_COMMANDS"
+command_name=${1:-}
+target=
+literal=0
+enter=0
+previous=
+for argument in "$@"; do
+    if [ "$previous" = "-t" ]; then target=$argument; fi
+    if [ "$argument" = "-l" ]; then literal=1; fi
+    if [ "$argument" = "Enter" ]; then enter=1; fi
+    previous=$argument
+done
+if [ "$command_name" = "paste-buffer" ] || { [ "$command_name" = "send-keys" ] && [ "$literal" -eq 1 ]; }; then
+    "$NTM_E2E_REAL_TMUX" "$@"
+    status=$?
+    printf '%s\n' "$target" > "$NTM_E2E_PROJECT_STAGED"
+    exit "$status"
+fi
+if [ "$command_name" = "send-keys" ] && [ "$enter" -eq 1 ]; then
+    printf '%s\n' "$target" >> "$NTM_E2E_PROJECT_ENTER_LOG"
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatalf("write project send cancellation wrapper: %v", err)
+	}
+
+	cmd := exec.Command(fixture.ntmPath,
+		"--json", "send", "--project="+project, "--all",
+		"--no-cass-check", "--no-hooks", shellMarkerCommand(marker),
+	)
+	cmd.Env = mergeProcessEnv(fixture.env, map[string]string{
+		"NTM_TMUX_BINARY":           wrapper,
+		"NTM_E2E_REAL_TMUX":         fixture.tmuxPath,
+		"NTM_E2E_PROJECT_STAGED":    stagePath,
+		"NTM_E2E_PROJECT_ENTER_LOG": enterLog,
+		"NTM_E2E_PROJECT_COMMANDS":  commandLog,
+	})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start project send cancellation process: %v", err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	finished := false
+	defer func() {
+		if !finished {
+			_ = cmd.Process.Kill()
+			<-waited
+		}
+	}()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := os.Stat(stagePath); err == nil {
+			break
+		}
+		select {
+		case waitErr := <-waited:
+			finished = true
+			t.Fatalf("project send exited before first stage: %v stdout=%s stderr=%s", waitErr, stdout.String(), stderr.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Signal(syscall.SIGQUIT)
+			t.Fatalf("project send did not stage before timeout: stdout=%s stderr=%s", stdout.String(), stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stagedTarget, err := os.ReadFile(stagePath)
+	if err != nil {
+		t.Fatalf("read project send staged target: %v", err)
+	}
+	if strings.TrimSpace(string(stagedTarget)) != paneA {
+		t.Fatalf("project send staged target=%q, want first sorted session pane %s", stagedTarget, paneA)
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("interrupt staged project send: %v", err)
+	}
+
+	var waitErr error
+	select {
+	case waitErr = <-waited:
+		finished = true
+	case <-time.After(15 * time.Second):
+		_ = cmd.Process.Signal(syscall.SIGQUIT)
+		t.Fatalf("project send did not join after cancellation: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if waitErr == nil {
+		t.Fatalf("canceled project send exited successfully: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		t.Fatalf("canceled project send returned no process status: %v", waitErr)
+	}
+	var output projectSendProcessOutput
+	decodeCLIJSONFailure(t, robotProcessResult{
+		stdout:   stdout.Bytes(),
+		stderr:   stderr.Bytes(),
+		exitCode: exitErr.ExitCode(),
+	}, &output)
+	if output.Success || output.GeneratedAt == "" || output.Project != project || output.ErrorCode != "TIMEOUT" || output.Error == "" {
+		t.Fatalf("canceled project aggregate=%+v", output)
+	}
+	if output.MatchedSessions != 2 || output.SucceededSessions != 0 || output.FailedSessions != 2 || output.Delivered != 0 || output.FailedDeliveries != 1 {
+		t.Fatalf("canceled project aggregate counts=%+v", output)
+	}
+	if len(output.Sessions) != 2 || output.Sessions[0].Session != sessionA || output.Sessions[1].Session != sessionB {
+		t.Fatalf("canceled project session order=%+v, want [%s %s]", output.Sessions, sessionA, sessionB)
+	}
+	inFlight := output.Sessions[0]
+	if inFlight.Success || inFlight.ErrorCode != "TIMEOUT" || inFlight.Error == "" || inFlight.Delivered != 0 || inFlight.Failed != 1 || len(inFlight.Targets) != 1 {
+		t.Fatalf("canceled in-flight project receipt=%+v", inFlight)
+	}
+	pending := output.Sessions[1]
+	if pending.Success || pending.ErrorCode != "TIMEOUT" || pending.Error == "" || pending.Delivered != 0 || pending.Failed != 0 || pending.Targets == nil || len(pending.Targets) != 0 {
+		t.Fatalf("canceled pending project receipt=%+v", pending)
+	}
+
+	commandsBefore, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatalf("read project send command log: %v", err)
+	}
+	time.Sleep(tmux.DoubleEnterFirstDelay + tmux.DoubleEnterSecondDelay + 250*time.Millisecond)
+	enterData, err := os.ReadFile(enterLog)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read project send Enter log: %v", err)
+	}
+	if strings.TrimSpace(string(enterData)) != "" {
+		t.Fatalf("project send submitted Enter after cancellation: %q", enterData)
+	}
+	commandsAfter, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatalf("reread project send command log: %v", err)
+	}
+	if !bytes.Equal(commandsAfter, commandsBefore) {
+		t.Fatalf("project send issued tmux commands after cancellation: before=%q after=%q", commandsBefore, commandsAfter)
+	}
+	if strings.Contains(string(commandsAfter), paneB) {
+		t.Fatalf("project send touched pending session pane %s: commands=%q", paneB, commandsAfter)
+	}
+	for session, paneID := range map[string]string{sessionA: paneA, sessionB: paneB} {
+		captureCtx, captureCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		captured, captureErr := fixture.capturePaneContext(captureCtx, paneID, 100)
+		captureCancel()
+		if captureErr != nil {
+			t.Fatalf("capture canceled project session %s: %v", session, captureErr)
+		}
+		if exactLineCount(captured, marker) != 0 {
+			t.Fatalf("project send executed marker after cancellation in %s: %s", session, captured)
+		}
+	}
+}
+
+func TestE2ECanonicalReplayJSONContract(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newCanonicalPaneFixture(t)
+	assertStableResponse := func(t *testing.T, response replayProcessOutput) {
+		t.Helper()
+		if response.Timestamp == "" || response.Targets == nil || response.Warnings == nil {
+			t.Fatalf("replay response lost required fields: %+v", response)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, response.Timestamp); err != nil {
+			t.Fatalf("replay timestamp %q is not RFC3339: %v", response.Timestamp, err)
+		}
+	}
+
+	marker := fixture.uniqueMarker("REPLAY_JSON")
+	fixture.writeReplayHistory(t, shellMarkerCommand(marker))
+
+	t.Run("dry run is noninteractive and does not actuate", func(t *testing.T) {
+		result := fixture.runNTM(t, nil,
+			"--json", "replay", "--last", "--session="+fixture.session, "--cc", "--dry-run", "--no-history",
+		)
+		var response replayProcessOutput
+		decodeCLIJSONSuccess(t, result, &response)
+		assertStableResponse(t, response)
+		if !response.Success || !response.DryRun || response.Session != fixture.session || response.Delivered != 0 || response.Failed != 0 {
+			t.Fatalf("dry-run response=%+v", response)
+		}
+		if !reflect.DeepEqual(response.Targets, []string{"0.1"}) {
+			t.Fatalf("dry-run targets=%v, want [0.1]", response.Targets)
+		}
+		fixture.assertMarkerOnlyIn(t, marker, nil)
+	})
+
+	t.Run("execution requires explicit yes", func(t *testing.T) {
+		result := fixture.runNTM(t, nil,
+			"--json", "replay", "--last", "--session="+fixture.session, "--cc", "--no-history",
+		)
+		var response replayProcessOutput
+		decodeCLIJSONFailure(t, result, &response)
+		assertStableResponse(t, response)
+		if response.Success || response.ErrorCode != "CONFIRMATION_REQUIRED" || response.Error == "" || response.Delivered != 0 || response.Failed != 0 {
+			t.Fatalf("confirmation-required response=%+v", response)
+		}
+		fixture.assertMarkerOnlyIn(t, marker, nil)
+	})
+
+	t.Run("missing history selector is invalid flag", func(t *testing.T) {
+		result := fixture.runNTM(t, nil,
+			"--json", "replay", "missing-history-prefix", "--session="+fixture.session, "--yes", "--no-history",
+		)
+		var response replayProcessOutput
+		decodeCLIJSONFailure(t, result, &response)
+		assertStableResponse(t, response)
+		if response.Success || response.ErrorCode != "INVALID_FLAG" || response.Error == "" || len(response.Targets) != 0 {
+			t.Fatalf("missing-history replay response=%+v", response)
+		}
+	})
+
+	t.Run("missing session is typed", func(t *testing.T) {
+		missingSession := fmt.Sprintf("ntm-e2e-replay-missing-%d", time.Now().UnixNano())
+		result := fixture.runNTM(t, nil,
+			"--json", "replay", "--last", "--session="+missingSession, "--yes", "--no-history",
+		)
+		var response replayProcessOutput
+		decodeCLIJSONFailure(t, result, &response)
+		assertStableResponse(t, response)
+		if response.Success || response.Session != missingSession || response.ErrorCode != "SESSION_NOT_FOUND" || response.Error == "" || len(response.Targets) != 0 {
+			t.Fatalf("missing-session replay response=%+v", response)
+		}
+	})
+
+	t.Run("yes delivers to canonical target", func(t *testing.T) {
+		result := fixture.runNTM(t, nil,
+			"--json", "replay", "--last", "--session="+fixture.session, "--cc", "--yes", "--no-history",
+		)
+		var response replayProcessOutput
+		decodeCLIJSONSuccess(t, result, &response)
+		assertStableResponse(t, response)
+		if !response.Success || response.DryRun || response.Delivered != 1 || response.Failed != 0 || response.Error != "" || response.ErrorCode != "" {
+			t.Fatalf("successful replay response=%+v", response)
+		}
+		if !reflect.DeepEqual(response.Targets, []string{"0.1"}) {
+			t.Fatalf("successful replay targets=%v, want [0.1]", response.Targets)
+		}
+		fixture.waitForMarkers(t, marker, []string{"0.1"})
+		fixture.assertMarkerOnlyIn(t, marker, []string{"0.1"})
+	})
+
+	t.Run("zero matching targets is typed", func(t *testing.T) {
+		result := fixture.runNTM(t, nil,
+			"--json", "replay", "--last", "--session="+fixture.session, "--agy", "--yes", "--no-history",
+		)
+		var response replayProcessOutput
+		decodeCLIJSONFailure(t, result, &response)
+		assertStableResponse(t, response)
+		if response.Success || response.ErrorCode != "PANE_NOT_FOUND" || response.Error == "" || len(response.Targets) != 0 || response.Delivered != 0 || response.Failed != 0 {
+			t.Fatalf("zero-target replay response=%+v", response)
+		}
+	})
+
+	t.Run("partial delivery reports delivered and failed counts", func(t *testing.T) {
+		partialMarker := fixture.uniqueMarker("REPLAY_PARTIAL")
+		fixture.writeReplayHistory(t, shellMarkerCommand(partialMarker))
+		wrapper := fixture.writeFailingTmuxWrapper(t)
+		result := fixture.runNTM(t, map[string]string{
+			"NTM_TMUX_BINARY":      wrapper,
+			"NTM_E2E_REAL_TMUX":    fixture.tmuxPath,
+			"NTM_E2E_FAIL_PANE_ID": fixture.panes["1.1"].ID,
+		}, "--json", "replay", "--last", "--session="+fixture.session, "--cod", "--yes", "--no-history")
+		var response replayProcessOutput
+		decodeCLIJSONFailure(t, result, &response)
+		assertStableResponse(t, response)
+		if response.Success || response.ErrorCode != "PROMPT_SEND_FAILED" || response.Error == "" || response.Delivered != 1 || response.Failed != 1 {
+			t.Fatalf("partial replay response=%+v", response)
+		}
+		if !reflect.DeepEqual(response.Targets, []string{"0.0", "1.1"}) {
+			t.Fatalf("partial replay targets=%v, want [0.0 1.1]", response.Targets)
+		}
+		fixture.waitForMarkers(t, partialMarker, []string{"0.0"})
+		fixture.assertMarkerOnlyIn(t, partialMarker, []string{"0.0"})
+	})
+
+	t.Run("all targets undelivered reports prompt send failure", func(t *testing.T) {
+		failedMarker := fixture.uniqueMarker("REPLAY_ALL_FAILED")
+		fixture.writeReplayHistory(t, shellMarkerCommand(failedMarker))
+		wrapper := fixture.writeFailingTmuxWrapper(t)
+		result := fixture.runNTM(t, map[string]string{
+			"NTM_TMUX_BINARY":      wrapper,
+			"NTM_E2E_REAL_TMUX":    fixture.tmuxPath,
+			"NTM_E2E_FAIL_PANE_ID": fixture.panes["0.0"].ID,
+		}, "--json", "replay", "--last", "--session="+fixture.session, "--cod", "--yes", "--no-history")
+		var response replayProcessOutput
+		decodeCLIJSONFailure(t, result, &response)
+		assertStableResponse(t, response)
+		if response.Success || response.ErrorCode != "PROMPT_SEND_FAILED" || response.Error == "" || response.Delivered != 0 || response.Failed != 2 {
+			t.Fatalf("all-undelivered replay response=%+v", response)
+		}
+		if !reflect.DeepEqual(response.Targets, []string{"0.0", "1.1"}) {
+			t.Fatalf("all-undelivered replay targets=%v, want [0.0 1.1]", response.Targets)
+		}
+		fixture.assertMarkerOnlyIn(t, failedMarker, nil)
+	})
+}
+
+func TestE2ECanonicalReplayCancellationNoPostReturnEnter(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newCanonicalPaneFixture(t)
+	prompt := fmt.Sprintf("NTM_REPLAY_CANCEL_%d", time.Now().UnixNano())
+	entry := history.NewEntry(fixture.session, nil, prompt, history.SourceCLI)
+	entry.SetSuccess()
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("encode replay history entry: %v", err)
+	}
+	historyDir := filepath.Join(fixture.runtimeRoot, "data", "ntm")
+	if err := os.MkdirAll(historyDir, 0o700); err != nil {
+		t.Fatalf("create replay history directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(historyDir, "history.jsonl"), append(encoded, '\n'), 0o600); err != nil {
+		t.Fatalf("write replay history: %v", err)
+	}
+
+	stageMarker := filepath.Join(fixture.runtimeRoot, "replay-stage")
+	enterLog := filepath.Join(fixture.runtimeRoot, "replay-enter.log")
+	tmuxWrapper := filepath.Join(fixture.runtimeRoot, "bin", "tmux-replay-cancel")
+	wrapper := `#!/bin/sh
+if [ "${1:-}" = "send-keys" ]; then
+  literal=0
+  enter=0
+  for arg in "$@"; do
+    if [ "$arg" = "-l" ]; then literal=1; fi
+    if [ "$arg" = "Enter" ]; then enter=1; fi
+  done
+  if [ "$literal" = "1" ]; then
+    "$NTM_E2E_REAL_TMUX" "$@"
+    rc=$?
+    : > "$NTM_E2E_STAGE_MARKER"
+    exit "$rc"
+  fi
+  if [ "$enter" = "1" ]; then
+    printf 'Enter\n' >> "$NTM_E2E_ENTER_LOG"
+  fi
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+	if err := os.WriteFile(tmuxWrapper, []byte(wrapper), 0o700); err != nil {
+		t.Fatalf("write replay tmux wrapper: %v", err)
+	}
+
+	cmd := exec.Command(fixture.ntmPath, "--json", "replay", "--last", "--session="+fixture.session, "--cc", "--yes", "--no-history")
+	cmd.Env = mergeProcessEnv(fixture.env, map[string]string{
+		"NTM_TMUX_BINARY":      tmuxWrapper,
+		"NTM_E2E_REAL_TMUX":    fixture.tmuxPath,
+		"NTM_E2E_STAGE_MARKER": stageMarker,
+		"NTM_E2E_ENTER_LOG":    enterLog,
+	})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start replay process: %v", err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(stageMarker); err == nil {
+			break
+		}
+		select {
+		case waitErr := <-waited:
+			t.Fatalf("replay exited before staging prompt: %v stdout=%s stderr=%s", waitErr, stdout.String(), stderr.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Signal(os.Interrupt)
+			t.Fatalf("replay never staged prompt: stdout=%s stderr=%s", stdout.String(), stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("interrupt replay after staging: %v", err)
+	}
+	replayExitCode := 0
+	select {
+	case waitErr := <-waited:
+		if waitErr == nil {
+			t.Fatalf("canceled replay exited successfully: stdout=%s stderr=%s", stdout.String(), stderr.String())
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			t.Fatalf("canceled replay returned no process status: %v", waitErr)
+		}
+		replayExitCode = exitErr.ExitCode()
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Signal(os.Interrupt)
+		t.Fatal("replay did not return after cancellation")
+	}
+
+	// The old background delivery path returned on cancellation while its
+	// delayed Enter could still fire later. Wait beyond both protocol delays
+	// and prove the instrumented real-tmux boundary observed no Enter.
+	time.Sleep(tmux.DoubleEnterFirstDelay + tmux.DoubleEnterSecondDelay + 250*time.Millisecond)
+	enterData, err := os.ReadFile(enterLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read replay Enter log: %v", err)
+	}
+	if strings.TrimSpace(string(enterData)) != "" {
+		t.Fatalf("replay submitted Enter after cancellation returned: %q", enterData)
+	}
+
+	var response replayProcessOutput
+	decodeCLIJSONFailure(t, robotProcessResult{
+		stdout:   stdout.Bytes(),
+		stderr:   stderr.Bytes(),
+		exitCode: replayExitCode,
+	}, &response)
+	if response.Success || response.ErrorCode != "TIMEOUT" || response.Error == "" || response.Targets == nil || response.Warnings == nil {
+		t.Fatalf("canceled replay response=%+v", response)
+	}
+	if !reflect.DeepEqual(response.Targets, []string{"0.1"}) || response.Delivered != 0 || response.Failed != 1 {
+		t.Fatalf("canceled replay counts/targets=%+v", response)
+	}
 }
 
 func newCanonicalPaneFixture(t *testing.T) *canonicalPaneFixture {
@@ -968,7 +2155,7 @@ func newCanonicalPaneFixture(t *testing.T) *canonicalPaneFixture {
 		"printf 'Claude Code v0.0.0\\nclaude>\\n'",
 		"while IFS= read -r line; do",
 		"  if [ \"$line\" = /exit ]; then exit 0; fi",
-		"  if [ -n \"$line\" ]; then eval \"$line\"; fi",
+		"  if [ -n \"$line\" ]; then printf 'RECEIVED:%s\\n' \"$line\"; eval \"$line\"; fi",
 		"  printf 'claude>\\n'",
 		"done",
 		"",
@@ -1088,11 +2275,18 @@ func (f *canonicalPaneFixture) runRobot(t *testing.T, extraEnv map[string]string
 }
 
 func (f *canonicalPaneFixture) runNTM(t *testing.T, extraEnv map[string]string, args ...string) robotProcessResult {
+	return f.runNTMInDir(t, "", extraEnv, args...)
+}
+
+func (f *canonicalPaneFixture) runNTMInDir(t *testing.T, dir string, extraEnv map[string]string, args ...string) robotProcessResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, f.ntmPath, args...)
+	if strings.TrimSpace(dir) != "" {
+		cmd.Dir = dir
+	}
 	cmd.Env = mergeProcessEnv(f.env, extraEnv)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -1116,9 +2310,134 @@ func (f *canonicalPaneFixture) runNTM(t *testing.T, extraEnv map[string]string, 
 	return robotProcessResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), exitCode: exitCode}
 }
 
+func (f *canonicalPaneFixture) writeFailingTmuxWrapper(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(f.runtimeRoot, "bin", "tmux-fail-send")
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"if [ \"${1:-}\" = \"send-keys\" ]; then",
+		"  previous=",
+		"  for argument in \"$@\"; do",
+		"    if [ \"$previous\" = \"-t\" ] && [ \"$argument\" = \"$NTM_E2E_FAIL_PANE_ID\" ]; then",
+		"      printf 'injected send-keys failure for %s\\n' \"$argument\" >&2",
+		"      exit 91",
+		"    fi",
+		"    previous=$argument",
+		"  done",
+		"fi",
+		"exec \"$NTM_E2E_REAL_TMUX\" \"$@\"",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write failing tmux wrapper: %v", err)
+	}
+	return path
+}
+
+func (f *canonicalPaneFixture) writeScaleLayoutWrapper(t *testing.T, mode string) (string, string) {
+	t.Helper()
+	if mode != "fail" && mode != "block" {
+		t.Fatalf("unsupported scale layout wrapper mode %q", mode)
+	}
+
+	stateRoot := filepath.Join(f.runtimeRoot, fmt.Sprintf("scale-layout-%s-%d", mode, time.Now().UnixNano()))
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatalf("create scale layout state directory: %v", err)
+	}
+	path := filepath.Join(f.runtimeRoot, "bin", fmt.Sprintf("tmux-scale-layout-%s-%d", mode, time.Now().UnixNano()))
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$NTM_E2E_SCALE_LAYOUT_STATE/commands.log"
+if [ "${1:-}" = "select-layout" ]; then
+    if [ ! -e "$NTM_E2E_SCALE_LAYOUT_STATE/initial-layout-finished" ]; then
+        : > "$NTM_E2E_SCALE_LAYOUT_STATE/initial-layout-finished"
+        exec "$NTM_E2E_REAL_TMUX" "$@"
+    fi
+    : > "$NTM_E2E_SCALE_LAYOUT_STATE/final-layout-started"
+    case "$NTM_E2E_SCALE_LAYOUT_MODE" in
+        fail)
+            printf 'injected final layout failure\n' >&2
+            exit 93
+            ;;
+        block)
+            exec /bin/sleep 30
+            ;;
+        *)
+            printf 'unknown scale layout mode: %s\n' "$NTM_E2E_SCALE_LAYOUT_MODE" >&2
+            exit 94
+            ;;
+    esac
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write scale layout tmux wrapper: %v", err)
+	}
+	return path, stateRoot
+}
+
+func (f *canonicalPaneFixture) createSinglePaneAgentSession(t *testing.T, session string) string {
+	t.Helper()
+	fakeAgentPath := filepath.Join(f.runtimeRoot, "bin") + string(os.PathListSeparator) + os.Getenv("PATH")
+	shell := fmt.Sprintf("env PATH=%q PS1='NTM_E2E> ' bash --noprofile --norc", fakeAgentPath)
+	f.mustTMUX(t, "new-session", "-d", "-s", session, "-x", "120", "-y", "32", shell)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := f.runTMUX(ctx, "kill-session", "-t", session); err != nil && ctx.Err() == nil {
+			t.Errorf("stop project fixture session %s: %v", session, err)
+		}
+	})
+	f.mustTMUX(t, "select-pane", "-t", session+":0.0", "-T", session+"__cc_1")
+	paneID := f.paneIDForSession(t, session)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		captured, err := f.capturePaneContext(context.Background(), paneID, 20)
+		if err == nil && strings.Contains(captured, "NTM_E2E>") {
+			return paneID
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("project fixture session %s did not become ready: output=%q err=%v", session, captured, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (f *canonicalPaneFixture) paneIDForSession(t *testing.T, session string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := f.tmuxOutput(ctx, "display-message", "-p", "-t", session+":0.0", "#{pane_id}")
+	if err != nil {
+		t.Fatalf("resolve pane ID for session %s: %v", session, err)
+	}
+	paneID := strings.TrimSpace(string(output))
+	if paneID == "" {
+		t.Fatalf("session %s returned an empty pane ID", session)
+	}
+	return paneID
+}
+
+func (f *canonicalPaneFixture) sessionPaneSnapshot(t *testing.T, session string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := f.tmuxOutput(ctx, "list-panes", "-s", "-t", session, "-F", "#{pane_id}|#{pane_title}")
+	if err != nil {
+		t.Fatalf("snapshot panes for session %s: %v", session, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return []string{}
+	}
+	sort.Strings(lines)
+	return lines
+}
+
 func (f *canonicalPaneFixture) mustTMUX(t *testing.T, args ...string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := f.runTMUX(ctx, args...); err != nil {
 		t.Fatalf("tmux %s: %v", strings.Join(args, " "), err)
@@ -1271,8 +2590,27 @@ func (f *canonicalPaneFixture) sendPaneCommand(t *testing.T, paneID, command str
 	}
 }
 
+func (f *canonicalPaneFixture) respawnUserShells(t *testing.T, workingDir string) {
+	t.Helper()
+	fakeAgentPath := filepath.Join(f.runtimeRoot, "bin") + string(os.PathListSeparator) + os.Getenv("PATH")
+	shell := fmt.Sprintf("env PATH=%q PS1='NTM_E2E> ' bash --noprofile --norc", fakeAgentPath)
+	for address, endpoint := range f.panes {
+		args := []string{"respawn-pane", "-k"}
+		if workingDir != "" {
+			args = append(args, "-c", workingDir)
+		}
+		args = append(args, "-t", endpoint.ID, shell)
+		f.mustTMUX(t, args...)
+		endpoint.Title = "shell"
+		endpoint.Type = tmux.AgentUser
+		f.mustTMUX(t, "select-pane", "-t", endpoint.ID, "-T", endpoint.Title)
+		f.panes[address] = endpoint
+		f.waitForPaneContains(t, address, "NTM_E2E>")
+	}
+}
+
 func (f *canonicalPaneFixture) sendPaneCommandErr(paneID, command string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := f.runTMUX(ctx, "send-keys", "-t", paneID, "-l", command); err != nil {
 		return err
@@ -1300,6 +2638,20 @@ func (f *canonicalPaneFixture) waitForMarkers(t *testing.T, marker string, addre
 				captures[address] = f.capturePane(t, address)
 			}
 			t.Fatalf("marker %q not delivered exactly once to %v; captures=%v", marker, addresses, captures)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (f *canonicalPaneFixture) waitForPaneContains(t *testing.T, address, value string) {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		if strings.Contains(f.capturePane(t, address), value) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane %s did not contain %q; capture=%s", address, value, f.capturePane(t, address))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -1346,6 +2698,23 @@ func (f *canonicalPaneFixture) seedHistory(t *testing.T) {
 	}
 }
 
+func (f *canonicalPaneFixture) writeReplayHistory(t *testing.T, prompt string) {
+	t.Helper()
+	entry := history.NewEntry(f.session, nil, prompt, history.SourceCLI)
+	entry.SetSuccess()
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal replay history entry: %v", err)
+	}
+	path := filepath.Join(f.runtimeRoot, "data", "ntm", "history.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create replay history dir: %v", err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		t.Fatalf("write replay history: %v", err)
+	}
+}
+
 func (f *canonicalPaneFixture) uniqueMarker(prefix string) string {
 	return fmt.Sprintf("NTM_E2E_%s_%d", prefix, time.Now().UnixNano())
 }
@@ -1383,6 +2752,35 @@ func outputForTail(t *testing.T, fixture *canonicalPaneFixture, selectors string
 	var output tailProcessOutput
 	decodeRobotSuccess(t, result, &output)
 	return output
+}
+
+func decodeCLIJSONSuccess(t *testing.T, result robotProcessResult, target any) {
+	t.Helper()
+	if result.exitCode != 0 {
+		t.Fatalf("CLI JSON success exit = %d, want 0; stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	decodeSingleCLIJSON(t, result, target)
+}
+
+func decodeCLIJSONFailure(t *testing.T, result robotProcessResult, target any) {
+	t.Helper()
+	if result.exitCode != 1 {
+		t.Fatalf("CLI JSON failure exit = %d, want 1; stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	decodeSingleCLIJSON(t, result, target)
+}
+
+func decodeSingleCLIJSON(t *testing.T, result robotProcessResult, target any) {
+	t.Helper()
+	if strings.TrimSpace(string(result.stderr)) != "" {
+		t.Fatalf("CLI JSON command wrote diagnostics to stderr: %q", result.stderr)
+	}
+	if !json.Valid(result.stdout) {
+		t.Fatalf("CLI JSON stdout is not exactly one JSON document: %q", result.stdout)
+	}
+	if err := json.Unmarshal(result.stdout, target); err != nil {
+		t.Fatalf("decode CLI JSON: %v; output=%s", err, result.stdout)
+	}
 }
 
 func decodeRobotSuccess(t *testing.T, result robotProcessResult, target any) {
@@ -1466,6 +2864,36 @@ func assertStringSlice(t *testing.T, label string, got, want []string) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("%s = %v, want %v", label, got, want)
+	}
+}
+
+func assertScaleUpPartialResponse(t *testing.T, output scaleProcessOutput) {
+	t.Helper()
+	if output.Before == nil || output.After == nil || output.Before["cc"] != 1 || output.After["cc"] != 2 || len(output.Actions) != 1 {
+		t.Fatalf("scale partial response state=%+v", output)
+	}
+	action := output.Actions[0]
+	if action.ActionType != "spawn" || action.AgentType != "cc" || action.Count != 1 || action.Agents == nil || len(action.Agents) != 0 {
+		t.Fatalf("scale partial response action=%+v", action)
+	}
+}
+
+func assertScaleUpPaneSnapshot(t *testing.T, session string, snapshot []string) {
+	t.Helper()
+	if len(snapshot) != 2 {
+		t.Fatalf("scale partial pane snapshot=%v, want two panes", snapshot)
+	}
+	for _, title := range []string{session + "__cc_1", session + "__cc_2"} {
+		found := false
+		for _, pane := range snapshot {
+			if strings.HasSuffix(pane, "|"+title) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("scale partial pane snapshot=%v, missing title %q", snapshot, title)
+		}
 	}
 }
 

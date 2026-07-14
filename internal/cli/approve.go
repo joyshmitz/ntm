@@ -336,10 +336,7 @@ func outputError(err error, jsonOutput bool) error {
 			"success": false,
 			"error":   err.Error(),
 		}
-		if encErr := json.NewEncoder(os.Stdout).Encode(result); encErr != nil {
-			return fmt.Errorf("encoding JSON: %w (original error: %v)", encErr, err)
-		}
-		return nil // Don't return error for JSON output
+		return emitJSONFailureEnvelopeWithCause(result, err)
 	}
 	return err
 }

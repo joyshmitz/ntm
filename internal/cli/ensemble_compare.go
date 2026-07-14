@@ -30,6 +30,7 @@ type compareOptions struct {
 
 // compareOutput is the JSON/YAML output structure.
 type compareOutput struct {
+	Success     bool                       `json:"success" yaml:"success"`
 	GeneratedAt string                     `json:"generated_at" yaml:"generated_at"`
 	RunA        string                     `json:"run_a" yaml:"run_a"`
 	RunB        string                     `json:"run_b" yaml:"run_b"`
@@ -287,6 +288,7 @@ func writeCompareResult(w io.Writer, result *ensemble.ComparisonResult, opts com
 	switch format {
 	case "json":
 		out := compareOutput{
+			Success:     true,
 			GeneratedAt: output.Timestamp().Format(time.RFC3339),
 			RunA:        result.RunA,
 			RunB:        result.RunB,
@@ -299,6 +301,7 @@ func writeCompareResult(w io.Writer, result *ensemble.ComparisonResult, opts com
 
 	case "yaml":
 		out := compareOutput{
+			Success:     true,
 			GeneratedAt: output.Timestamp().Format(time.RFC3339),
 			RunA:        result.RunA,
 			RunB:        result.RunB,
@@ -379,24 +382,25 @@ func writeCompareError(w io.Writer, runAID, runBID string, err error, format str
 	switch format {
 	case "json":
 		out := compareOutput{
+			Success:     false,
 			GeneratedAt: output.Timestamp().Format(time.RFC3339),
 			RunA:        runAID,
 			RunB:        runBID,
 			Error:       err.Error(),
 		}
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(out)
-		return err
+		return emitJSONFailureEnvelopeToWithCause(w, out, err)
 
 	case "yaml":
 		out := compareOutput{
+			Success:     false,
 			GeneratedAt: output.Timestamp().Format(time.RFC3339),
 			RunA:        runAID,
 			RunB:        runBID,
 			Error:       err.Error(),
 		}
-		_ = yaml.NewEncoder(w).Encode(out)
+		if encodeErr := yaml.NewEncoder(w).Encode(out); encodeErr != nil {
+			return errors.Join(err, encodeErr)
+		}
 		return err
 
 	default:

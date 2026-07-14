@@ -200,8 +200,7 @@ func applyEnsembleConfigOverrides(target *ensemble.EnsembleConfig, ensCfg config
 func runEnsembleSpawn(cmd *cobra.Command, opts ensembleSpawnOptions) error {
 	outputError := func(err error) error {
 		if IsJSONOutput() {
-			_ = output.PrintJSON(output.NewError(err.Error()))
-			return err
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return err
 	}
@@ -322,17 +321,10 @@ func runEnsembleSpawn(cmd *cobra.Command, opts ensembleSpawnOptions) error {
 	}
 
 	if IsJSONOutput() {
-		// bd-oqwmf: when out.Success is false (the upstream err set it
-		// at line 320), signal jsonFailureExit after the envelope so the
-		// caller exits non-zero AND root.Execute suppresses the duplicate
-		// stderr line.
-		if encErr := output.PrintJSON(out); encErr != nil {
-			return encErr
-		}
 		if !out.Success {
-			return jsonFailureExit()
+			return emitJSONFailureEnvelopeWithCause(out, err)
 		}
-		return nil
+		return output.PrintJSON(out)
 	}
 
 	if err := renderEnsembleSpawnText(cmd.OutOrStdout(), out); err != nil {
@@ -605,19 +597,13 @@ type ensembleDryRunPreamble struct {
 func runEnsembleDryRun(cmd *cobra.Command, opts ensembleSpawnOptions, manager *ensemble.EnsembleManager, agentMix map[string]int, projectDir string) error {
 	outputError := func(err error) error {
 		if IsJSONOutput() {
-			// bd-oqwmf: after writing the success:false envelope to stdout,
-			// signal jsonFailureExit so root.Execute suppresses the
-			// duplicate stderr "Error: ..." line and still exits non-zero.
-			if encErr := output.PrintJSON(ensembleDryRunOutput{
+			return emitJSONFailureEnvelopeWithCause(ensembleDryRunOutput{
 				Success:     false,
 				DryRun:      true,
 				GeneratedAt: output.Timestamp(),
 				Session:     opts.Session,
 				Error:       err.Error(),
-			}); encErr != nil {
-				return encErr
-			}
-			return jsonFailureExit()
+			}, err)
 		}
 		return err
 	}
@@ -673,8 +659,14 @@ func runEnsembleDryRun(cmd *cobra.Command, opts ensembleSpawnOptions, manager *e
 	out := convertDryRunPlanToOutput(plan, projectDir)
 
 	if IsJSONOutput() {
-		_ = output.PrintJSON(out)
-		return nil
+		if !out.Success {
+			validationErr := fmt.Errorf("ensemble dry-run validation failed")
+			if len(out.Validation.Errors) > 0 {
+				validationErr = fmt.Errorf("ensemble dry-run validation failed: %s", strings.Join(out.Validation.Errors, "; "))
+			}
+			return emitJSONFailureEnvelopeWithCause(out, validationErr)
+		}
+		return output.PrintJSON(out)
 	}
 
 	return renderEnsembleDryRunText(cmd.OutOrStdout(), out)

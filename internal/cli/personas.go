@@ -266,13 +266,14 @@ func runPersonasShow(name string) error {
 
 	p, ok := registry.Get(name)
 	if !ok {
+		err := fmt.Errorf("persona %q not found", name)
 		if jsonOutput {
-			_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 				"success": false,
-				"error":   fmt.Sprintf("persona %q not found", name),
-			})
+				"error":   err.Error(),
+			}, err)
 		}
-		return fmt.Errorf("persona %q not found", name)
+		return err
 	}
 
 	if jsonOutput {

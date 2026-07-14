@@ -144,7 +144,7 @@ func TestRespawnDryRun(t *testing.T) {
 		UserPane: true,
 	}
 
-	err = spawnSessionLogic(opts)
+	err = spawnSessionLogicContext(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestRespawnWithPaneFilter(t *testing.T) {
 		UserPane: true,
 	}
 
-	err = spawnSessionLogic(opts)
+	err = spawnSessionLogicContext(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}

@@ -310,14 +310,14 @@ func (TMUXDeliverer) Deliver(ctx context.Context, delivery Delivery) error {
 	}
 	switch delivery.Protocol {
 	case ProtocolStageOnly:
-		return tmux.SendKeysForAgentWithDelay(target, delivery.Message, false, 0, delivery.Target.AgentType)
+		return tmux.SendKeysForAgentWithDelayContext(ctx, target, delivery.Message, false, 0, delivery.Target.AgentType)
 	case ProtocolSingleEnter:
-		return tmux.SendKeysForAgentWithDelay(target, delivery.Message, true, delivery.EnterDelay, delivery.Target.AgentType)
+		return tmux.SendKeysForAgentWithDelayContext(ctx, target, delivery.Message, true, delivery.EnterDelay, delivery.Target.AgentType)
 	case ProtocolDoubleEnter:
 		if delivery.EnterDelay != tmux.DoubleEnterFirstDelay || delivery.SecondEnterDelay != tmux.DoubleEnterSecondDelay {
 			return fmt.Errorf("tmux double-enter protocol requires delays %s and %s", tmux.DoubleEnterFirstDelay, tmux.DoubleEnterSecondDelay)
 		}
-		return tmux.SendKeysForAgentDoubleEnter(target, delivery.Message, delivery.Target.AgentType)
+		return tmux.SendKeysForAgentDoubleEnterContext(ctx, target, delivery.Message, delivery.Target.AgentType)
 	default:
 		return fmt.Errorf("unsupported delivery protocol %q", delivery.Protocol)
 	}

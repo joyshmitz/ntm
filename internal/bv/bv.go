@@ -36,6 +36,36 @@ const DefaultTimeout = 30 * time.Second
 var noDBCache sync.Map
 var runBDMutexes sync.Map
 
+type workspaceBDGate struct {
+	token chan struct{}
+}
+
+func newWorkspaceBDGate() *workspaceBDGate {
+	gate := &workspaceBDGate{token: make(chan struct{}, 1)}
+	gate.token <- struct{}{}
+	return gate
+}
+
+func (g *workspaceBDGate) Lock() {
+	<-g.token
+}
+
+func (g *workspaceBDGate) LockContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("workspace Beads lock context is required")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.token:
+		return nil
+	}
+}
+
+func (g *workspaceBDGate) Unlock() {
+	g.token <- struct{}{}
+}
+
 func getNoDBState(dir string) bool {
 	v, ok := noDBCache.Load(dir)
 	if !ok {
@@ -49,15 +79,15 @@ func setNoDBState(dir string, val bool) {
 	noDBCache.Store(dir, val)
 }
 
-func workspaceBDMutex(dir string) *sync.Mutex {
+func workspaceBDMutex(dir string) *workspaceBDGate {
 	if existing, ok := runBDMutexes.Load(dir); ok {
-		if mu, ok := existing.(*sync.Mutex); ok {
+		if mu, ok := existing.(*workspaceBDGate); ok {
 			return mu
 		}
 	}
-	mu := &sync.Mutex{}
+	mu := newWorkspaceBDGate()
 	actual, _ := runBDMutexes.LoadOrStore(dir, mu)
-	if existing, ok := actual.(*sync.Mutex); ok {
+	if existing, ok := actual.(*workspaceBDGate); ok {
 		return existing
 	}
 	return mu
@@ -76,6 +106,16 @@ func run(dir string, args ...string) (string, error) {
 }
 
 func runWithTimeout(dir string, timeout time.Duration, args ...string) (string, error) {
+	return runWithContextTimeout(context.Background(), dir, timeout, args...)
+}
+
+func runWithContextTimeout(parent context.Context, dir string, timeout time.Duration, args ...string) (string, error) {
+	if parent == nil {
+		return "", errors.New("bv command context is required")
+	}
+	if err := parent.Err(); err != nil {
+		return "", err
+	}
 	if !IsInstalled() {
 		return "", ErrNotInstalled
 	}
@@ -96,7 +136,7 @@ func runWithTimeout(dir string, timeout time.Duration, args ...string) (string, 
 			return "", fmt.Errorf("bv timed out after %v: %w", timeout, ErrTimeout)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), remaining)
+		ctx, cancel := context.WithTimeout(parent, remaining)
 
 		cmd := exec.CommandContext(ctx, "bv", args...)
 		cmd.Dir = normalizedDir
@@ -116,6 +156,9 @@ func runWithTimeout(dir string, timeout time.Duration, args ...string) (string, 
 		stderrStr := stderr.String()
 		stdoutStr := stdout.String()
 
+		if parent.Err() != nil {
+			return "", parent.Err()
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("bv timed out after %v: %w", timeout, ErrTimeout)
 		}
@@ -132,7 +175,9 @@ func runWithTimeout(dir string, timeout time.Duration, args ...string) (string, 
 			if time.Until(deadline) <= backoff {
 				return "", fmt.Errorf("bv timed out after %v: %w", timeout, ErrTimeout)
 			}
-			time.Sleep(backoff)
+			if err := waitForBeadsRetry(parent, backoff); err != nil {
+				return "", err
+			}
 			continue
 		}
 
@@ -144,7 +189,12 @@ func runWithTimeout(dir string, timeout time.Duration, args ...string) (string, 
 
 // GetInsights returns graph analysis insights (bottlenecks, keystones, etc.)
 func GetInsights(dir string) (*InsightsResponse, error) {
-	output, err := run(dir, "--robot-insights")
+	return GetInsightsContext(context.Background(), dir)
+}
+
+// GetInsightsContext returns graph insights with caller cancellation.
+func GetInsightsContext(ctx context.Context, dir string) (*InsightsResponse, error) {
+	output, err := runWithContextTimeout(ctx, dir, DefaultTimeout, "--robot-insights")
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +224,12 @@ func GetPriority(dir string) (*PriorityResponse, error) {
 
 // GetPlan returns a parallel execution plan
 func GetPlan(dir string) (*PlanResponse, error) {
-	output, err := run(dir, "--robot-plan")
+	return GetPlanContext(context.Background(), dir)
+}
+
+// GetPlanContext returns the parallel execution plan with caller cancellation.
+func GetPlanContext(ctx context.Context, dir string) (*PlanResponse, error) {
+	output, err := runWithContextTimeout(ctx, dir, DefaultTimeout, "--robot-plan")
 	if err != nil {
 		return nil, err
 	}
@@ -723,6 +778,18 @@ func RunBd(dir string, args ...string) (string, error) {
 	return runBdContext(context.Background(), dir, true, args...)
 }
 
+// RunBdContext executes br with caller-controlled cancellation while retaining
+// the workspace serialization and no-database retry policy used by RunBd.
+func RunBdContext(ctx context.Context, dir string, args ...string) (string, error) {
+	if ctx == nil {
+		return "", errors.New("br command context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return runBdContext(ctx, dir, true, args...)
+}
+
 // runBdContext executes br with the workspace serialization and retry policy
 // used by RunBd. allowNoDB must be false for compare-and-set mutations such as
 // claims because JSONL-only fallback cannot provide the SQLite transaction.
@@ -741,7 +808,9 @@ func runBdContext(parent context.Context, dir string, allowNoDB bool, args ...st
 	// br's SQLite-backed workspace can self-contend when a single ntm process
 	// launches multiple br subprocesses against the same directory in parallel.
 	mu := workspaceBDMutex(dir)
-	mu.Lock()
+	if err := mu.LockContext(parent); err != nil {
+		return "", err
+	}
 	defer mu.Unlock()
 
 	// Check cache for this specific directory
@@ -768,11 +837,11 @@ func runBdContext(parent context.Context, dir string, allowNoDB bool, args ...st
 		if err == nil {
 			return strings.TrimSpace(stdout.String()), nil
 		}
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("br timed out after %v", DefaultTimeout)
-		}
 		if parent.Err() != nil {
 			return "", parent.Err()
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("br timed out after %v", DefaultTimeout)
 		}
 
 		stdoutStr := stdout.String()
@@ -789,7 +858,9 @@ func runBdContext(parent context.Context, dir string, allowNoDB bool, args ...st
 			continue
 		}
 		if attempt < maxAttempts && isTransientBeadsDBError(stderrStr, stdoutStr) {
-			time.Sleep(transientBeadsDBBackoff(attempt))
+			if err := waitForBeadsRetry(parent, transientBeadsDBBackoff(attempt)); err != nil {
+				return "", err
+			}
 			continue
 		}
 		return "", fmt.Errorf("br %s: %w: %s", strings.Join(args, " "), err, diagnostics)
@@ -798,11 +869,113 @@ func runBdContext(parent context.Context, dir string, allowNoDB bool, args ...st
 	return "", fmt.Errorf("br %s: exceeded retry budget", strings.Join(args, " "))
 }
 
+func waitForBeadsRetry(ctx context.Context, delay time.Duration) error {
+	if ctx == nil {
+		return errors.New("beads retry context is required")
+	}
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 var ErrBeadAlreadyClaimed = errors.New("bead is already claimed")
 
 // ErrBeadTerminal means a guarded terminal-generation claim observed a closed
 // or tombstoned issue and refused to let br's generic --claim path reopen it.
 var ErrBeadTerminal = errors.New("bead is terminal")
+
+// ErrBeadAssignmentIneligible means the final assignment claim transaction
+// observed a work item that was not open and free of automation gates.
+var ErrBeadAssignmentIneligible = errors.New("bead is not eligible for automated assignment")
+
+var operatorGatedLabels = map[string]struct{}{
+	"operator-gated":      {},
+	"operator-action":     {},
+	"needs-operator":      {},
+	"human-gated":         {},
+	"human-input":         {},
+	"business-input":      {},
+	"blocked-on-operator": {},
+	"blocked-on-ivan":     {},
+}
+
+// OperatorGatedLabels returns the canonical normalized labels that require a
+// human or operator decision before automated assignment.
+func OperatorGatedLabels() []string {
+	labels := make([]string, 0, len(operatorGatedLabels))
+	for label := range operatorGatedLabels {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+// IsOperatorGatedLabel reports whether label blocks automated assignment.
+func IsOperatorGatedLabel(label string) bool {
+	_, gated := operatorGatedLabels[strings.ToLower(strings.TrimSpace(label))]
+	return gated
+}
+
+// AssignmentEligibilityError reports the exact tracker preconditions that
+// rejected an automated assignment at the claim transaction boundary.
+type AssignmentEligibilityError struct {
+	BeadID             string
+	Status             string
+	UnresolvedBlockers []string
+	OperatorLabels     []string
+	Deferred           bool
+	Pinned             bool
+	Ephemeral          bool
+	Template           bool
+	Wisp               bool
+}
+
+func (e *AssignmentEligibilityError) Error() string {
+	if e == nil {
+		return ErrBeadAssignmentIneligible.Error()
+	}
+	reasons := make([]string, 0, 3)
+	if status := strings.TrimSpace(e.Status); !strings.EqualFold(status, "open") {
+		reasons = append(reasons, fmt.Sprintf("status is %q", status))
+	}
+	if len(e.UnresolvedBlockers) > 0 {
+		reasons = append(reasons, "unresolved blockers: "+strings.Join(e.UnresolvedBlockers, ", "))
+	}
+	if len(e.OperatorLabels) > 0 {
+		reasons = append(reasons, "operator-gated labels: "+strings.Join(e.OperatorLabels, ", "))
+	}
+	if e.Deferred {
+		reasons = append(reasons, "work is deferred")
+	}
+	if e.Pinned {
+		reasons = append(reasons, "work is pinned")
+	}
+	if e.Ephemeral {
+		reasons = append(reasons, "work is ephemeral")
+	}
+	if e.Template {
+		reasons = append(reasons, "work is a template")
+	}
+	if e.Wisp {
+		reasons = append(reasons, "work is a wisp")
+	}
+	if len(reasons) == 0 {
+		reasons = append(reasons, "assignment eligibility changed")
+	}
+	return fmt.Sprintf("%s: %s: %s", ErrBeadAssignmentIneligible, strings.TrimSpace(e.BeadID), strings.Join(reasons, "; "))
+}
+
+func (e *AssignmentEligibilityError) Unwrap() error {
+	return ErrBeadAssignmentIneligible
+}
 
 // BeadClaimResult is the validated output of br's atomic claim operation.
 type BeadClaimResult struct {
@@ -813,10 +986,68 @@ type BeadClaimResult struct {
 	ClaimedAt time.Time
 }
 
-// ReleaseBeadClaim releases the exact non-terminal claim owned by actor. It is
-// intentionally compare-and-set: a terminal issue or a claim now owned by a
-// different actor is left untouched, while the caller can still retire its
-// stale local assignment record safely.
+// ClaimBeadForAssignment atomically checks every authoritative automation gate
+// and claims the bead in the same SQLite transaction. Unlike ClaimBead, it is
+// intentionally limited to assignment paths and never delegates to br's
+// generic --claim behavior.
+func ClaimBeadForAssignment(ctx context.Context, dir, beadID, actor string) (BeadClaimResult, error) {
+	beadID = strings.TrimSpace(beadID)
+	actor = strings.TrimSpace(actor)
+	if beadID == "" {
+		return BeadClaimResult{}, errors.New("bead ID is required")
+	}
+	if actor == "" {
+		return BeadClaimResult{}, errors.New("claim actor is required")
+	}
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		return BeadClaimResult{}, err
+	}
+	infoOutput, err := runBdContext(ctx, normalizedDir, false, "info", "--json", "--no-auto-import", "--no-auto-flush")
+	if err != nil {
+		return BeadClaimResult{}, fmt.Errorf("resolve Beads database for assignment claim: %w", err)
+	}
+	var info beadsWorkspaceInfo
+	if err := json.Unmarshal([]byte(infoOutput), &info); err != nil {
+		return BeadClaimResult{}, fmt.Errorf("parse Beads workspace info for assignment claim: %w", err)
+	}
+	databasePath := strings.TrimSpace(info.DatabasePath)
+	if databasePath == "" {
+		return BeadClaimResult{}, errors.New("assignment claim requires a SQLite Beads database")
+	}
+
+	mu := workspaceBDMutex(normalizedDir)
+	if err := mu.LockContext(ctx); err != nil {
+		return BeadClaimResult{}, err
+	}
+	result, changed, claimErr := claimBeadForAssignmentTransaction(
+		ctx, databasePath, beadID, actor, OperatorGatedLabels(),
+	)
+	mu.Unlock()
+	if claimErr != nil {
+		return BeadClaimResult{}, claimErr
+	}
+	if !changed {
+		return result, nil
+	}
+	if _, err := runBdContext(ctx, normalizedDir, false, "sync", "--flush-only", "--json", "--no-auto-import"); err != nil {
+		return BeadClaimResult{}, fmt.Errorf("flush assignment Beads claim: %w", err)
+	}
+	if err := mu.LockContext(ctx); err != nil {
+		return BeadClaimResult{}, err
+	}
+	hashErr := repairGuardedClaimContentHash(ctx, databasePath, beadID, actor)
+	mu.Unlock()
+	if hashErr != nil {
+		return BeadClaimResult{}, hashErr
+	}
+	return result, nil
+}
+
+// ReleaseBeadClaim clears the exact claim owned by actor. It is intentionally
+// compare-and-set: a claim now owned by a different actor is left untouched.
+// Open and in-progress issues become open; closed and tombstoned issues keep
+// their terminal status while only the matching actor is cleared.
 func ReleaseBeadClaim(ctx context.Context, dir, beadID, actor string) (bool, error) {
 	beadID = strings.TrimSpace(beadID)
 	actor = strings.TrimSpace(actor)
@@ -844,7 +1075,9 @@ func ReleaseBeadClaim(ctx context.Context, dir, beadID, actor string) (bool, err
 	}
 
 	mu := workspaceBDMutex(normalizedDir)
-	mu.Lock()
+	if err := mu.LockContext(ctx); err != nil {
+		return false, err
+	}
 	releaseResult, releaseErr := releaseBeadClaimTransaction(ctx, databasePath, beadID, actor)
 	mu.Unlock()
 	if releaseErr != nil || !releaseResult.NeedsFinalization {
@@ -853,7 +1086,9 @@ func ReleaseBeadClaim(ctx context.Context, dir, beadID, actor string) (bool, err
 	if _, err := runBdContext(ctx, normalizedDir, false, "sync", "--flush-only", "--json", "--no-auto-import"); err != nil {
 		return false, fmt.Errorf("flush released Beads claim: %w", err)
 	}
-	mu.Lock()
+	if err := mu.LockContext(ctx); err != nil {
+		return false, err
+	}
 	hashErr := repairReleasedClaimContentHash(ctx, databasePath, beadID, releaseResult.Status)
 	mu.Unlock()
 	if hashErr != nil {
@@ -862,8 +1097,10 @@ func ReleaseBeadClaim(ctx context.Context, dir, beadID, actor string) (bool, err
 	return releaseResult.Released, nil
 }
 
-// ClaimBead performs the cross-process compare-and-set used by every NTM
-// assignment path. It deliberately disables RunBd's --no-db fallback.
+// ClaimBead performs the generic cross-process Beads claim. Automated NTM
+// assignment paths use ClaimBeadForAssignment so readiness policy is enforced
+// in the same transaction as the claim. This generic path deliberately
+// disables RunBd's --no-db fallback.
 func ClaimBead(ctx context.Context, dir, beadID, actor string) (BeadClaimResult, error) {
 	beadID = strings.TrimSpace(beadID)
 	actor = strings.TrimSpace(actor)
@@ -905,6 +1142,10 @@ type guardedClaimIssue struct {
 	Title       string
 	Status      string
 	Assignee    sql.NullString
+	Deferred    bool
+	Pinned      bool
+	Ephemeral   bool
+	Template    bool
 }
 
 // claimBeadNonTerminal is the compare-and-set used only when a prior terminal
@@ -934,7 +1175,9 @@ func claimBeadNonTerminal(ctx context.Context, dir, beadID, actor string) (BeadC
 	}
 
 	mu := workspaceBDMutex(normalizedDir)
-	mu.Lock()
+	if err := mu.LockContext(ctx); err != nil {
+		return BeadClaimResult{}, err
+	}
 	result, changed, claimErr := claimBeadNonTerminalTransaction(ctx, databasePath, beadID, actor)
 	mu.Unlock()
 	if claimErr != nil {
@@ -946,7 +1189,9 @@ func claimBeadNonTerminal(ctx context.Context, dir, beadID, actor string) (BeadC
 	if _, err := runBdContext(ctx, normalizedDir, false, "sync", "--flush-only", "--json", "--no-auto-import"); err != nil {
 		return BeadClaimResult{}, fmt.Errorf("flush guarded Beads claim: %w", err)
 	}
-	mu.Lock()
+	if err := mu.LockContext(ctx); err != nil {
+		return BeadClaimResult{}, err
+	}
 	hashErr := repairGuardedClaimContentHash(ctx, databasePath, beadID, actor)
 	mu.Unlock()
 	if hashErr != nil {
@@ -955,8 +1200,192 @@ func claimBeadNonTerminal(ctx context.Context, dir, beadID, actor string) (BeadC
 	return result, nil
 }
 
+func claimBeadForAssignmentTransaction(ctx context.Context, databasePath, beadID, actor string, gatedLabels []string) (BeadClaimResult, bool, error) {
+	dsn := sqliteutil.ImmediateTransactionFileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)")
+	database, err := sql.Open(sqliteutil.DriverName, dsn)
+	if err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("open Beads database for assignment claim: %w", err)
+	}
+	database.SetMaxOpenConns(1)
+	defer database.Close()
+
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("begin assignment Beads claim: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	issue, err := loadGuardedClaimIssue(ctx, tx, beadID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return BeadClaimResult{}, false, fmt.Errorf("bead %s not found", beadID)
+		}
+		return BeadClaimResult{}, false, err
+	}
+	status := strings.ToLower(strings.TrimSpace(issue.Status))
+	currentAssignee := strings.TrimSpace(issue.Assignee.String)
+	if status == "in_progress" && currentAssignee == actor {
+		if err := tx.Commit(); err != nil {
+			return BeadClaimResult{}, false, fmt.Errorf("commit idempotent assignment Beads claim: %w", err)
+		}
+		committed = true
+		return BeadClaimResult{ID: beadID, Title: issue.Title, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, !issue.ContentHash.Valid, nil
+	}
+	if issue.Assignee.Valid && currentAssignee != "" && currentAssignee != actor {
+		return BeadClaimResult{}, false, fmt.Errorf("%w: issue %s already assigned to %s", ErrBeadAlreadyClaimed, beadID, currentAssignee)
+	}
+	if status == "in_progress" {
+		return BeadClaimResult{}, false, fmt.Errorf("%w: issue %s is already in progress", ErrBeadAlreadyClaimed, beadID)
+	}
+
+	blockers, err := loadUnresolvedAssignmentBlockers(ctx, tx, beadID)
+	if err != nil {
+		return BeadClaimResult{}, false, err
+	}
+	operatorLabels, err := loadAssignmentOperatorLabels(ctx, tx, beadID, gatedLabels)
+	if err != nil {
+		return BeadClaimResult{}, false, err
+	}
+	wisp := strings.Contains(strings.ToLower(beadID), "-wisp-")
+	if status != "open" || len(blockers) > 0 || len(operatorLabels) > 0 || issue.Deferred || issue.Pinned || issue.Ephemeral || issue.Template || wisp {
+		return BeadClaimResult{}, false, &AssignmentEligibilityError{
+			BeadID: beadID, Status: issue.Status,
+			UnresolvedBlockers: blockers, OperatorLabels: operatorLabels,
+			Deferred: issue.Deferred, Pinned: issue.Pinned, Ephemeral: issue.Ephemeral,
+			Template: issue.Template, Wisp: wisp,
+		}
+	}
+
+	claimedAt := time.Now().UTC()
+	update, err := tx.ExecContext(ctx, `
+		UPDATE issues
+		SET status = 'in_progress', assignee = ?, updated_at = ?, content_hash = NULL
+		WHERE id = ?
+		  AND LOWER(TRIM(status)) = 'open'
+		  AND (assignee IS NULL OR TRIM(assignee) = '' OR assignee = ?)
+		  AND (defer_until IS NULL OR (datetime(defer_until) IS NOT NULL AND datetime(defer_until) <= datetime('now')))
+		  AND (pinned = 0 OR pinned IS NULL)
+		  AND (ephemeral = 0 OR ephemeral IS NULL)
+		  AND (is_template = 0 OR is_template IS NULL)
+		  AND id NOT LIKE '%-wisp-%'`,
+		actor, claimedAt.Format(time.RFC3339Nano), beadID, actor)
+	if err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("compare-and-set assignment Beads claim: %w", err)
+	}
+	updatedRows, err := update.RowsAffected()
+	if err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("inspect assignment Beads claim result: %w", err)
+	}
+	if updatedRows != 1 {
+		return BeadClaimResult{}, false, fmt.Errorf("%w: assignment claim precondition changed for %s", ErrBeadAlreadyClaimed, beadID)
+	}
+	if err := insertGuardedClaimEvent(ctx, tx, beadID, "status_changed", actor, issue.Status, "in_progress", claimedAt); err != nil {
+		return BeadClaimResult{}, false, err
+	}
+	if currentAssignee != actor {
+		if err := insertGuardedClaimEvent(ctx, tx, beadID, "assignee_changed", actor, currentAssignee, actor, claimedAt); err != nil {
+			return BeadClaimResult{}, false, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM dirty_issues WHERE issue_id = ?", beadID); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("refresh assignment claim dirty marker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO dirty_issues (issue_id, marked_at) VALUES (?, ?)", beadID, claimedAt.Format(time.RFC3339Nano)); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("record assignment claim dirty marker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM export_hashes WHERE issue_id = ?", beadID); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("invalidate assignment claim export hash: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM metadata WHERE key = 'blocked_cache_state'"); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("invalidate assignment claim blocked cache: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO metadata (key, value) VALUES ('blocked_cache_state', 'stale')"); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("record assignment claim blocked cache state: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("commit assignment Beads claim: %w", err)
+	}
+	committed = true
+	return BeadClaimResult{ID: beadID, Title: issue.Title, Actor: actor, Status: "in_progress", ClaimedAt: claimedAt}, true, nil
+}
+
+func loadUnresolvedAssignmentBlockers(ctx context.Context, tx *sql.Tx, beadID string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT d.depends_on_id
+		FROM dependencies d
+		LEFT JOIN issues blocker ON blocker.id = d.depends_on_id
+		WHERE d.issue_id = ?
+		  AND LOWER(TRIM(d.type)) IN ('blocks', 'conditional-blocks', 'waits-for')
+		  AND (blocker.id IS NULL OR LOWER(TRIM(blocker.status)) NOT IN ('closed', 'tombstone'))
+		  AND (blocker.id IS NULL OR blocker.is_template IS NULL OR blocker.is_template = 0)
+		ORDER BY d.depends_on_id`, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect assignment blockers for %s: %w", beadID, err)
+	}
+	defer rows.Close()
+
+	blockers := make([]string, 0)
+	for rows.Next() {
+		var blockerID string
+		if err := rows.Scan(&blockerID); err != nil {
+			return nil, fmt.Errorf("read assignment blocker for %s: %w", beadID, err)
+		}
+		blockerID = strings.TrimSpace(blockerID)
+		if blockerID == "" {
+			return nil, fmt.Errorf("assignment blocker for %s has no bead ID", beadID)
+		}
+		blockers = append(blockers, blockerID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate assignment blockers for %s: %w", beadID, err)
+	}
+	return blockers, nil
+}
+
+func loadAssignmentOperatorLabels(ctx context.Context, tx *sql.Tx, beadID string, gatedLabels []string) ([]string, error) {
+	normalizedSet := make(map[string]struct{}, len(gatedLabels))
+	for _, rawLabel := range gatedLabels {
+		label := strings.ToLower(strings.TrimSpace(rawLabel))
+		if label != "" {
+			normalizedSet[label] = struct{}{}
+		}
+	}
+	if len(normalizedSet) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT LOWER(TRIM(label))
+		FROM labels
+		WHERE issue_id = ?
+		ORDER BY LOWER(TRIM(label))`, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect assignment operator labels for %s: %w", beadID, err)
+	}
+	defer rows.Close()
+
+	labels := make([]string, 0)
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			return nil, fmt.Errorf("read assignment operator label for %s: %w", beadID, err)
+		}
+		if _, gated := normalizedSet[label]; gated {
+			labels = append(labels, label)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate assignment operator labels for %s: %w", beadID, err)
+	}
+	return labels, nil
+}
+
 func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, actor string) (BeadClaimResult, bool, error) {
-	dsn := sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)")
+	dsn := sqliteutil.ImmediateTransactionFileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)")
 	database, err := sql.Open(sqliteutil.DriverName, dsn)
 	if err != nil {
 		return BeadClaimResult{}, false, fmt.Errorf("open Beads database for guarded claim: %w", err)
@@ -1166,9 +1595,14 @@ func releaseBeadClaimTransaction(ctx context.Context, databasePath, beadID, acto
 func loadGuardedClaimIssue(ctx context.Context, tx *sql.Tx, beadID string) (guardedClaimIssue, error) {
 	var issue guardedClaimIssue
 	err := tx.QueryRowContext(ctx, `
-		SELECT content_hash, title, status, assignee
+		SELECT content_hash, title, status, assignee,
+		       CASE WHEN defer_until IS NOT NULL AND (datetime(defer_until) IS NULL OR datetime(defer_until) > datetime('now')) THEN 1 ELSE 0 END,
+		       CASE WHEN COALESCE(pinned, 0) != 0 THEN 1 ELSE 0 END,
+		       CASE WHEN COALESCE(ephemeral, 0) != 0 THEN 1 ELSE 0 END,
+		       CASE WHEN COALESCE(is_template, 0) != 0 THEN 1 ELSE 0 END
 		FROM issues WHERE id = ?`, beadID).Scan(
 		&issue.ContentHash, &issue.Title, &issue.Status, &issue.Assignee,
+		&issue.Deferred, &issue.Pinned, &issue.Ephemeral, &issue.Template,
 	)
 	if err != nil {
 		return guardedClaimIssue{}, err
@@ -1260,7 +1694,7 @@ func repairReleasedClaimContentHash(ctx context.Context, databasePath, beadID, e
 		if err := database.QueryRowContext(ctx, "SELECT status, assignee, content_hash FROM issues WHERE id = ?", beadID).Scan(&actualStatus, &assignee, &contentHash); err != nil {
 			return fmt.Errorf("verify released claim content hash finalization: %w", err)
 		}
-		if strings.ToLower(strings.TrimSpace(actualStatus)) == strings.ToLower(strings.TrimSpace(expectedStatus)) && strings.TrimSpace(assignee.String) == "" && !contentHash.Valid {
+		if strings.EqualFold(strings.TrimSpace(actualStatus), strings.TrimSpace(expectedStatus)) && strings.TrimSpace(assignee.String) == "" && !contentHash.Valid {
 			return errors.New("beads export did not produce a content hash for released claim")
 		}
 	}
@@ -1386,11 +1820,16 @@ func stripFlagWithValue(args []string, flag string) []string {
 
 // GetBeadStatus returns the current status for a bead ID using br show --json.
 func GetBeadStatus(dir, beadID string) (string, error) {
+	return GetBeadStatusContext(context.Background(), dir, beadID)
+}
+
+// GetBeadStatusContext returns exact bead status with caller cancellation.
+func GetBeadStatusContext(ctx context.Context, dir, beadID string) (string, error) {
 	if strings.TrimSpace(beadID) == "" {
 		return "", errors.New("bead ID is required")
 	}
 
-	output, err := RunBd(dir, "show", beadID, "--json")
+	output, err := RunBdContext(ctx, dir, "show", beadID, "--json")
 	if err != nil {
 		return "", err
 	}
@@ -1401,16 +1840,26 @@ func GetBeadStatus(dir, beadID string) (string, error) {
 // Unlike triage output, br show is keyed by the requested ID and is not capped
 // or ranking-dependent.
 type BeadAssignmentDetails struct {
-	ID        string
-	Title     string
-	Status    string
-	Labels    []string
-	BlockedBy []string
+	ID                   string
+	Title                string
+	Status               string
+	Priority             int
+	Assignee             string
+	DeferUntil           *time.Time
+	Pinned               bool
+	Ephemeral            bool
+	Template             bool
+	Wisp                 bool
+	Labels               []string
+	BlockedBy            []string
+	BlockingDependencies []BeadDependencyState
 }
 
 type beadShowDependency struct {
 	ID             string `json:"id"`
+	Title          string `json:"title"`
 	Status         string `json:"status"`
+	Priority       int    `json:"priority"`
 	DependencyType string `json:"dependency_type"`
 }
 
@@ -1418,18 +1867,61 @@ type beadShowAssignmentRow struct {
 	ID           string               `json:"id"`
 	Title        string               `json:"title"`
 	Status       string               `json:"status"`
+	Priority     int                  `json:"priority"`
+	Assignee     string               `json:"assignee"`
+	DeferUntil   *time.Time           `json:"defer_until"`
+	Pinned       bool                 `json:"pinned"`
+	Ephemeral    bool                 `json:"ephemeral"`
+	Template     bool                 `json:"is_template"`
 	Labels       []string             `json:"labels"`
 	Dependencies []beadShowDependency `json:"dependencies"`
+	Dependents   []beadShowDependency `json:"dependents"`
 }
 
-// GetBeadAssignmentDetails returns exact title, status, labels, and unresolved
-// blocking dependencies for one bead using br show --json.
+// BeadDependencyState is one blocking dependency exactly as reported by
+// br show. Terminal dependencies are retained so callers can prove that a
+// previously blocked bead became unblocked instead of mistaking filtered data
+// for an empty dependency set.
+type BeadDependencyState struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// BeadDependentState is one local work item blocked by the inspected bead.
+// External dependency endpoints are intentionally omitted because they cannot
+// be validated or assigned through the local Beads database.
+type BeadDependentState struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Status   string `json:"status"`
+	Priority int    `json:"priority"`
+}
+
+// IsBlockingDependencyType reports whether a Beads relationship participates
+// in readiness. Keep this set aligned with the guarded assignment claim query.
+func IsBlockingDependencyType(dependencyType string) bool {
+	switch strings.ToLower(strings.TrimSpace(dependencyType)) {
+	case "blocks", "conditional-blocks", "waits-for":
+		return true
+	default:
+		return false
+	}
+}
+
+// GetBeadAssignmentDetails returns exact title, status, assignee, labels, and
+// unresolved blocking dependencies for one bead using br show --json.
 func GetBeadAssignmentDetails(dir, beadID string) (*BeadAssignmentDetails, error) {
+	return GetBeadAssignmentDetailsContext(context.Background(), dir, beadID)
+}
+
+// GetBeadAssignmentDetailsContext returns exact assignment-gate state with
+// caller cancellation.
+func GetBeadAssignmentDetailsContext(ctx context.Context, dir, beadID string) (*BeadAssignmentDetails, error) {
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" {
 		return nil, errors.New("bead ID is required")
 	}
-	output, err := RunBd(dir, "show", beadID, "--json")
+	output, err := RunBdContext(ctx, dir, "show", beadID, "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -1443,54 +1935,67 @@ func GetBeadAssignmentDetails(dir, beadID string) (*BeadAssignmentDetails, error
 	return details, nil
 }
 
+// GetBeadDependencyStateContext returns every blocking dependency for one bead,
+// including closed and tombstoned dependencies, with caller cancellation.
+func GetBeadDependencyStateContext(ctx context.Context, dir, beadID string) ([]BeadDependencyState, error) {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return nil, errors.New("bead ID is required")
+	}
+	output, err := RunBdContext(ctx, dir, "show", beadID, "--json")
+	if err != nil {
+		return nil, err
+	}
+	row, err := parseBeadShowAssignmentRow(output)
+	if err != nil {
+		return nil, err
+	}
+	if row.ID != beadID {
+		return nil, fmt.Errorf("br show returned bead %q, want %q", row.ID, beadID)
+	}
+	return blockingDependencyStates(row.Dependencies)
+}
+
+// GetBeadBlockingDependentsContext returns every local work item whose
+// readiness depends on beadID. The source is one uncapped br show response,
+// rather than a ranked triage list, so no dependent is dropped by a limit.
+func GetBeadBlockingDependentsContext(ctx context.Context, dir, beadID string) ([]BeadDependentState, error) {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return nil, errors.New("bead ID is required")
+	}
+	output, err := RunBdContext(ctx, dir, "show", beadID, "--json")
+	if err != nil {
+		return nil, err
+	}
+	row, err := parseBeadShowAssignmentRow(output)
+	if err != nil {
+		return nil, err
+	}
+	if row.ID != beadID {
+		return nil, fmt.Errorf("br show returned bead %q, want %q", row.ID, beadID)
+	}
+	return blockingDependentStates(row.Dependents)
+}
+
 func parseBeadAssignmentDetailsOutput(output string) (*BeadAssignmentDetails, error) {
-	trimmed := strings.TrimSpace(output)
-	if trimmed == "" {
-		return nil, errors.New("empty bead output")
+	row, err := parseBeadShowAssignmentRow(output)
+	if err != nil {
+		return nil, err
 	}
 
-	var row beadShowAssignmentRow
-	var rows []beadShowAssignmentRow
-	if err := json.Unmarshal([]byte(trimmed), &rows); err == nil {
-		if len(rows) != 1 {
-			return nil, fmt.Errorf("br show returned %d beads, want exactly 1", len(rows))
-		}
-		row = rows[0]
-	} else if err := json.Unmarshal([]byte(trimmed), &row); err != nil {
-		return nil, fmt.Errorf("parse bead assignment details: %w", err)
+	dependencyStates, err := blockingDependencyStates(row.Dependencies)
+	if err != nil {
+		return nil, err
 	}
-
-	row.ID = strings.TrimSpace(row.ID)
-	row.Title = strings.TrimSpace(row.Title)
-	row.Status = strings.TrimSpace(row.Status)
-	if row.ID == "" {
-		return nil, errors.New("bead ID field not found in br show response")
-	}
-	if row.Status == "" {
-		return nil, errors.New("bead status field not found in br show response")
-	}
-
-	blockedSet := make(map[string]struct{}, len(row.Dependencies))
-	for _, dependency := range row.Dependencies {
-		dependencyType := strings.ToLower(strings.TrimSpace(dependency.DependencyType))
-		if dependencyType != "" && dependencyType != "blocks" {
-			continue
-		}
+	blockedBy := make([]string, 0, len(dependencyStates))
+	for _, dependency := range dependencyStates {
 		status := strings.ToLower(strings.TrimSpace(dependency.Status))
 		if status == "closed" || status == "tombstone" {
 			continue
 		}
-		dependencyID := strings.TrimSpace(dependency.ID)
-		if dependencyID == "" {
-			return nil, errors.New("blocking dependency has no bead ID")
-		}
-		blockedSet[dependencyID] = struct{}{}
+		blockedBy = append(blockedBy, dependency.ID)
 	}
-	blockedBy := make([]string, 0, len(blockedSet))
-	for dependencyID := range blockedSet {
-		blockedBy = append(blockedBy, dependencyID)
-	}
-	sort.Strings(blockedBy)
 
 	labels := make([]string, 0, len(row.Labels))
 	seenLabels := make(map[string]struct{}, len(row.Labels))
@@ -1508,9 +2013,101 @@ func parseBeadAssignmentDetailsOutput(output string) (*BeadAssignmentDetails, er
 	sort.Strings(labels)
 
 	return &BeadAssignmentDetails{
-		ID: row.ID, Title: row.Title, Status: row.Status,
-		Labels: labels, BlockedBy: blockedBy,
+		ID: row.ID, Title: row.Title, Status: row.Status, Priority: row.Priority, Assignee: row.Assignee,
+		DeferUntil: row.DeferUntil, Pinned: row.Pinned, Ephemeral: row.Ephemeral, Template: row.Template,
+		Wisp: strings.Contains(strings.ToLower(row.ID), "-wisp-"), Labels: labels, BlockedBy: blockedBy,
+		BlockingDependencies: dependencyStates,
 	}, nil
+}
+
+func parseBeadShowAssignmentRow(output string) (beadShowAssignmentRow, error) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return beadShowAssignmentRow{}, errors.New("empty bead output")
+	}
+
+	var row beadShowAssignmentRow
+	var rows []beadShowAssignmentRow
+	if err := json.Unmarshal([]byte(trimmed), &rows); err == nil {
+		if len(rows) != 1 {
+			return beadShowAssignmentRow{}, fmt.Errorf("br show returned %d beads, want exactly 1", len(rows))
+		}
+		row = rows[0]
+	} else if err := json.Unmarshal([]byte(trimmed), &row); err != nil {
+		return beadShowAssignmentRow{}, fmt.Errorf("parse bead assignment details: %w", err)
+	}
+
+	row.ID = strings.TrimSpace(row.ID)
+	row.Title = strings.TrimSpace(row.Title)
+	row.Status = strings.TrimSpace(row.Status)
+	row.Assignee = strings.TrimSpace(row.Assignee)
+	if row.ID == "" {
+		return beadShowAssignmentRow{}, errors.New("bead ID field not found in br show response")
+	}
+	if row.Status == "" {
+		return beadShowAssignmentRow{}, errors.New("bead status field not found in br show response")
+	}
+	return row, nil
+}
+
+func blockingDependencyStates(dependencies []beadShowDependency) ([]BeadDependencyState, error) {
+	statesByID := make(map[string]string, len(dependencies))
+	for _, dependency := range dependencies {
+		if !IsBlockingDependencyType(dependency.DependencyType) {
+			continue
+		}
+		dependencyID := strings.TrimSpace(dependency.ID)
+		if dependencyID == "" {
+			return nil, errors.New("blocking dependency has no bead ID")
+		}
+		status := strings.ToLower(strings.TrimSpace(dependency.Status))
+		if status == "" {
+			return nil, fmt.Errorf("blocking dependency %s has no status", dependencyID)
+		}
+		if existing, duplicate := statesByID[dependencyID]; duplicate && existing != status {
+			return nil, fmt.Errorf("blocking dependency %s has conflicting statuses %q and %q", dependencyID, existing, status)
+		}
+		statesByID[dependencyID] = status
+	}
+	states := make([]BeadDependencyState, 0, len(statesByID))
+	for dependencyID, status := range statesByID {
+		states = append(states, BeadDependencyState{ID: dependencyID, Status: status})
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].ID < states[j].ID })
+	return states, nil
+}
+
+func blockingDependentStates(dependents []beadShowDependency) ([]BeadDependentState, error) {
+	statesByID := make(map[string]BeadDependentState, len(dependents))
+	for _, dependent := range dependents {
+		if !IsBlockingDependencyType(dependent.DependencyType) {
+			continue
+		}
+		dependentID := strings.TrimSpace(dependent.ID)
+		if strings.HasPrefix(strings.ToLower(dependentID), "external:") {
+			continue
+		}
+		if dependentID == "" {
+			return nil, errors.New("blocking dependent has no bead ID")
+		}
+		status := strings.ToLower(strings.TrimSpace(dependent.Status))
+		if status == "" {
+			return nil, fmt.Errorf("blocking dependent %s has no status", dependentID)
+		}
+		state := BeadDependentState{
+			ID: dependentID, Title: strings.TrimSpace(dependent.Title), Status: status, Priority: dependent.Priority,
+		}
+		if existing, duplicate := statesByID[dependentID]; duplicate && existing != state {
+			return nil, fmt.Errorf("blocking dependent %s has conflicting rows", dependentID)
+		}
+		statesByID[dependentID] = state
+	}
+	states := make([]BeadDependentState, 0, len(statesByID))
+	for _, state := range statesByID {
+		states = append(states, state)
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].ID < states[j].ID })
+	return states, nil
 }
 
 func parseBeadStatusOutput(output string) (string, error) {
@@ -1564,13 +2161,26 @@ func IsBdInstalled() bool {
 
 // GetBeadsSummary attempts to get bead statistics from the br command.
 func GetBeadsSummary(dir string, limit int) *BeadsSummary {
+	result, _ := GetBeadsSummaryContext(context.Background(), dir, limit)
+	return result
+}
+
+// GetBeadsSummaryContext gets bead statistics while honoring cancellation
+// across every br subprocess used to assemble the summary.
+func GetBeadsSummaryContext(ctx context.Context, dir string, limit int) (*BeadsSummary, error) {
 	result := &BeadsSummary{}
+	if ctx == nil {
+		return result, errors.New("beads summary context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 
 	normalizedDir, err := normalizeTriageDir(dir)
 	if err != nil {
 		result.Available = false
 		result.Reason = err.Error()
-		return result
+		return result, nil
 	}
 	dir = normalizedDir
 
@@ -1578,7 +2188,7 @@ func GetBeadsSummary(dir string, limit int) *BeadsSummary {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		result.Available = false
 		result.Reason = fmt.Sprintf("project directory does not exist: %s", dir)
-		return result
+		return result, nil
 	}
 
 	// Check if .beads directory exists
@@ -1586,23 +2196,26 @@ func GetBeadsSummary(dir string, limit int) *BeadsSummary {
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		result.Available = false
 		result.Reason = fmt.Sprintf("no .beads/ directory in %s", dir)
-		return result
+		return result, nil
 	}
 
 	if !IsBdInstalled() {
 		result.Available = false
 		result.Reason = "br not installed"
-		return result
+		return result, nil
 	}
 
 	result.Project = dir
 
 	// Try to run br stats --json to get summary
-	statsOutput, err := RunBd(dir, "stats", "--json")
+	statsOutput, err := RunBdContext(ctx, dir, "stats", "--json")
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, ctxErr
+		}
 		result.Available = false
 		result.Reason = fmt.Sprintf("br stats failed: %v", err)
-		return result
+		return result, nil
 	}
 
 	// Parse the JSON output
@@ -1617,7 +2230,7 @@ func GetBeadsSummary(dir string, limit int) *BeadsSummary {
 	if err := json.Unmarshal([]byte(statsOutput), &stats); err != nil {
 		result.Available = false
 		result.Reason = fmt.Sprintf("parse stats failed: %v", err)
-		return result
+		return result, nil
 	}
 
 	result.Available = true
@@ -1629,21 +2242,41 @@ func GetBeadsSummary(dir string, limit int) *BeadsSummary {
 	result.Closed = stats.ClosedIssues
 
 	// Get ready preview (top N ready issues sorted by priority)
-	result.ReadyPreview = GetReadyPreview(dir, limit)
+	ready, err := GetReadyPreviewContext(ctx, dir, limit)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, ctxErr
+		}
+	} else {
+		result.ReadyPreview = ready
+	}
 
 	// Get in-progress list
-	result.InProgressList = GetInProgressList(dir, limit)
+	inProgress, err := GetInProgressListContext(ctx, dir, limit)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, ctxErr
+		}
+	} else {
+		result.InProgressList = inProgress
+	}
 
-	return result
+	return result, nil
 }
 
 // GetReadyPreview returns top N ready beads sorted by priority
 func GetReadyPreview(dir string, limit int) []BeadPreview {
-	var previews []BeadPreview
+	previews, _ := GetReadyPreviewContext(context.Background(), dir, limit)
+	return previews
+}
 
-	output, err := RunBd(dir, "ready", "--json")
+// GetReadyPreviewContext returns ready beads and preserves command, parse, and
+// cancellation failures so callers can distinguish checked-empty from unknown.
+func GetReadyPreviewContext(ctx context.Context, dir string, limit int) ([]BeadPreview, error) {
+	previews := make([]BeadPreview, 0)
+	output, err := RunBdContext(ctx, dir, "ready", "--json")
 	if err != nil {
-		return previews
+		return nil, fmt.Errorf("list ready beads: %w", err)
 	}
 
 	var issues []struct {
@@ -1656,7 +2289,7 @@ func GetReadyPreview(dir string, limit int) []BeadPreview {
 		Title    string `json:"title"`
 		Priority int    `json:"priority"`
 	}](output); err != nil {
-		return previews
+		return nil, fmt.Errorf("parse ready beads: %w", err)
 	}
 
 	// Take up to limit items
@@ -1671,7 +2304,7 @@ func GetReadyPreview(dir string, limit int) []BeadPreview {
 		})
 	}
 
-	return previews
+	return previews, nil
 }
 
 // GetInProgressList returns in-progress beads with assignees.
@@ -1683,11 +2316,17 @@ func GetReadyPreview(dir string, limit int) []BeadPreview {
 // gate via [`HasLocalBeadsDB`] before calling this and refuse to surface
 // the result if it returns false. See #130.
 func GetInProgressList(dir string, limit int) []BeadInProgress {
-	var items []BeadInProgress
+	items, _ := GetInProgressListContext(context.Background(), dir, limit)
+	return items
+}
 
-	output, err := RunBd(dir, "list", "--status=in_progress", "--json")
+// GetInProgressListContext returns in-progress beads without erasing command,
+// parse, or cancellation failures.
+func GetInProgressListContext(ctx context.Context, dir string, limit int) ([]BeadInProgress, error) {
+	items := make([]BeadInProgress, 0)
+	output, err := RunBdContext(ctx, dir, "list", "--status=in_progress", "--json")
 	if err != nil {
-		return items
+		return nil, fmt.Errorf("list in-progress beads: %w", err)
 	}
 
 	var issues []struct {
@@ -1702,7 +2341,7 @@ func GetInProgressList(dir string, limit int) []BeadInProgress {
 		Assignee  string    `json:"assignee"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}](output); err != nil {
-		return items
+		return nil, fmt.Errorf("parse in-progress beads: %w", err)
 	}
 
 	// Take up to limit items
@@ -1718,7 +2357,7 @@ func GetInProgressList(dir string, limit int) []BeadInProgress {
 		})
 	}
 
-	return items
+	return items, nil
 }
 
 // GetRecentlyCompletedList returns recently completed beads.
@@ -1728,11 +2367,18 @@ func GetInProgressList(dir string, limit int) []BeadInProgress {
 // directory has none of its own; callers that need a strict per-directory
 // view should pre-check [`HasLocalBeadsDB`] (#130).
 func GetRecentlyCompletedList(dir string, limit int) []BeadPreview {
-	var items []BeadPreview
+	items, _ := GetRecentlyCompletedListContext(context.Background(), dir, limit)
+	return items
+}
 
-	output, err := RunBd(dir, "list", "--status=done", "--json")
+// GetRecentlyCompletedListContext returns recently completed beads without
+// erasing command, parse, or cancellation failures.
+func GetRecentlyCompletedListContext(ctx context.Context, dir string, limit int) ([]BeadPreview, error) {
+	items := make([]BeadPreview, 0)
+
+	output, err := RunBdContext(ctx, dir, "list", "--status=done", "--json")
 	if err != nil {
-		return items
+		return nil, fmt.Errorf("list recently completed beads: %w", err)
 	}
 
 	var issues []struct {
@@ -1743,7 +2389,7 @@ func GetRecentlyCompletedList(dir string, limit int) []BeadPreview {
 		ID    string `json:"id"`
 		Title string `json:"title"`
 	}](output); err != nil {
-		return items
+		return nil, fmt.Errorf("parse recently completed beads: %w", err)
 	}
 
 	// Take up to limit items
@@ -1757,7 +2403,7 @@ func GetRecentlyCompletedList(dir string, limit int) []BeadPreview {
 		})
 	}
 
-	return items
+	return items, nil
 }
 
 // GetBlockedList returns blocked beads (beads that are blocked by dependencies).
@@ -1766,11 +2412,17 @@ func GetRecentlyCompletedList(dir string, limit int) []BeadPreview {
 // directory has none of its own; callers that need a strict per-directory
 // view should pre-check [`HasLocalBeadsDB`] (#130).
 func GetBlockedList(dir string, limit int) []BeadPreview {
-	var items []BeadPreview
+	items, _ := GetBlockedListContext(context.Background(), dir, limit)
+	return items
+}
 
-	output, err := RunBd(dir, "blocked", "--json")
+// GetBlockedListContext returns blocked beads without erasing command, parse,
+// or cancellation failures.
+func GetBlockedListContext(ctx context.Context, dir string, limit int) ([]BeadPreview, error) {
+	items := make([]BeadPreview, 0)
+	output, err := RunBdContext(ctx, dir, "blocked", "--json")
 	if err != nil {
-		return items
+		return nil, fmt.Errorf("list blocked beads: %w", err)
 	}
 
 	var issues []struct {
@@ -1781,7 +2433,7 @@ func GetBlockedList(dir string, limit int) []BeadPreview {
 		ID    string `json:"id"`
 		Title string `json:"title"`
 	}](output); err != nil {
-		return items
+		return nil, fmt.Errorf("parse blocked beads: %w", err)
 	}
 
 	// Take up to limit items
@@ -1795,7 +2447,7 @@ func GetBlockedList(dir string, limit int) []BeadPreview {
 		})
 	}
 
-	return items
+	return items, nil
 }
 
 // RunRaw executes bv with given args and returns the raw output.

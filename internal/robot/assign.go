@@ -1,13 +1,17 @@
 package robot
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/assign"
+	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -35,8 +39,9 @@ type AssignOutput struct {
 
 // AssignRecommend is a single assignment recommendation
 type AssignRecommend struct {
-	Agent      string  `json:"agent"`      // Pane index (e.g., "1")
-	AgentType  string  `json:"agent_type"` // claude, codex, gemini
+	PaneID     string  `json:"pane_id"`     // Stable tmux pane identity (e.g., "%12")
+	PaneTarget string  `json:"pane_target"` // Explicit window.pane topology address
+	AgentType  string  `json:"agent_type"`  // claude, codex, gemini
 	Model      string  `json:"model,omitempty"`
 	AssignBead string  `json:"assign_bead"` // Bead ID to assign
 	BeadTitle  string  `json:"bead_title"`
@@ -86,21 +91,32 @@ func AgentStrength(agentType, taskType string) float64 {
 
 // DistributeRecommendation is a simplified recommendation for distribute mode
 type DistributeRecommendation struct {
-	BeadID    string `json:"bead_id"`
-	Title     string `json:"title"`
-	PaneIndex int    `json:"pane_index"`
-	AgentType string `json:"agent_type"`
-	Reason    string `json:"reason"`
+	BeadID     string `json:"bead_id"`
+	Title      string `json:"title"`
+	PaneID     string `json:"pane_id"`
+	PaneTarget string `json:"pane_target"`
+	AgentType  string `json:"agent_type"`
+	Reason     string `json:"reason"`
 }
 
 // GetAssignRecommendations returns assignment recommendations for the distribute mode.
 // This is a simplified version of PrintAssign that returns data instead of printing JSON.
-func GetAssignRecommendations(opts AssignOptions) ([]DistributeRecommendation, error) {
+func GetAssignRecommendations(ctx context.Context, opts AssignOptions) ([]DistributeRecommendation, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("assignment recommendation context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if opts.Session == "" {
 		return nil, fmt.Errorf("session name is required")
 	}
 
-	if !tmux.SessionExists(opts.Session) {
+	exists, err := tmux.SessionExistsContext(ctx, opts.Session)
+	if err != nil {
+		return nil, fmt.Errorf("check assignment session %s: %w", opts.Session, err)
+	}
+	if !exists {
 		return nil, fmt.Errorf("session '%s' not found", opts.Session)
 	}
 
@@ -110,45 +126,27 @@ func GetAssignRecommendations(opts AssignOptions) ([]DistributeRecommendation, e
 		strategy = "balanced"
 	}
 
-	// Get agents from tmux panes
-	panes, err := tmux.GetPanes(opts.Session)
+	agents, idleAgentPanes, err := observeAssignAgents(ctx, opts.Session)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get panes: %w", err)
+		return nil, err
 	}
-
-	// Build agent info
-	var agents []assignAgentInfo
-	var idleAgentPanes []string
-
-	for _, pane := range panes {
-		agentType := routePaneAgentType(pane)
-		if agentType == "user" || agentType == "unknown" {
-			continue
-		}
-
-		// Capture state — use 20 lines to reliably detect Claude Code
-		// welcome screens and status bars (matches LinesStatusDetection).
-		scrollback, _ := tmux.CapturePaneOutput(pane.ID, 20)
-		state := determineState(scrollback, agentType)
-
-		agents = append(agents, assignAgentInfo{
-			paneIdx:   pane.Index,
-			agentType: agentType,
-			model:     detectModel(agentType, pane.Title),
-			state:     state,
-		})
-		if state == "idle" {
-			idleAgentPanes = append(idleAgentPanes, fmt.Sprintf("%d", pane.Index))
-		}
+	idleAgentPanes, err = excludeDurablyOccupiedAssignAgents(opts.Session, idleAgentPanes)
+	if err != nil {
+		return nil, fmt.Errorf("exclude active assignment occupancy: %w", err)
 	}
 
 	if len(idleAgentPanes) == 0 {
 		return nil, nil // No idle agents
 	}
 
-	// Get beads from bv
-	wd, _ := os.Getwd()
-	readyBeads := bv.GetReadyPreview(wd, 50)
+	projectDir, err := assignOptionsProjectDir(opts)
+	if err != nil {
+		return nil, err
+	}
+	readyBeads, err := bv.GetReadyPreviewContext(ctx, projectDir, 50)
+	if err != nil {
+		return nil, fmt.Errorf("read ready Beads work: %w", err)
+	}
 
 	if len(readyBeads) == 0 {
 		return nil, nil // No ready work
@@ -175,14 +173,13 @@ func GetAssignRecommendations(opts AssignOptions) ([]DistributeRecommendation, e
 	// Convert to DistributeRecommendation format
 	var result []DistributeRecommendation
 	for _, rec := range recs {
-		paneIdx := 0
-		fmt.Sscanf(rec.Agent, "%d", &paneIdx)
 		result = append(result, DistributeRecommendation{
-			BeadID:    rec.AssignBead,
-			Title:     rec.BeadTitle,
-			PaneIndex: paneIdx,
-			AgentType: rec.AgentType,
-			Reason:    rec.Reasoning,
+			BeadID:     rec.AssignBead,
+			Title:      rec.BeadTitle,
+			PaneID:     rec.PaneID,
+			PaneTarget: rec.PaneTarget,
+			AgentType:  rec.AgentType,
+			Reason:     rec.Reasoning,
 		})
 	}
 
@@ -191,13 +188,20 @@ func GetAssignRecommendations(opts AssignOptions) ([]DistributeRecommendation, e
 
 // GetAssign generates work assignment recommendations and returns the result.
 // This function returns the data struct directly, enabling CLI/REST parity.
-func GetAssign(opts AssignOptions) (*AssignOutput, error) {
+func GetAssign(ctx context.Context, opts AssignOptions) (*AssignOutput, error) {
 	output := &AssignOutput{
 		RobotResponse:   NewRobotResponse(true),
 		Session:         opts.Session,
 		Recommendations: make([]AssignRecommend, 0),
 		BlockedBeads:    make([]BlockedBead, 0),
 		IdleAgents:      []string{},
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("robot assignment context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry the command after cancellation")
+		return output, nil
 	}
 
 	if opts.Session == "" {
@@ -209,7 +213,12 @@ func GetAssign(opts AssignOptions) (*AssignOutput, error) {
 		return output, nil
 	}
 
-	if !tmux.SessionExists(opts.Session) {
+	exists, err := tmux.SessionExistsContext(ctx, opts.Session)
+	if err != nil {
+		setAssignError(output, err, "Check tmux availability")
+		return output, nil
+	}
+	if !exists {
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("session '%s' not found", opts.Session),
 			ErrCodeSessionNotFound,
@@ -236,51 +245,38 @@ func GetAssign(opts AssignOptions) (*AssignOutput, error) {
 	output.Strategy = strategy
 	output.GeneratedAt = time.Now().UTC()
 
-	// Get agents from tmux panes
-	panes, err := tmux.GetPanes(opts.Session)
+	agents, idleAgentPanes, err := observeAssignAgents(ctx, opts.Session)
+	if err != nil {
+		setAssignError(output, fmt.Errorf("failed to observe assignment candidates: %w", err), "Retry after pane state can be observed freshly and confidently")
+		return output, nil
+	}
+	idleAgentPanes, err = excludeDurablyOccupiedAssignAgents(opts.Session, idleAgentPanes)
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf("failed to get panes: %w", err),
+			fmt.Errorf("failed to exclude active assignment occupancy: %w", err),
 			ErrCodeInternalError,
-			"Check tmux is running and session is accessible",
+			"Repair or migrate the durable assignment ledger before distributing more work",
 		)
 		return output, nil
 	}
 
-	// Build agent info
-	var agents []assignAgentInfo
-	var idleAgentPanes []string
-
-	for _, pane := range panes {
-		agentType := routePaneAgentType(pane)
-		if agentType == "user" || agentType == "unknown" {
-			continue // Skip non-agent panes
-		}
-
-		model := detectModel(agentType, pane.Title)
-
-		// Capture state — use 20 lines to reliably detect Claude Code
-		// welcome screens and status bars (matches LinesStatusDetection).
-		scrollback, _ := tmux.CapturePaneOutput(pane.ID, 20)
-		state := determineState(scrollback, agentType)
-
-		agents = append(agents, assignAgentInfo{
-			paneIdx:   pane.Index,
-			agentType: agentType,
-			model:     model,
-			state:     state,
-		})
-		if state == "idle" {
-			idleAgentPanes = append(idleAgentPanes, fmt.Sprintf("%d", pane.Index))
-		}
-	}
-
 	output.IdleAgents = idleAgentPanes
 
-	// Get beads from bv
-	wd, _ := os.Getwd()
-	readyBeads := bv.GetReadyPreview(wd, 50)   // Get up to 50 ready beads
-	inProgress := bv.GetInProgressList(wd, 50) // Get in-progress for context
+	projectDir, err := assignOptionsProjectDir(opts)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Provide a readable project directory for Beads")
+		return output, nil
+	}
+	readyBeads, err := bv.GetReadyPreviewContext(ctx, projectDir, 50)
+	if err != nil {
+		setAssignError(output, fmt.Errorf("read ready Beads work: %w", err), "Ensure br can read the target project's Beads database")
+		return output, nil
+	}
+	inProgress, err := bv.GetInProgressListContext(ctx, projectDir, 50)
+	if err != nil {
+		setAssignError(output, fmt.Errorf("read in-progress Beads work: %w", err), "Ensure br can read the target project's Beads database")
+		return output, nil
+	}
 
 	// Filter to specific beads if requested
 	if len(opts.Beads) > 0 {
@@ -305,11 +301,16 @@ func GetAssign(opts AssignOptions) (*AssignOutput, error) {
 	output.Recommendations = recommendations
 
 	// Add blocked beads (beads with unmet dependencies)
-	blockedBeads := bv.GetBlockedList(wd, 20)
+	blockedBeads, err := bv.GetBlockedListContext(ctx, projectDir, 20)
+	if err != nil {
+		setAssignError(output, fmt.Errorf("read blocked Beads work: %w", err), "Ensure br can read the target project's Beads database")
+		return output, nil
+	}
 	for _, b := range blockedBeads {
 		output.BlockedBeads = append(output.BlockedBeads, BlockedBead{
-			ID:    b.ID,
-			Title: b.Title,
+			ID:        b.ID,
+			Title:     b.Title,
+			BlockedBy: []string{},
 		})
 	}
 
@@ -329,10 +330,18 @@ func GetAssign(opts AssignOptions) (*AssignOutput, error) {
 	return output, nil
 }
 
+func setAssignError(output *AssignOutput, err error, hint string) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry the command after cancellation")
+		return
+	}
+	output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, hint)
+}
+
 // PrintAssign handles the --robot-assign command.
 // This is a thin wrapper around GetAssign() for CLI output.
-func PrintAssign(opts AssignOptions) error {
-	output, err := GetAssign(opts)
+func PrintAssign(ctx context.Context, opts AssignOptions) error {
+	output, err := GetAssign(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -341,10 +350,91 @@ func PrintAssign(opts AssignOptions) error {
 
 // assignAgentInfo holds agent data for assignment processing
 type assignAgentInfo struct {
-	paneIdx   int
-	agentType string
-	model     string
-	state     string
+	paneID     string
+	paneTarget string
+	agentType  string
+	model      string
+	state      string
+}
+
+func observeAssignAgents(ctx context.Context, session string) ([]assignAgentInfo, []string, error) {
+	if ctx == nil {
+		return nil, nil, fmt.Errorf("assignment observation context is required")
+	}
+	observation, err := newRobotSessionObserver(20).Observe(ctx, session)
+	if err != nil {
+		return nil, nil, fmt.Errorf("observe assignment session %s: %w", session, err)
+	}
+	return assignAgentsFromObservation(observation, time.Now())
+}
+
+func assignAgentsFromObservation(observation statuspkg.SessionObservation, now time.Time) ([]assignAgentInfo, []string, error) {
+	if !statuspkg.DispatchObservationIsCurrent(observation.ObservedAt, now) {
+		return nil, nil, fmt.Errorf("assignment observation for session %s is stale", observation.Session)
+	}
+	agents := make([]assignAgentInfo, 0, len(observation.Panes))
+	idleAgentPanes := make([]string, 0, len(observation.Panes))
+	for _, pane := range observation.Panes {
+		agentType := strings.ToLower(strings.TrimSpace(pane.AgentType))
+		if agentType == "user" || agentType == "unknown" || agentType == "" {
+			continue
+		}
+		paneID := strings.TrimSpace(pane.Pane.ID)
+		if paneID == "" {
+			return nil, nil, fmt.Errorf("assignment observation for session %s has an agent without a stable pane ID", observation.Session)
+		}
+		agents = append(agents, assignAgentInfo{
+			paneID:     paneID,
+			paneTarget: pane.Pane.Physical(),
+			agentType:  agentType,
+			model:      detectModel(agentType, pane.PaneName),
+			state:      string(pane.Current.Status.State),
+		})
+		if statuspkg.DispatchObservationIsCurrent(pane.Current.ObservedAt, now) && pane.SafeToDispatch() {
+			idleAgentPanes = append(idleAgentPanes, paneID)
+		}
+	}
+	return agents, idleAgentPanes, nil
+}
+
+func assignOptionsProjectDir(opts AssignOptions) (string, error) {
+	if projectDir := strings.TrimSpace(opts.ProjectDir); projectDir != "" {
+		return projectDir, nil
+	}
+	projectDir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve assignment project directory: %w", err)
+	}
+	return projectDir, nil
+}
+
+func excludeDurablyOccupiedAssignAgents(session string, idleAgentPanes []string) ([]string, error) {
+	store, err := assignmentstore.LoadStoreStrict(session)
+	if err != nil {
+		return nil, err
+	}
+	return filterDurablyOccupiedAssignAgents(idleAgentPanes, store.ListActive())
+}
+
+func filterDurablyOccupiedAssignAgents(idleAgentPanes []string, activeAssignments []*assignmentstore.Assignment) ([]string, error) {
+	occupied := make(map[string]struct{}, len(activeAssignments))
+	for _, current := range activeAssignments {
+		if current == nil {
+			continue
+		}
+		paneID, err := assignmentstore.CanonicalPaneIdentity(current)
+		if err != nil {
+			return nil, fmt.Errorf("active assignment %s: %w", current.BeadID, err)
+		}
+		occupied[paneID] = struct{}{}
+	}
+	available := make([]string, 0, len(idleAgentPanes))
+	for _, paneID := range idleAgentPanes {
+		if _, active := occupied[strings.TrimSpace(paneID)]; !active {
+			available = append(available, paneID)
+		}
+	}
+	return available, nil
 }
 
 // generateAssignments creates assignment recommendations based on strategy
@@ -360,8 +450,7 @@ func generateAssignments(agents []assignAgentInfo, beads []bv.BeadPreview, strat
 	// Get idle agent details
 	var idleAgentDetails []assignAgentInfo
 	for _, a := range agents {
-		paneKey := fmt.Sprintf("%d", a.paneIdx)
-		if idleSet[paneKey] {
+		if idleSet[a.paneID] {
 			idleAgentDetails = append(idleAgentDetails, a)
 		}
 	}
@@ -374,14 +463,13 @@ func generateAssignments(agents []assignAgentInfo, beads []bv.BeadPreview, strat
 		}
 
 		bead := beads[beadIdx]
-		paneKey := fmt.Sprintf("%d", agent.paneIdx)
-
 		// Calculate confidence based on strategy
 		confidence := calculateConfidence(agent.agentType, bead, strategy)
 		reasoning := generateReasoning(agent.agentType, bead, strategy)
 
 		recommendations = append(recommendations, AssignRecommend{
-			Agent:      paneKey,
+			PaneID:     agent.paneID,
+			PaneTarget: agent.paneTarget,
 			AgentType:  agent.agentType,
 			Model:      agent.model,
 			AssignBead: bead.ID,
@@ -520,7 +608,7 @@ func generateAssignHints(recs []AssignRecommend, idleAgents []string, readyBeads
 
 	// Generate suggested commands
 	for _, rec := range recs {
-		cmd := fmt.Sprintf("br update %s --assignee=pane%s", rec.AssignBead, rec.Agent)
+		cmd := fmt.Sprintf("br update %s --assignee=%s", rec.AssignBead, rec.PaneID)
 		hints.SuggestedCommands = append(hints.SuggestedCommands, cmd)
 	}
 

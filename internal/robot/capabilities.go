@@ -1037,10 +1037,12 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "bulk-strategy", Flag: "--bulk-strategy", Type: "string", Required: false, Default: "impact", Description: "Selection strategy when using --from-bv"},
 				{Name: "skip", Flag: "--skip", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors to skip"},
 				{Name: "template", Flag: "--template", Type: "string", Required: false, Description: "Custom prompt template file"},
+				{Name: "bulk-parallel", Flag: "--bulk-parallel", Type: "bool", Required: false, Description: "Execute independent assignment attempts concurrently and join all workers before returning"},
+				{Name: "bulk-stagger", Flag: "--bulk-stagger", Type: "duration", Required: false, Default: "0s", Description: "Delay between sequential assignment attempts"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview assignments without sending prompts"},
 			},
 			Examples: []string{
-				"ntm --robot-bulk-assign=proj --from-bv",
+				"ntm --robot-bulk-assign=proj --from-bv --bulk-parallel",
 				"ntm --robot-bulk-assign=proj --allocation='{\"0.1\":\"bd-abc\"}' --skip=%7 --dry-run",
 			},
 		},

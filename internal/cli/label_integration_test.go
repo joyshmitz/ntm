@@ -36,7 +36,7 @@ func TestLabelIntegration(t *testing.T) {
 		cfg.ProjectsBase = projectsBase
 		cfg.AgentMail.Enabled = false
 
-		out, err := robot.GetSpawn(robot.SpawnOptions{
+		out, err := robot.GetSpawn(t.Context(), robot.SpawnOptions{
 			Session: base,
 			Label:   "frontend",
 			CCCount: 1,
@@ -216,7 +216,7 @@ func TestLabelIntegration(t *testing.T) {
 		cfg.ProjectsBase = projectsBase
 		cfg.AgentMail.Enabled = false
 
-		out, err := robot.GetSpawn(robot.SpawnOptions{
+		out, err := robot.GetSpawn(t.Context(), robot.SpawnOptions{
 			Session: base,
 			Label:   req.Label,
 			CCCount: req.CCCount,

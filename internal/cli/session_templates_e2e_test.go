@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/templates"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
@@ -31,9 +33,7 @@ func TestSessionTemplateSpawn_Builtin(t *testing.T) {
 	cfg = newTmuxIntegrationTestConfig(tmpDir)
 	jsonOutput = true
 
-	cfg.Agents.Claude = testAgentCatCommandTemplate
-	cfg.Agents.Codex = testAgentCatCommandTemplate
-	cfg.Agents.Gemini = testAgentCatCommandTemplate
+	configureSessionTemplateFakeAgents(cfg)
 
 	t.Logf("[E2E-TEMPLATE] Loading builtin template: code-review")
 	loader := templates.NewSessionTemplateLoader()
@@ -68,7 +68,7 @@ func TestSessionTemplateSpawn_Builtin(t *testing.T) {
 		Prompt:   tmpl.Spec.Prompts.Initial,
 	}
 
-	if err := spawnSessionLogic(opts); err != nil {
+	if err := spawnSessionLogicContext(t.Context(), opts); err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
 
@@ -142,9 +142,7 @@ func TestSessionTemplateSpawn_CustomUserTemplate(t *testing.T) {
 	cfg = newTmuxIntegrationTestConfig(tmpDir)
 	jsonOutput = true
 
-	cfg.Agents.Claude = testAgentCatCommandTemplate
-	cfg.Agents.Codex = testAgentCatCommandTemplate
-	cfg.Agents.Gemini = testAgentCatCommandTemplate
+	configureSessionTemplateFakeAgents(cfg)
 
 	userTemplateDir := filepath.Join(tmpDir, "ntm", "templates")
 	if err := os.MkdirAll(userTemplateDir, 0755); err != nil {
@@ -201,7 +199,7 @@ spec:
 		Prompt:   tmpl.Spec.Prompts.Initial,
 	}
 
-	if err := spawnSessionLogic(opts); err != nil {
+	if err := spawnSessionLogicContext(t.Context(), opts); err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
 
@@ -323,22 +321,86 @@ spec:
 
 	t.Logf("[E2E-TEMPLATE] Showing invalid template: %s", templateName)
 	output, err := captureStdout(t, func() error { return runSessionTemplatesShow(templateName) })
-	if err != nil {
-		t.Fatalf("runSessionTemplatesShow failed: %v", err)
+	if !errors.Is(err, errJSONFailure) {
+		t.Fatalf("runSessionTemplatesShow error = %v, want errJSONFailure", err)
 	}
 
 	var resp struct {
+		Success     bool     `json:"success"`
 		Error       string   `json:"error"`
 		Suggestions []string `json:"suggestions"`
 	}
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
 		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
 	}
+	if resp.Success {
+		t.Fatal("expected success=false for invalid template")
+	}
 	if resp.Error == "" || !strings.Contains(resp.Error, "validation failed") {
 		t.Fatalf("expected validation error, got %q", resp.Error)
 	}
 	if len(resp.Suggestions) == 0 {
 		t.Fatalf("expected suggestions in error response")
+	}
+}
+
+func TestSessionTemplatesList_InvalidTemplateReturnsTerminalJSONFailure(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	templateDir := filepath.Join(configHome, "ntm", "templates")
+	if err := os.MkdirAll(templateDir, 0755); err != nil {
+		t.Fatalf("create template directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(templateDir, "invalid.yaml"), []byte("metadata: [\n"), 0644); err != nil {
+		t.Fatalf("write invalid template: %v", err)
+	}
+
+	output, runErr := captureStdout(t, runSessionTemplatesList)
+	if !errors.Is(runErr, errJSONFailure) {
+		t.Fatalf("runSessionTemplatesList error = %v, want errJSONFailure", runErr)
+	}
+	document := decodeSingleTerminalJSONMap(t, output)
+	if success, ok := document["success"].(bool); !ok || success {
+		t.Fatalf("success = %#v, want false", document["success"])
+	}
+	errorMessage, ok := document["error"].(string)
+	if !ok || errorMessage == "" {
+		t.Fatalf("error = %#v, want non-empty loader error", document["error"])
+	}
+}
+
+func TestSessionTemplatesShow_MissingTemplateReturnsTerminalJSONFailure(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	output, runErr := captureStdout(t, func() error {
+		return runSessionTemplatesShow("definitely-missing-template")
+	})
+	if !errors.Is(runErr, errJSONFailure) {
+		t.Fatalf("runSessionTemplatesShow error = %v, want errJSONFailure", runErr)
+	}
+	if !strings.Contains(runErr.Error(), "session template not found") {
+		t.Fatalf("runSessionTemplatesShow error = %v, want preserved not-found cause", runErr)
+	}
+
+	document := decodeSingleTerminalJSONMap(t, output)
+	if success, ok := document["success"].(bool); !ok || success {
+		t.Fatalf("success = %#v, want false", document["success"])
+	}
+	errorMessage, ok := document["error"].(string)
+	if !ok || !strings.Contains(errorMessage, "session template not found") {
+		t.Fatalf("error = %#v, want session template not found", document["error"])
+	}
+	if suggestions, ok := document["suggestions"].([]interface{}); !ok || len(suggestions) == 0 {
+		t.Fatalf("suggestions = %#v, want non-empty array", document["suggestions"])
 	}
 }
 
@@ -368,6 +430,13 @@ func captureStdout(t *testing.T, f func() error) (string, error) {
 	<-done // wait for reader to drain
 	_ = r.Close()
 	return buf.String(), runErr
+}
+
+func configureSessionTemplateFakeAgents(testCfg *config.Config) {
+	const modelPrefix = `{{if .Model}}: {{shellQuote .Model}} >/dev/null && {{end}}`
+	testCfg.Agents.Claude = modelPrefix + `/bin/sh -c 'stty -echo; printf "Claude Code v0.0.0\n\342\235\257 \n"; while IFS= read -r line; do printf "RECEIVED:%s\n\342\235\257 \n" "$line"; done'`
+	testCfg.Agents.Codex = modelPrefix + `/bin/sh -c 'stty -echo; printf "Codex CLI\ncodex>\n"; while IFS= read -r line; do printf "RECEIVED:%s\ncodex>\n" "$line"; done'`
+	testCfg.Agents.Gemini = modelPrefix + `/bin/sh -c 'stty -echo; printf "Gemini CLI\ngemini>\n"; while IFS= read -r line; do printf "RECEIVED:%s\ngemini>\n" "$line"; done'`
 }
 
 type templateCounts struct {

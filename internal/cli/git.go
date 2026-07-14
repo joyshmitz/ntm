@@ -3,9 +3,11 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -144,9 +146,10 @@ func runGitSync(session string, pullOnly, pushOnly, force, dryRun bool) error {
 	// Pull phase
 	if !pushOnly {
 		result.PullResult = runGitPull(workDir, dryRun)
-		if !result.PullResult.Success && len(result.PullResult.Conflicts) > 0 {
-			result.HasConflict = true
+		if !result.PullResult.Success {
 			result.Success = false
+			result.HasConflict = len(result.PullResult.Conflicts) > 0
+			result.Error = "pull failed: " + result.PullResult.Error
 		}
 	}
 
@@ -155,6 +158,7 @@ func runGitSync(session string, pullOnly, pushOnly, force, dryRun bool) error {
 		result.PushResult = runGitPush(workDir, force, dryRun)
 		if !result.PushResult.Success {
 			result.Success = false
+			result.Error = "push failed: " + result.PushResult.Error
 		}
 	}
 
@@ -168,15 +172,24 @@ func runGitPull(workDir string, dryRun bool) *PullResult {
 		// Fetch to see what would be pulled
 		cmd := exec.Command("git", "-C", workDir, "fetch", "--dry-run")
 		if err := cmd.Run(); err != nil {
-			// A failed fetch in dry-run mode often means no upstream or network error
-			// We can proceed, but the ahead/behind count might be slightly stale
+			result.Success = false
+			result.Error = gitCommandFailure("fetch --dry-run failed", err)
+			return result
 		}
 
 		// Check how far behind we are
 		cmd = exec.Command("git", "-C", workDir, "rev-list", "--count", "HEAD..@{u}")
 		out, err := cmd.Output()
-		if err == nil {
-			fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &result.Behind)
+		if err != nil {
+			result.Success = false
+			result.Error = gitCommandFailure("determine pull distance failed", err)
+			return result
+		}
+		result.Behind, err = parseGitCount(out)
+		if err != nil {
+			result.Success = false
+			result.Error = err.Error()
+			return result
 		}
 		if result.Behind == 0 {
 			result.AlreadyUpToDate = true
@@ -195,8 +208,16 @@ func runGitPull(workDir string, dryRun bool) *PullResult {
 	// Check if there are changes to pull
 	cmd = exec.Command("git", "-C", workDir, "rev-list", "--count", "HEAD..@{u}")
 	out, err := cmd.Output()
-	if err == nil {
-		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &result.Behind)
+	if err != nil {
+		result.Success = false
+		result.Error = gitCommandFailure("determine pull distance failed", err)
+		return result
+	}
+	result.Behind, err = parseGitCount(out)
+	if err != nil {
+		result.Success = false
+		result.Error = err.Error()
+		return result
 	}
 
 	if result.Behind == 0 {
@@ -233,19 +254,33 @@ func runGitPush(workDir string, force, dryRun bool) *PushResult {
 	// Get remote and branch
 	cmd := exec.Command("git", "-C", workDir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	out, err := cmd.Output()
-	if err == nil {
-		parts := strings.SplitN(strings.TrimSpace(string(out)), "/", 2)
-		if len(parts) == 2 {
-			result.Remote = parts[0]
-			result.Branch = parts[1]
-		}
+	if err != nil {
+		result.Success = false
+		result.Error = gitCommandFailure("resolve push upstream failed", err)
+		return result
 	}
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		result.Success = false
+		result.Error = "resolve push upstream failed: unexpected upstream reference"
+		return result
+	}
+	result.Remote = parts[0]
+	result.Branch = parts[1]
 
 	// Check how far ahead we are
 	cmd = exec.Command("git", "-C", workDir, "rev-list", "--count", "@{u}..HEAD")
 	out, err = cmd.Output()
-	if err == nil {
-		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &result.Ahead)
+	if err != nil {
+		result.Success = false
+		result.Error = gitCommandFailure("determine push distance failed", err)
+		return result
+	}
+	result.Ahead, err = parseGitCount(out)
+	if err != nil {
+		result.Success = false
+		result.Error = err.Error()
+		return result
 	}
 
 	if result.Ahead == 0 {
@@ -288,14 +323,49 @@ func parseConflicts(output string) []string {
 	return conflicts
 }
 
+func parseGitCount(out []byte) (int, error) {
+	count, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || count < 0 {
+		return 0, fmt.Errorf("invalid git commit count %q", strings.TrimSpace(string(out)))
+	}
+	return count, nil
+}
+
+func gitCommandFailure(action string, err error) string {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if detail := strings.TrimSpace(string(exitErr.Stderr)); detail != "" {
+			return action + ": " + detail
+		}
+	}
+	return fmt.Sprintf("%s: %v", action, err)
+}
+
 func outputGitSyncResult(result GitSyncResult) error {
 	if IsJSONOutput() {
+		if !result.Success {
+			return emitJSONFailureEnvelopeWithCause(result, gitSyncResultError(result))
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(result)
 	}
 
-	return printGitSyncResult(result)
+	if err := printGitSyncResult(result); err != nil {
+		return err
+	}
+	if !result.Success {
+		return gitSyncResultError(result)
+	}
+	return nil
+}
+
+func gitSyncResultError(result GitSyncResult) error {
+	message := strings.TrimSpace(result.Error)
+	if message == "" {
+		message = "git sync failed"
+	}
+	return errors.New(message)
 }
 
 func printGitSyncResult(result GitSyncResult) error {

@@ -42,8 +42,9 @@ type SessionCoordinator struct {
 
 	atomicCoordinatorFactory func(*assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator
 	assignWorkFn             func(context.Context) ([]AssignmentResult, error)
-	triageFn                 func(string) (*bv.TriageResponse, error)
+	triageFn                 func(context.Context, string) (*bv.TriageResponse, error)
 	workItemStatusFn         func(context.Context, string) (string, error)
+	workItemDetailsFn        func(context.Context, string) (*bv.BeadAssignmentDetails, error)
 	releaseWorkItemClaimFn   func(context.Context, string, string, string) (bool, error)
 
 	// Agent tracking

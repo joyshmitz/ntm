@@ -1,11 +1,21 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/assign"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // ============================================================================
@@ -322,6 +332,73 @@ func TestSpawnAssignResultWithErrors(t *testing.T) {
 	}
 
 	t.Log("[PASS] Errors correctly included in output")
+}
+
+func TestEmitSpawnAssignJSONUsesNonzeroFailureEnvelope(t *testing.T) {
+	result := SpawnAssignResult{
+		Spawn: &output.SpawnResponse{Session: "spawn-assign-failure"},
+		Assign: &AssignOutputEnhanced{
+			Strategy: "balanced",
+			Errors:   []string{"ready wait failed: timed out", "assignment failed: no idle agents"},
+		},
+	}
+
+	data, emitErr := captureSpawnAssignJSON(t, result)
+	if !errors.Is(emitErr, errJSONFailure) {
+		t.Fatalf("emitSpawnAssignJSON() error = %v, want errJSONFailure", emitErr)
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	var envelope SpawnAssignResult
+	if err := decoder.Decode(&envelope); err != nil {
+		t.Fatalf("decode spawn assignment failure: %v", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		t.Fatalf("spawn assignment failure emitted multiple JSON documents: err=%v extra=%v", err, extra)
+	}
+	if envelope.Success || envelope.ErrorCode != "ASSIGNMENT_FAILED" || envelope.Error == "" || envelope.Assign == nil || len(envelope.Errors) != 2 {
+		t.Fatalf("spawn assignment failure envelope = %+v", envelope)
+	}
+}
+
+func TestEmitSpawnAssignJSONSuccessExitsCleanly(t *testing.T) {
+	data, emitErr := captureSpawnAssignJSON(t, SpawnAssignResult{
+		Spawn:  &output.SpawnResponse{Session: "spawn-assign-success"},
+		Assign: &AssignOutputEnhanced{Strategy: "balanced"},
+	})
+	if emitErr != nil {
+		t.Fatalf("emitSpawnAssignJSON() error = %v, want nil", emitErr)
+	}
+	var envelope SpawnAssignResult
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode spawn assignment success: %v raw=%s", err, data)
+	}
+	if !envelope.Success || envelope.ErrorCode != "" || envelope.Error != "" {
+		t.Fatalf("spawn assignment success envelope = %+v", envelope)
+	}
+}
+
+func captureSpawnAssignJSON(t *testing.T, result SpawnAssignResult) ([]byte, error) {
+	t.Helper()
+	oldStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout capture: %v", err)
+	}
+	os.Stdout = writer
+	emitErr := emitSpawnAssignJSON(result)
+	_ = writer.Close()
+	os.Stdout = oldStdout
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		_ = reader.Close()
+	})
+	data, readErr := io.ReadAll(reader)
+	if readErr != nil {
+		t.Fatalf("read stdout capture: %v", readErr)
+	}
+	return data, emitErr
 }
 
 // ============================================================================
@@ -654,3 +731,156 @@ func TestSkippedItemFields(t *testing.T) {
 
 	t.Log("[PASS] SkippedItem has all required fields")
 }
+
+func TestCanonicalSpawnPromptDispatcherRedactsAndReturnsExactReceipt(t *testing.T) {
+	now := time.Now().UTC()
+	panes := []tmux.Pane{
+		{ID: "%51", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude, Title: "demo__cc_1"},
+		{ID: "%52", WindowIndex: 1, Index: 1, Type: tmux.AgentCodex, Title: "demo__cod_1"},
+	}
+	observation := testSpawnSessionObservation(
+		now,
+		testSpawnPaneObservation(now, panes[0], statuspkg.StateIdle),
+		testSpawnPaneObservation(now, panes[1], statuspkg.StateIdle),
+	)
+	observer := &scriptedSpawnObserver{observations: []statuspkg.SessionObservation{observation}}
+	var deliveries []dispatchsvc.Delivery
+	dispatcher := newCanonicalSpawnPromptDispatcher("demo", observer)
+	dispatcher.listPanes = func(context.Context, string) ([]tmux.Pane, error) {
+		return append([]tmux.Pane(nil), panes...), nil
+	}
+	dispatcher.serviceFactory = func() (*dispatchsvc.Service, error) {
+		return dispatchsvc.NewService(dispatchsvc.Ports{
+			Redactor:  shellFinalMessageRedactor(redaction.Config{Mode: redaction.ModeRedact}),
+			Protocols: shellDispatchProtocolPlanner{},
+			Deliverer: dispatchsvc.DelivererFunc(func(_ context.Context, delivery dispatchsvc.Delivery) error {
+				deliveries = append(deliveries, delivery)
+				return nil
+			}),
+		})
+	}
+
+	const secret = "hunter2hunter2"
+	receipt, err := dispatcher.Dispatch(t.Context(), panes[1].ID, "password="+secret)
+	if err != nil {
+		t.Fatalf("Dispatch() error = %v", err)
+	}
+	if receipt.Status != dispatchsvc.ReceiptDelivered || receipt.Target.Ref.StableKey() != panes[1].ID {
+		t.Fatalf("receipt = %+v, want exact delivered target %s", receipt, panes[1].ID)
+	}
+	if receipt.Redaction.Mode != string(redaction.ModeRedact) || receipt.Redaction.Findings == 0 {
+		t.Fatalf("redaction receipt = %+v, want redacted findings", receipt.Redaction)
+	}
+	if len(deliveries) != 1 || deliveries[0].Target.Ref.StableKey() != panes[1].ID ||
+		strings.Contains(deliveries[0].Message, secret) || !strings.Contains(deliveries[0].Message, "[REDACTED") {
+		t.Fatalf("delivery = %+v, want redacted exact-pane message", deliveries)
+	}
+}
+
+func TestCanonicalSpawnPromptDispatcherDoesNotActuateAfterFailedRevalidation(t *testing.T) {
+	now := time.Now().UTC()
+	pane := tmux.Pane{ID: "%53", WindowIndex: 0, Index: 3, Type: tmux.AgentClaude, Title: "demo__cc_3"}
+	failedPane := testSpawnPaneObservation(now, pane, statuspkg.StateUnknown)
+	failedPane.Current.Freshness = statuspkg.FreshnessUnavailable
+	failedPane.Current.Confidence = 0
+	failedPane.Current.Error = "capture unavailable"
+	failed := testSpawnSessionObservation(now, failedPane)
+	failed.Complete = false
+	failed.Failures = []statuspkg.ObservationFailure{{PaneID: pane.ID, Stage: "capture", Error: failedPane.Current.Error}}
+	observer := &scriptedSpawnObserver{observations: []statuspkg.SessionObservation{failed}}
+	deliveryCalls := 0
+	dispatcher := newCanonicalSpawnPromptDispatcher("demo", observer)
+	dispatcher.listPanes = func(context.Context, string) ([]tmux.Pane, error) {
+		return []tmux.Pane{pane}, nil
+	}
+	dispatcher.serviceFactory = func() (*dispatchsvc.Service, error) {
+		return dispatchsvc.NewService(dispatchsvc.Ports{
+			Redactor: dispatchsvc.AllowAllRedactor{},
+			Deliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+				deliveryCalls++
+				return nil
+			}),
+		})
+	}
+
+	_, err := dispatcher.Dispatch(t.Context(), pane.ID, "must not be sent")
+	if err == nil || !strings.Contains(err.Error(), "not freshly and confidently idle") {
+		t.Fatalf("Dispatch() error = %v, want failed revalidation", err)
+	}
+	if deliveryCalls != 0 {
+		t.Fatalf("delivery calls = %d, want 0 after failed revalidation", deliveryCalls)
+	}
+
+	_, err = dispatcher.Dispatch(t.Context(), "0.3", "must not be sent")
+	if err == nil || !strings.Contains(err.Error(), "exact %N pane ID") {
+		t.Fatalf("physical selector error = %v, want exact-ID rejection", err)
+	}
+	if deliveryCalls != 0 {
+		t.Fatalf("delivery calls = %d, want 0 after selector rejection", deliveryCalls)
+	}
+}
+
+func TestSendInitPromptUsesTopologyUniqueIdentityAndReceipts(t *testing.T) {
+	now := time.Now().UTC()
+	panes := []tmux.Pane{
+		{ID: "%61", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude, Title: "demo__cc_1"},
+		{ID: "%62", WindowIndex: 1, Index: 1, Type: tmux.AgentCodex, Title: "demo__cod_1"},
+	}
+	observation := testSpawnSessionObservation(
+		now,
+		testSpawnPaneObservation(now, panes[0], statuspkg.StateIdle),
+		testSpawnPaneObservation(now, panes[1], statuspkg.StateIdle),
+	)
+	observer := &scriptedSpawnObserver{observations: []statuspkg.SessionObservation{observation}}
+	dispatcher := &recordingSpawnDispatcher{}
+
+	receipts, err := sendInitPromptToReadyAgentsWith(
+		t.Context(), "demo", "Read AGENTS.md", true, observer, dispatcher,
+	)
+	if err != nil {
+		t.Fatalf("sendInitPromptToReadyAgentsWith() error = %v", err)
+	}
+	if len(receipts) != 2 || strings.Join(dispatcher.panes, ",") != "%61,%62" {
+		t.Fatalf("receipts=%d panes=%v, want deterministic %%61,%%62", len(receipts), dispatcher.panes)
+	}
+	wants := []string{"`demo_claude_0_1`", "`demo_codex_1_1`"}
+	for i, want := range wants {
+		if !strings.Contains(dispatcher.messages[i], want) || !strings.HasSuffix(dispatcher.messages[i], "Read AGENTS.md") {
+			t.Fatalf("message[%d] = %q, want identity %s plus init prompt", i, dispatcher.messages[i], want)
+		}
+	}
+}
+
+func TestSendInitPromptReturnsCaptureErrorsWithoutDispatch(t *testing.T) {
+	now := time.Now().UTC()
+	pane := tmux.Pane{ID: "%63", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude, Title: "demo__cc_1"}
+	failedPane := testSpawnPaneObservation(now, pane, statuspkg.StateUnknown)
+	failedPane.Current.Freshness = statuspkg.FreshnessUnavailable
+	failedPane.Current.Confidence = 0
+	failedPane.Current.Error = "capture deadline exceeded"
+	observation := testSpawnSessionObservation(now, failedPane)
+	observation.Complete = false
+	observation.Failures = []statuspkg.ObservationFailure{{PaneID: pane.ID, Stage: "capture", Error: failedPane.Current.Error}}
+	observer := &scriptedSpawnObserver{observations: []statuspkg.SessionObservation{observation}}
+	dispatcher := &recordingSpawnDispatcher{}
+
+	receipts, err := sendInitPromptToReadyAgentsWith(t.Context(), "demo", "init", false, observer, dispatcher)
+	if err == nil || !strings.Contains(err.Error(), "capture deadline exceeded") {
+		t.Fatalf("error = %v, want explicit capture failure", err)
+	}
+	if len(receipts) != 0 || len(dispatcher.messages) != 0 {
+		t.Fatalf("receipts=%d messages=%v, want no unsafe dispatch", len(receipts), dispatcher.messages)
+	}
+}
+
+func TestRunAssignmentPhaseContextRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	result, err := runAssignmentPhaseContext(ctx, "demo", SpawnOptions{})
+	if result != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("result=%+v error=%v, want cancellation before assignment planning", result, err)
+	}
+}
+
+var _ spawnSessionObserver = (*scriptedSpawnObserver)(nil)
+var _ spawnPromptDispatcher = (*recordingSpawnDispatcher)(nil)

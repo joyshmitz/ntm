@@ -1,11 +1,64 @@
 package cli
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/workflow"
 )
+
+func TestWorkflowsJSONFailuresAreTerminal(t *testing.T) {
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	t.Run("loader error", func(t *testing.T) {
+		configHome := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", configHome)
+		chdirForTerminalJSONTest(t, t.TempDir())
+		workflowDir := filepath.Join(configHome, "ntm", "workflows")
+		if err := os.MkdirAll(workflowDir, 0755); err != nil {
+			t.Fatalf("create workflow directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(workflowDir, "invalid.toml"), []byte("[[workflows]\n"), 0644); err != nil {
+			t.Fatalf("write invalid workflow: %v", err)
+		}
+
+		stdout, runErr := captureStdout(t, runWorkflowsList)
+		assertWorkflowTerminalJSONFailure(t, stdout, runErr, "parsing workflow")
+	})
+
+	t.Run("missing name", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		chdirForTerminalJSONTest(t, t.TempDir())
+
+		stdout, runErr := captureStdout(t, func() error {
+			return runWorkflowsShow("definitely-missing-workflow")
+		})
+		assertWorkflowTerminalJSONFailure(t, stdout, runErr, "workflow template not found")
+	})
+}
+
+func assertWorkflowTerminalJSONFailure(t *testing.T, stdout string, runErr error, want string) {
+	t.Helper()
+	if !errors.Is(runErr, errJSONFailure) {
+		t.Fatalf("workflow error = %v, want errJSONFailure", runErr)
+	}
+	if !strings.Contains(runErr.Error(), want) {
+		t.Fatalf("workflow error = %v, want %q", runErr, want)
+	}
+	document := decodeSingleTerminalJSONMap(t, stdout)
+	if success, ok := document["success"].(bool); !ok || success {
+		t.Fatalf("success = %#v, want false", document["success"])
+	}
+	errorMessage, ok := document["error"].(string)
+	if !ok || !strings.Contains(errorMessage, want) {
+		t.Fatalf("error = %#v, want %q", document["error"], want)
+	}
+}
 
 func TestCoordinationIcon(t *testing.T) {
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
@@ -85,7 +86,7 @@ Examples:
 				watchCommand:      watchCommand,
 			}
 
-			return runWatch(session, opts)
+			return runWatch(cmd.Context(), session, opts)
 		},
 	}
 
@@ -125,7 +126,13 @@ type watchOptions struct {
 	watchCommand      string
 }
 
-func runWatch(session string, opts watchOptions) error {
+func runWatch(parent context.Context, session string, opts watchOptions) error {
+	if parent == nil {
+		return fmt.Errorf("watch requires a command context")
+	}
+	if err := parent.Err(); err != nil {
+		return fmt.Errorf("watch canceled: %w", err)
+	}
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
@@ -140,12 +147,16 @@ func runWatch(session string, opts watchOptions) error {
 	res.ExplainIfInferred(os.Stderr)
 	session = res.Session
 
-	if !tmux.SessionExists(session) {
+	exists, err := tmux.SessionExistsContext(parent, session)
+	if err != nil {
+		return fmt.Errorf("checking watch session: %w", err)
+	}
+	if !exists {
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
 	// Setup context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	// Handle Ctrl+C
@@ -230,7 +241,7 @@ func watchLoop(ctx context.Context, session string, opts watchOptions, t theme.T
 		}
 
 		// Get panes
-		panes, err := tmux.GetPanes(session)
+		panes, err := tmux.GetPanesContext(ctx, session)
 		if err != nil {
 			return fmt.Errorf("failed to get panes: %w", err)
 		}
@@ -253,7 +264,7 @@ func watchLoop(ctx context.Context, session string, opts watchOptions, t theme.T
 			if !firstRun {
 				lines = 100 // Capture more to find diff
 			}
-			output, err := tmux.CapturePaneOutput(pane.ID, lines)
+			output, err := tmux.CapturePaneOutputContext(ctx, pane.ID, lines)
 			if err != nil {
 				if opts.activityOnly {
 					continue
@@ -375,7 +386,7 @@ func runBeadWatch(ctx context.Context, session, projectDir string, opts watchOpt
 			}
 		}
 
-		panes, err := tmux.GetPanes(session)
+		panes, err := tmux.GetPanesContext(ctx, session)
 		if err != nil {
 			return fmt.Errorf("failed to get panes: %w", err)
 		}
@@ -391,7 +402,7 @@ func runBeadWatch(ctx context.Context, session, projectDir string, opts watchOpt
 			}
 			state := paneStates[pane.ID]
 
-			output, err := tmux.CapturePaneOutput(pane.ID, 200)
+			output, err := tmux.CapturePaneOutputContext(ctx, pane.ID, 200)
 			if err != nil {
 				continue
 			}
@@ -579,12 +590,33 @@ func runFileWatch(ctx context.Context, session, watchRoot string, opts watchOpti
 	if opts.watchCommand == "" {
 		return fmt.Errorf("--command is required with --pattern")
 	}
+	if ctx == nil {
+		return fmt.Errorf("file watch requires a command context")
+	}
+	promptService, err := dispatchsvc.NewService(dispatchsvc.Ports{
+		Redactor:  shellFinalMessageRedactor(activeShellDispatchRedactionConfig()),
+		Protocols: shellDispatchProtocolPlanner{},
+		Deliverer: dispatchsvc.TMUXDeliverer{},
+		Lifecycle: dispatchsvc.LifecycleHooks{
+			AfterReceipt: func(_ context.Context, delivery dispatchsvc.Delivery, receipt dispatchsvc.Receipt) {
+				if receipt.Status == dispatchsvc.ReceiptDelivered {
+					addTimelinePromptMarker(session, delivery.Target.Pane, delivery.Message)
+				}
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("preparing file-watch prompt dispatch: %w", err)
+	}
 
 	fmt.Printf("\nWatching files matching '%s' in %s...\n", opts.watchPattern, watchRoot)
 	fmt.Printf("Will run command: %s\n", opts.watchCommand)
 	fmt.Println("Press Ctrl+C to stop")
 
 	handler := func(events []watcher.Event) {
+		if ctx.Err() != nil {
+			return
+		}
 		matched := false
 		for _, e := range events {
 			if watchEventMatchesPattern(opts.watchPattern, watchRoot, e.Path) {
@@ -598,8 +630,11 @@ func runFileWatch(ctx context.Context, session, watchRoot string, opts watchOpti
 
 		if matched {
 			// Determine targets
-			panes, err := tmux.GetPanes(session)
+			panes, err := tmux.GetPanesContext(ctx, session)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				fmt.Printf("Error getting panes: %v\n", err)
 				return
 			}
@@ -611,9 +646,16 @@ func runFileWatch(ctx context.Context, session, watchRoot string, opts watchOpti
 			}
 
 			fmt.Printf("Triggering command on %d pane(s)...\n", len(targets))
-			for _, p := range targets {
-				if err := sendPromptToPane(session, p, opts.watchCommand); err != nil {
-					fmt.Printf("Failed to send to pane %s: %v\n", p.ID, err)
+			result, dispatchErr := dispatchWatchCommand(ctx, promptService, session, panes, targets, opts.watchCommand)
+			if ctx.Err() != nil {
+				return
+			}
+			if dispatchErr != nil {
+				fmt.Printf("File-watch dispatch completed with failures: %v\n", dispatchErr)
+			}
+			for _, receipt := range result.Receipts {
+				if receipt.Status == dispatchsvc.ReceiptFailed || receipt.Status == dispatchsvc.ReceiptBlocked {
+					fmt.Printf("Failed to send to pane %s: %s\n", receipt.Target.Ref.ID, receipt.Error)
 				}
 			}
 		}
@@ -646,6 +688,18 @@ func runFileWatch(ctx context.Context, session, watchRoot string, opts watchOpti
 
 	<-ctx.Done()
 	return nil
+}
+
+func dispatchWatchCommand(ctx context.Context, service *dispatchsvc.Service, session string, panes, targets []tmux.Pane, message string) (dispatchsvc.Result, error) {
+	return service.Execute(ctx, dispatchsvc.Request{
+		Session:       session,
+		Panes:         panes,
+		Selectors:     shellDispatchSelectors(targets),
+		IncludeUser:   true,
+		Message:       message,
+		Submit:        true,
+		StopOnFailure: false,
+	})
 }
 
 func parseWatchInterval(raw string) (time.Duration, error) {

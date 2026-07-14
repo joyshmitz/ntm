@@ -194,8 +194,11 @@ var (
 	ptStatusMutex  sync.RWMutex
 	ptStatusTTL    = 5 * time.Minute
 	ptMinVersion   = Version{Major: 0, Minor: 1, Patch: 0}
-	ptLogger       = slog.Default().With("component", "tools.pt")
 )
+
+func ptLogger() *slog.Logger {
+	return slog.Default().With("component", "tools.pt")
+}
 
 // GetStatus returns the current pt status with caching
 func (a *PTAdapter) GetStatus(ctx context.Context) (*PTStatus, error) {
@@ -241,7 +244,7 @@ func (a *PTAdapter) fetchStatus(ctx context.Context) *PTStatus {
 	path, err := exec.LookPath(a.BinaryName())
 	if err != nil {
 		status.Error = err.Error()
-		ptLogger.Debug("pt binary not found", "error", err)
+		ptLogger().Debug("pt binary not found", "error", err)
 		return status
 	}
 
@@ -251,13 +254,13 @@ func (a *PTAdapter) fetchStatus(ctx context.Context) *PTStatus {
 	version, err := a.Version(ctx)
 	if err != nil {
 		status.Error = err.Error()
-		ptLogger.Warn("pt version check failed", "path", path, "error", err)
+		ptLogger().Warn("pt version check failed", "path", path, "error", err)
 		return status
 	}
 
 	status.Version = version
 	if !ptCompatible(version) {
-		ptLogger.Warn("pt version incompatible", "path", path, "version", version.String(), "min_version", ptMinVersion.String())
+		ptLogger().Warn("pt version incompatible", "path", path, "version", version.String(), "min_version", ptMinVersion.String())
 		return status
 	}
 

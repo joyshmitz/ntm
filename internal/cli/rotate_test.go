@@ -177,6 +177,7 @@ func TestNormalizedProviderName_CanonicalizesFallbacks(t *testing.T) {
 
 func TestResolveRotationProjectDirRejectsWorkspaceFallbackForExplicitSession(t *testing.T) {
 	isolateSessionAgentStorage(t)
+	session := "ntm-rotate-explicit-missing-project-test"
 
 	origCfg := cfg
 	origDir, _ := os.Getwd()
@@ -198,7 +199,7 @@ func TestResolveRotationProjectDirRejectsWorkspaceFallbackForExplicitSession(t *
 		t.Fatal(err)
 	}
 
-	_, err := resolveRotationProjectDir("ntm", false)
+	_, err := resolveRotationProjectDir(session, false)
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}

@@ -381,8 +381,8 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 		// window. Without this override, --robot-is-working and downstream
 		// --robot-agent-health (which reads our IsWorking) recommend
 		// SAFE_TO_RESTART for a Codex pane that is actually mid-tool-call.
-		// `internal/cli/assign.go::determineAgentState` already applies the
-		// same override before dispatch; this brings the restart/health
+		// The canonical SessionObserver applies the same live-window gate
+		// before dispatch; this brings the restart/health
 		// surfaces into agreement with --robot-activity / IsLiveBusy.
 		//
 		// Skip the override on user/unknown panes: the wildcard

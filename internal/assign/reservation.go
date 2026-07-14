@@ -11,11 +11,21 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 )
+
+// FileReservationClient is the Agent Mail surface used by file reservations.
+type FileReservationClient interface {
+	EnsureProject(context.Context, string) (*agentmail.Project, error)
+	ReservePaths(context.Context, agentmail.FileReservationOptions) (*agentmail.ReservationResult, error)
+	ListReservations(context.Context, string, string, bool) ([]agentmail.FileReservation, error)
+	ReleaseReservations(context.Context, string, string, []string, []int) (*agentmail.ReleaseReservationsResult, error)
+	RenewReservations(context.Context, agentmail.RenewReservationsOptions) (*agentmail.RenewReservationsResult, error)
+}
 
 // FileReservationManager handles file path reservations for bead assignments.
 type FileReservationManager struct {
-	client     *agentmail.Client
+	client     FileReservationClient
 	projectKey string
 	ttlSeconds int
 }
@@ -34,7 +44,7 @@ type FileReservationResult struct {
 }
 
 // NewFileReservationManager creates a new file reservation manager.
-func NewFileReservationManager(client *agentmail.Client, projectKey string) *FileReservationManager {
+func NewFileReservationManager(client FileReservationClient, projectKey string) *FileReservationManager {
 	return &FileReservationManager{
 		client:     client,
 		projectKey: projectKey,
@@ -180,15 +190,35 @@ func isValidPath(path string) bool {
 
 // ReserveForBead reserves file paths mentioned in a bead for an agent.
 func (m *FileReservationManager) ReserveForBead(ctx context.Context, beadID, beadTitle, beadDescription, agentName string) (*FileReservationResult, error) {
-	result := &FileReservationResult{
-		BeadID:    beadID,
-		AgentName: agentName,
-		Success:   false,
-	}
+	return m.reservePathsForBead(ctx, beadID, agentName, ExtractFilePaths(beadTitle, beadDescription))
+}
 
-	// Extract file paths from bead
-	paths := ExtractFilePaths(beadTitle, beadDescription)
-	result.RequestedPaths = paths
+// ReservePathsForBead reserves the caller's exact durable path set. Assignment
+// recovery and reassignment use this instead of rediscovering a potentially
+// different set from a title-only projection.
+func (m *FileReservationManager) ReservePathsForBead(ctx context.Context, beadID, agentName string, requestedPaths []string) (*FileReservationResult, error) {
+	paths := make([]string, 0, len(requestedPaths))
+	seen := make(map[string]struct{}, len(requestedPaths))
+	for _, rawPath := range requestedPaths {
+		path := strings.TrimSpace(rawPath)
+		if path == "" {
+			continue
+		}
+		if _, duplicate := seen[path]; duplicate {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return m.reservePathsForBead(ctx, beadID, agentName, paths)
+}
+
+func (m *FileReservationManager) reservePathsForBead(ctx context.Context, beadID, agentName string, paths []string) (*FileReservationResult, error) {
+	result := &FileReservationResult{
+		BeadID: beadID, AgentName: agentName,
+		RequestedPaths: append([]string(nil), paths...), Success: false,
+	}
 
 	if len(paths) == 0 {
 		result.Success = true
@@ -345,8 +375,12 @@ func (m *FileReservationManager) ensureProject(ctx context.Context) (int, error)
 	if project == nil || project.ID <= 0 {
 		return 0, fmt.Errorf("ensure Agent Mail project %q returned no durable project ID", m.projectKey)
 	}
-	if humanKey := strings.TrimSpace(project.HumanKey); humanKey != "" && humanKey != strings.TrimSpace(m.projectKey) {
-		return 0, fmt.Errorf("Agent Mail project binding mismatch: got %q, want %q", humanKey, m.projectKey)
+	expectedKey := strings.TrimSpace(m.projectKey)
+	if expectedKey == "" {
+		return 0, errors.New("agent-mail project binding requires a non-empty project key")
+	}
+	if humanKey := strings.TrimSpace(project.HumanKey); humanKey != expectedKey {
+		return 0, fmt.Errorf("agent-mail project binding mismatch: got %q, want %q", humanKey, m.projectKey)
 	}
 	return project.ID, nil
 }
@@ -458,6 +492,192 @@ func (m *FileReservationManager) ReleaseByPaths(ctx context.Context, agentName s
 		return fmt.Errorf("released 0 reservations for %d path patterns", len(paths))
 	}
 	return nil
+}
+
+// ReleaseExactForBead releases active leases only after a durable assignment
+// barrier prevents a newer generation for the same bead. Paths are used to
+// recover a unique exact-binding lease whose Agent Mail ID drifted; ambiguous
+// matches fail closed. Post-release active listings are authoritative.
+func (m *FileReservationManager) ReleaseExactForBead(ctx context.Context, barrier *assignmentstore.Assignment, reservationIDs []int, paths []string) ([]string, error) {
+	if m == nil || m.client == nil {
+		return nil, errors.New("agent mail client not configured")
+	}
+	beadID, agentName, err := exactReleaseBarrierBinding(barrier)
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	expectedProjectID, err := m.ensureProject(ctx)
+	if err != nil {
+		return nil, err
+	}
+	reason := fmt.Sprintf("bead assignment: %s", strings.TrimSpace(beadID))
+	wantedIDs, err := normalizeReservationIDs(reservationIDs)
+	if err != nil {
+		return nil, err
+	}
+	wantedPaths := normalizeReservationPathSet(paths)
+	if len(wantedIDs) == 0 && len(wantedPaths) == 0 {
+		return nil, nil
+	}
+
+	releasedPaths := make(map[string]struct{})
+	const reconciliationLimit = 3
+	for attempt := 0; attempt < reconciliationLimit; attempt++ {
+		active, listErr := m.client.ListReservations(ctx, m.projectKey, agentName, false)
+		if listErr != nil {
+			return nil, fmt.Errorf("list active reservations for exact release: %w", listErr)
+		}
+		selectedIDs, selectedPaths, selectErr := selectExactReleaseReservations(
+			active, expectedProjectID, beadID, agentName, reason, wantedIDs, wantedPaths,
+		)
+		if selectErr != nil {
+			return nil, selectErr
+		}
+		if len(selectedIDs) == 0 {
+			return mapKeysSorted(releasedPaths), nil
+		}
+		for path := range selectedPaths {
+			releasedPaths[path] = struct{}{}
+		}
+		// A release response may be lost after the server commits. Always
+		// reconcile from the next authoritative active listing.
+		_, _ = m.client.ReleaseReservations(ctx, m.projectKey, agentName, nil, sortedReservationIDs(selectedIDs))
+	}
+
+	remaining, err := m.client.ListReservations(ctx, m.projectKey, agentName, false)
+	if err != nil {
+		return nil, fmt.Errorf("verify exact reservation release: %w", err)
+	}
+	selectedIDs, _, err := selectExactReleaseReservations(
+		remaining, expectedProjectID, beadID, agentName, reason, wantedIDs, wantedPaths,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(selectedIDs) > 0 {
+		return nil, fmt.Errorf("%d exact reservations for bead %s remain active after %d release attempts", len(selectedIDs), beadID, reconciliationLimit)
+	}
+	return mapKeysSorted(releasedPaths), nil
+}
+
+func exactReleaseBarrierBinding(barrier *assignmentstore.Assignment) (string, string, error) {
+	if barrier == nil {
+		return "", "", errors.New("durable assignment release barrier is required")
+	}
+	if barrier.ClearState != assignmentstore.ClearStateReservationReleasing && barrier.ClearState != assignmentstore.ClearStateLeasesReleased {
+		return "", "", fmt.Errorf("assignment %s has no durable release barrier", barrier.BeadID)
+	}
+	beadID := strings.TrimSpace(barrier.BeadID)
+	agentName := strings.TrimSpace(barrier.ReservationAgent)
+	if agentName == "" {
+		agentName = strings.TrimSpace(barrier.AgentName)
+	}
+	if beadID == "" || agentName == "" {
+		return "", "", errors.New("release barrier requires bead and reservation agent identity")
+	}
+	return beadID, agentName, nil
+}
+
+func selectExactReleaseReservations(
+	active []agentmail.FileReservation,
+	expectedProjectID int,
+	beadID, agentName, reason string,
+	wantedIDs map[int]struct{},
+	wantedPaths map[string]struct{},
+) (map[int]struct{}, map[string]struct{}, error) {
+	selectedIDs := make(map[int]struct{})
+	selectedPaths := make(map[string]struct{})
+	matchesByPath := make(map[string][]int, len(wantedPaths))
+	for _, reservation := range active {
+		if reservation.ReleasedTS != nil {
+			continue
+		}
+		path := strings.TrimSpace(reservation.PathPattern)
+		_, requestedByID := wantedIDs[reservation.ID]
+		_, requestedByPath := wantedPaths[path]
+		exactBinding := reservation.ID > 0 && reservation.ProjectID == expectedProjectID &&
+			strings.TrimSpace(reservation.AgentName) == agentName && strings.TrimSpace(reservation.Reason) == reason
+		if requestedByID && !exactBinding {
+			return nil, nil, fmt.Errorf("reservation %d is not authoritatively bound to bead %s", reservation.ID, beadID)
+		}
+		if requestedByID && len(wantedPaths) > 0 && !requestedByPath {
+			return nil, nil, fmt.Errorf("reservation %d path %q is not authoritatively bound to bead %s durable paths", reservation.ID, path, beadID)
+		}
+		if requestedByPath && reservation.ProjectID == expectedProjectID &&
+			strings.TrimSpace(reservation.AgentName) == agentName && strings.TrimSpace(reservation.Reason) == reason && reservation.ID <= 0 {
+			return nil, nil, fmt.Errorf("active reservation for path %q has no durable ID", path)
+		}
+		if exactBinding && requestedByPath {
+			matchesByPath[path] = append(matchesByPath[path], reservation.ID)
+		}
+		if requestedByID && exactBinding && len(wantedPaths) == 0 {
+			selectedIDs[reservation.ID] = struct{}{}
+			if path != "" {
+				selectedPaths[path] = struct{}{}
+			}
+		}
+	}
+	for path := range wantedPaths {
+		matches := matchesByPath[path]
+		switch len(matches) {
+		case 0:
+			continue
+		case 1:
+			if _, duplicateID := selectedIDs[matches[0]]; duplicateID {
+				return nil, nil, fmt.Errorf("reservation %d is bound to multiple requested paths", matches[0])
+			}
+			selectedIDs[matches[0]] = struct{}{}
+			selectedPaths[path] = struct{}{}
+		default:
+			return nil, nil, fmt.Errorf("exact reservation cleanup for %q is ambiguous: found %d active matching leases", path, len(matches))
+		}
+	}
+	return selectedIDs, selectedPaths, nil
+}
+
+func normalizeReservationIDs(ids []int) (map[int]struct{}, error) {
+	result := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, fmt.Errorf("invalid reservation ID %d", id)
+		}
+		if _, duplicate := result[id]; duplicate {
+			return nil, fmt.Errorf("duplicate reservation ID %d", id)
+		}
+		result[id] = struct{}{}
+	}
+	return result, nil
+}
+
+func normalizeReservationPathSet(paths []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(paths))
+	for _, rawPath := range paths {
+		if path := strings.TrimSpace(rawPath); path != "" {
+			result[path] = struct{}{}
+		}
+	}
+	return result
+}
+
+func sortedReservationIDs(ids map[int]struct{}) []int {
+	result := make([]int, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Ints(result)
+	return result
+}
+
+func mapKeysSorted(values map[string]struct{}) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // RenewReservations extends the TTL for an agent's reservations.

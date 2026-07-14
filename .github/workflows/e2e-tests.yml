@@ -4,14 +4,14 @@
 # These tests verify the robot mode commands work correctly with real tmux sessions.
 # In CI, tests run in mock mode. For local testing with real agents, omit E2E_MOCK_MODE.
 #
-# Local usage with real agents:
-#   go test -v -tags=e2e ./e2e/... -timeout 20m
+# Local full-suite usage with real agents:
+#   go test -v -tags=e2e ./e2e/... -timeout 45m
 #
 # CI mock mode:
 #   E2E_MOCK_MODE=1 go test -v -tags=e2e ./e2e/... \
-#     -run '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomic.*|TestE2ESpawnAssignmentProductionCLI|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2ERobotReplayBuiltBinaryRealTmuxDeliversExactlyOnce|TestE2ERobotInterruptFollowUpRedactionBuiltBinaryRealTmux|TestE2ERobotBeadClaimBuiltBinaryRealBR|TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess)$'
+#     -run '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EProjectSendCancellationAggregation|TestE2ECanonicalReplayJSONContract|TestE2ECanonicalReplayCancellationNoPostReturnEnter|TestE2ECodexGoalSendJSONContract|TestE2EAtomic.*|TestE2EResumeInjectUnifiedDispatch|TestE2ESpawn.*|TestE2ERobotAssignTerminalContractsBuiltBinary|TestE2EJSONCommandTerminalContractsBuiltBinary|TestE2ERobotSpawnTerminalContractsBuiltBinary|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2ERobotTerminalErrorContractsBuiltBinary|TestE2ERobotReplayBuiltBinaryRealTmuxDeliversExactlyOnce|TestE2ERobotInterruptFollowUpRedactionBuiltBinaryRealTmux|TestE2ERobotBeadClaimBuiltBinaryRealBR|TestE2E_RobotFormatSelection|TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess|TestE2ERobotBulkAssignInvalidInputsAreSingleFailureDocuments|TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks)$' -timeout 45m
 #   E2E_MOCK_MODE=1 go test -v -tags=e2e ./e2e/... \
-#     -run '^TestE2E_RobotBulkAssign_.*$'
+#     -run '^TestE2E_RobotBulkAssign_.*$' -timeout 20m
 
 name: E2E Tests
 
@@ -23,29 +23,7 @@ on:
     paths:
       - 'e2e/**'
       - 'cmd/ntm/**'
-      - 'internal/agent/**'
-      - 'internal/agentmail/**'
-      - 'internal/agentsession/**'
-      - 'internal/assign/**'
-      - 'internal/assignment/**'
-      - 'internal/bv/**'
-      - 'internal/cli/**'
-      - 'internal/completion/**'
-      - 'internal/config/**'
-      - 'internal/coordinator/**'
-      - 'internal/dispatch/**'
-      - 'internal/health/**'
-      - 'internal/history/**'
-      - 'internal/pipeline/**'
-      - 'internal/redaction/**'
-      - 'internal/robot/**'
-      - 'internal/serve/**'
-      - 'internal/session/**'
-      - 'internal/status/**'
-      - 'internal/tmux/**'
-      - 'internal/tui/**'
-      - 'internal/caut/**'
-      - 'internal/integrations/dcg/**'
+      - 'internal/**'
       - 'tests/**'
       - 'Makefile'
       - 'go.mod'
@@ -73,29 +51,7 @@ on:
     paths:
       - 'e2e/**'
       - 'cmd/ntm/**'
-      - 'internal/agent/**'
-      - 'internal/agentmail/**'
-      - 'internal/agentsession/**'
-      - 'internal/assign/**'
-      - 'internal/assignment/**'
-      - 'internal/bv/**'
-      - 'internal/cli/**'
-      - 'internal/completion/**'
-      - 'internal/config/**'
-      - 'internal/coordinator/**'
-      - 'internal/dispatch/**'
-      - 'internal/health/**'
-      - 'internal/history/**'
-      - 'internal/pipeline/**'
-      - 'internal/redaction/**'
-      - 'internal/robot/**'
-      - 'internal/serve/**'
-      - 'internal/session/**'
-      - 'internal/status/**'
-      - 'internal/tmux/**'
-      - 'internal/tui/**'
-      - 'internal/caut/**'
-      - 'internal/integrations/dcg/**'
+      - 'internal/**'
       - 'tests/**'
       - 'Makefile'
       - 'go.mod'
@@ -123,13 +79,15 @@ jobs:
   # ============================================================================
   e2e-mock:
     name: Hermetic E2E Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -165,18 +123,18 @@ jobs:
           CAUT_MOCK_FILE: "e2e/fixtures/caut_mock.json"
           E2E_LOG_DIR: "/tmp/e2e-logs"
           E2E_TEST_FILTER: ${{ inputs.test_filter || '' }}
-          E2E_PRIMARY_FILTER: '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomic.*|TestE2ESpawnAssignmentProductionCLI|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2ERobotReplayBuiltBinaryRealTmuxDeliversExactlyOnce|TestE2ERobotInterruptFollowUpRedactionBuiltBinaryRealTmux|TestE2ERobotBeadClaimBuiltBinaryRealBR|TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess)$'
+          E2E_PRIMARY_FILTER: '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EProjectSendCancellationAggregation|TestE2ECanonicalReplayJSONContract|TestE2ECanonicalReplayCancellationNoPostReturnEnter|TestE2ECodexGoalSendJSONContract|TestE2EAtomic.*|TestE2EResumeInjectUnifiedDispatch|TestE2ESpawn.*|TestE2ERobotAssignTerminalContractsBuiltBinary|TestE2EJSONCommandTerminalContractsBuiltBinary|TestE2ERobotSpawnTerminalContractsBuiltBinary|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2ERobotTerminalErrorContractsBuiltBinary|TestE2ERobotReplayBuiltBinaryRealTmuxDeliversExactlyOnce|TestE2ERobotInterruptFollowUpRedactionBuiltBinaryRealTmux|TestE2ERobotBeadClaimBuiltBinaryRealBR|TestE2E_RobotFormatSelection|TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess|TestE2ERobotBulkAssignInvalidInputsAreSingleFailureDocuments|TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks)$'
           E2E_LEGACY_BULK_FILTER: '^TestE2E_RobotBulkAssign_.*$'
         run: |
           mkdir -p "$E2E_LOG_DIR"
 
           if [ -n "$E2E_TEST_FILTER" ]; then
-            go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_TEST_FILTER" -timeout 30m \
+            go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_TEST_FILTER" -timeout 45m \
               2>&1 | tee e2e-requested-output.txt
           else
             # New functionality crosses the built binary, real tmux, real br,
             # concurrent processes, and durable assignment/replay state.
-            go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_PRIMARY_FILTER" -timeout 18m \
+            go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_PRIMARY_FILTER" -timeout 45m \
               2>&1 | tee e2e-primary-output.txt
 
             # Keep the long legacy bulk contract independent so its failures
@@ -187,7 +145,7 @@ jobs:
 
       - name: Upload E2E Logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: e2e-logs-mock
           path: |
@@ -200,13 +158,15 @@ jobs:
   # ============================================================================
   e2e-infra:
     name: E2E Infrastructure Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -233,13 +193,15 @@ jobs:
   # ============================================================================
   e2e-robot-mode:
     name: Robot Mode Commands
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -294,7 +256,7 @@ jobs:
   # ============================================================================
   e2e-success:
     name: E2E Success
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [e2e-mock, e2e-infra, e2e-robot-mode]
     if: always()

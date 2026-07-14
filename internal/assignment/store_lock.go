@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"sync"
 )
@@ -30,6 +31,24 @@ func acquireAtomicTargetOperationLock(ctx context.Context, storePath, target str
 	return acquireAtomicOperationLock(ctx, storePath, "target", strings.TrimSpace(target))
 }
 
+// AcquireExternalCleanupLock serializes the non-idempotent external release
+// boundary for one bead across processes. Callers must reload and recheck the
+// durable assignment after acquiring the lock and before any external effect.
+// This lock is always acquired outside the bead and target operation locks.
+func (s *AssignmentStore) AcquireExternalCleanupLock(ctx context.Context, beadID string) (func(), error) {
+	if s == nil {
+		return nil, errors.New("assignment store is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return nil, errors.New("bead ID is required")
+	}
+	return acquireAtomicOperationLock(ctx, s.path, "external-cleanup", beadID)
+}
+
 func acquireAtomicOperationLock(ctx context.Context, storePath, namespace, identity string) (func(), error) {
 	digest := sha256.Sum256([]byte(namespace + "\x00" + identity))
 	lockPath := storePath + ".atomic-" + namespace + "-" + hex.EncodeToString(digest[:16]) + ".lock"
@@ -39,6 +58,9 @@ func acquireAtomicOperationLock(ctx context.Context, storePath, namespace, ident
 func lockAssignmentPathLocally(ctx context.Context, path string) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	assignmentPathLocks.Lock()
 	entry := assignmentPathLocks.entries[path]

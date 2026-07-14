@@ -1,8 +1,14 @@
 .git
+.gocache
 .gomodcache
+.doctor
 .beads
 .beads_snapshot*
 dist
+cmd/ntm/ntm
+internal/cli/outputs
+internal/pipeline/.ntm
 *.test
+*.zip
 ntm
 coverage.out

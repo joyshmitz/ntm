@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -137,7 +138,8 @@ func runZoom(w io.Writer, session string, paneIdx int, paneSelector string) erro
 
 	if !tmux.SessionExists(session) {
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(fmt.Sprintf("session '%s' not found", session)))
+			cause := fmt.Errorf("session '%s' not found", session)
+			return emitJSONFailureEnvelopeWithCause(output.NewError(cause.Error()), cause)
 		}
 		return fmt.Errorf("session '%s' not found", session)
 	}
@@ -146,7 +148,7 @@ func runZoom(w io.Writer, session string, paneIdx int, paneSelector string) erro
 		resolved, err := resolvePaneSelector(session, paneSelector)
 		if err != nil {
 			if IsJSONOutput() {
-				return output.PrintJSON(output.NewError(err.Error()))
+				return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 			}
 			return err
 		}
@@ -154,7 +156,8 @@ func runZoom(w io.Writer, session string, paneIdx int, paneSelector string) erro
 	}
 
 	if IsJSONOutput() && paneIdx < 0 {
-		return output.PrintJSON(output.NewError("pane index is required for JSON output"))
+		cause := errors.New("pane index is required for JSON output")
+		return emitJSONFailureEnvelopeWithCause(output.NewError(cause.Error()), cause)
 	}
 
 	// If no pane specified, let user select
@@ -187,7 +190,7 @@ func runZoom(w io.Writer, session string, paneIdx int, paneSelector string) erro
 	})
 	if err != nil {
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return err
 	}
@@ -195,7 +198,7 @@ func runZoom(w io.Writer, session string, paneIdx int, paneSelector string) erro
 	if IsJSONOutput() {
 		resp, err := coerceSuccessResponse(result, "sessions.zoom")
 		if err != nil {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return output.PrintJSON(resp)
 	}

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,14 +23,13 @@ import (
 )
 
 func TestGetSpawnRejectsProjectNameWithLabelSeparator(t *testing.T) {
-
 	opts := SpawnOptions{
 		Session: "my--project",
 		CCCount: 1,
 		DryRun:  true,
 	}
 
-	out, err := GetSpawn(opts, config.Default())
+	out, err := GetSpawn(t.Context(), opts, config.Default())
 	if err != nil {
 		t.Fatalf("GetSpawn returned unexpected error: %v", err)
 	}
@@ -43,6 +44,367 @@ func TestGetSpawnRejectsProjectNameWithLabelSeparator(t *testing.T) {
 	}
 	if !strings.Contains(out.RobotResponse.Error, "contains '--'") {
 		t.Fatalf("error = %q, expected project-name separator validation message", out.RobotResponse.Error)
+	}
+	if out.Agents == nil {
+		t.Fatal("agents must be initialized on early validation failures")
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"agents":[]`) {
+		t.Fatalf("encoded output must contain an empty agents array: %s", encoded)
+	}
+}
+
+func testSpawnLifecycleDependencies(panes []tmux.Pane) *SpawnLifecycleDependencies {
+	return &SpawnLifecycleDependencies{
+		IsTMUXInstalled: func() bool { return true },
+		GetAllPanes: func(context.Context) (map[string][]tmux.Pane, error) {
+			return map[string][]tmux.Pane{}, nil
+		},
+		SessionExists: func(context.Context, string) (bool, error) { return true, nil },
+		CreateSession: func(context.Context, string, string, int) error { return nil },
+		GetPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return append([]tmux.Pane(nil), panes...), nil
+		},
+		SplitWindow:      func(context.Context, string, string) (string, error) { return "%new", nil },
+		ApplyTiledLayout: func(context.Context, string) error { return nil },
+		LaunchAgent: func(_ context.Context, pane tmux.Pane, session, agentType string, number int, _, _ string) (SpawnedAgent, error) {
+			return SpawnedAgent{
+				Pane:  fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index),
+				Type:  agentType,
+				Title: fmt.Sprintf("%s__%s_%d", session, agentTypeShort(agentType), number),
+			}, nil
+		},
+		WaitForReady: func(context.Context, *SpawnOutput, time.Duration) error { return nil },
+	}
+}
+
+func testSpawnConfig() *config.Config {
+	cfg := config.Default()
+	cfg.SpawnPacing.Enabled = false
+	return cfg
+}
+
+func TestValidateSpawnRequestRejectsInvalidCountsAndEmptySpawn(t *testing.T) {
+	tests := []struct {
+		name string
+		opts SpawnOptions
+		want string
+	}{
+		{name: "negative claude", opts: SpawnOptions{Session: "invalid-cc", CCCount: -1, CodCount: 1}, want: "--spawn-cc"},
+		{name: "negative codex", opts: SpawnOptions{Session: "invalid-cod", CCCount: 1, CodCount: -1}, want: "--spawn-cod"},
+		{name: "negative gemini", opts: SpawnOptions{Session: "invalid-gmi", CCCount: 1, GmiCount: -1}, want: "--spawn-gmi"},
+		{name: "negative antigravity", opts: SpawnOptions{Session: "invalid-agy", CCCount: 1, AgyCount: -1}, want: "--spawn-agy"},
+		{name: "zero total", opts: SpawnOptions{Session: "invalid-zero"}, want: "no agents specified"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out, err := GetSpawn(t.Context(), test.opts, testSpawnConfig())
+			if err != nil {
+				t.Fatalf("GetSpawn returned transport error: %v", err)
+			}
+			if out.Success || out.ErrorCode != ErrCodeInvalidFlag || !strings.Contains(out.Error, test.want) {
+				t.Fatalf("output=%+v, want INVALID_FLAG containing %q", out, test.want)
+			}
+			if out.Agents == nil {
+				t.Fatal("agents must be initialized on invalid requests")
+			}
+		})
+	}
+}
+
+func TestValidateSpawnRequestRequiresStrictAssignmentStrategy(t *testing.T) {
+	for _, strategy := range []string{"", "   ", "round-robin"} {
+		t.Run(fmt.Sprintf("strategy_%q", strategy), func(t *testing.T) {
+			out, err := GetSpawn(t.Context(), SpawnOptions{
+				Session: "invalid-strategy", CCCount: 1, AssignWork: true, AssignStrategy: strategy,
+			}, testSpawnConfig())
+			if err != nil {
+				t.Fatalf("GetSpawn returned transport error: %v", err)
+			}
+			if out.Success || out.ErrorCode != ErrCodeInvalidFlag || !strings.Contains(out.Error, "strategy") {
+				t.Fatalf("output=%+v, want strict strategy INVALID_FLAG", out)
+			}
+		})
+	}
+
+	normalized, err := validateSpawnRequest(SpawnOptions{CCCount: 1, AssignWork: true, AssignStrategy: " dependency "})
+	if err != nil || normalized != "dependency-aware" {
+		t.Fatalf("normalized strategy=%q err=%v, want dependency-aware", normalized, err)
+	}
+}
+
+func TestGetSpawnInitializesAgentsOnInvalidLabel(t *testing.T) {
+	out, err := GetSpawn(t.Context(), SpawnOptions{Session: "project", Label: "not valid!", CCCount: 1}, testSpawnConfig())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
+	}
+	if out.Success || out.ErrorCode != ErrCodeInvalidFlag || out.Agents == nil {
+		t.Fatalf("invalid-label output=%+v", out)
+	}
+}
+
+func TestGetSpawnPreservesSubsecondReadyTimeout(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}}
+	deps := testSpawnLifecycleDependencies(panes)
+	var gotTimeout time.Duration
+	deps.WaitForReady = func(_ context.Context, _ *SpawnOutput, timeout time.Duration) error {
+		gotTimeout = timeout
+		return nil
+	}
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "subsecond-ready", CCCount: 1, NoUserPane: true, WorkingDir: t.TempDir(),
+		WaitReady: true, ReadyTimeout: 500 * time.Millisecond, LifecycleDeps: deps,
+	}, testSpawnConfig())
+	if err != nil || !out.Success {
+		t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+	}
+	if gotTimeout != 500*time.Millisecond {
+		t.Fatalf("ready timeout=%s, want 500ms", gotTimeout)
+	}
+}
+
+func TestGetSpawnUserPaneUsesPhysicalWindowIdentity(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%41", WindowIndex: 4, Index: 2, Title: "operator"},
+		{ID: "%42", WindowIndex: 4, Index: 3, Title: "agent"},
+	}
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "physical-user-pane", CCCount: 1, WorkingDir: t.TempDir(), LifecycleDeps: testSpawnLifecycleDependencies(panes),
+	}, testSpawnConfig())
+	if err != nil || !out.Success {
+		t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+	}
+	if len(out.Agents) != 2 || out.Agents[0].Type != "user" || out.Agents[0].Pane != "4.2" {
+		t.Fatalf("spawned agents=%+v, want user pane 4.2", out.Agents)
+	}
+}
+
+func TestGetSpawnPropagatesTiledLayoutFailure(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}}
+	deps := testSpawnLifecycleDependencies(panes)
+	launches := 0
+	deps.ApplyTiledLayout = func(context.Context, string) error { return errors.New("layout rejected") }
+	deps.LaunchAgent = func(context.Context, tmux.Pane, string, string, int, string, string) (SpawnedAgent, error) {
+		launches++
+		return SpawnedAgent{}, nil
+	}
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "layout-failure", CCCount: 1, NoUserPane: true, WorkingDir: t.TempDir(), LifecycleDeps: deps,
+	}, testSpawnConfig())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
+	}
+	if out.Success || out.ErrorCode != ErrCodeInternalError || !strings.Contains(out.Error, "layout rejected") {
+		t.Fatalf("output=%+v, want layout INTERNAL_ERROR", out)
+	}
+	if launches != 0 {
+		t.Fatalf("launches=%d, want zero after layout failure", launches)
+	}
+}
+
+func TestGetSpawnRejectsShortTopology(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}}
+	deps := testSpawnLifecycleDependencies(panes)
+	splits := 0
+	layouts := 0
+	deps.SplitWindow = func(context.Context, string, string) (string, error) {
+		splits++
+		return "%2", nil
+	}
+	deps.ApplyTiledLayout = func(context.Context, string) error { layouts++; return nil }
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "short-topology", CCCount: 2, NoUserPane: true, WorkingDir: t.TempDir(), LifecycleDeps: deps,
+	}, testSpawnConfig())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
+	}
+	if out.Success || out.ErrorCode != ErrCodePaneNotFound || !strings.Contains(out.Error, "1 pane") {
+		t.Fatalf("output=%+v, want PANE_NOT_FOUND", out)
+	}
+	if splits != 1 || layouts != 0 {
+		t.Fatalf("splits=%d layouts=%d, want one split attempt and no layout", splits, layouts)
+	}
+}
+
+func TestGetSpawnAggregatesLaunchFailures(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%1", WindowIndex: 0, Index: 0},
+		{ID: "%2", WindowIndex: 0, Index: 1},
+	}
+	deps := testSpawnLifecycleDependencies(panes)
+	launches := 0
+	deps.LaunchAgent = func(_ context.Context, pane tmux.Pane, _, agentType string, number int, _, _ string) (SpawnedAgent, error) {
+		launches++
+		err := fmt.Errorf("%s launch %d failed", agentType, number)
+		return SpawnedAgent{Pane: fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index), Type: agentType, Error: err.Error()}, err
+	}
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "launch-failures", CCCount: 1, CodCount: 1, NoUserPane: true,
+		WorkingDir: t.TempDir(), LifecycleDeps: deps,
+	}, testSpawnConfig())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
+	}
+	if out.Success || out.ErrorCode != ErrCodeInternalError || launches != 2 || len(out.Agents) != 2 {
+		t.Fatalf("output=%+v launches=%d, want two aggregated launch failures", out, launches)
+	}
+	for _, agent := range out.Agents {
+		if agent.Error == "" {
+			t.Fatalf("agent lacks per-agent launch diagnostics: %+v", agent)
+		}
+	}
+}
+
+func TestGetSpawnPreservesTypedLaunchAndReadinessTimeouts(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}}
+	tests := []struct {
+		name   string
+		want   string
+		mutate func(*SpawnLifecycleDependencies)
+	}{
+		{
+			name: "admission topology deadline",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.GetAllPanes = func(context.Context) (map[string][]tmux.Pane, error) {
+					return nil, fmt.Errorf("admission topology: %w", context.DeadlineExceeded)
+				}
+			},
+		},
+		{
+			name: "admission topology cancellation",
+			want: "canceled",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.GetAllPanes = func(context.Context) (map[string][]tmux.Pane, error) {
+					return nil, fmt.Errorf("admission topology: %w", context.Canceled)
+				}
+			},
+		},
+		{
+			name: "session lookup deadline",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.SessionExists = func(context.Context, string) (bool, error) {
+					return false, fmt.Errorf("session lookup: %w", context.DeadlineExceeded)
+				}
+			},
+		},
+		{
+			name: "session lookup cancellation",
+			want: "canceled",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.SessionExists = func(context.Context, string) (bool, error) {
+					return false, fmt.Errorf("session lookup: %w", context.Canceled)
+				}
+			},
+		},
+		{
+			name: "session creation deadline",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.SessionExists = func(context.Context, string) (bool, error) { return false, nil }
+				deps.CreateSession = func(context.Context, string, string, int) error {
+					return fmt.Errorf("session creation: %w", context.DeadlineExceeded)
+				}
+			},
+		},
+		{
+			name: "pane topology deadline",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.GetPanes = func(context.Context, string) ([]tmux.Pane, error) {
+					return nil, fmt.Errorf("pane topology: %w", context.DeadlineExceeded)
+				}
+			},
+		},
+		{
+			name: "pane split deadline",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.GetPanes = func(context.Context, string) ([]tmux.Pane, error) { return nil, nil }
+				deps.SplitWindow = func(context.Context, string, string) (string, error) {
+					return "", fmt.Errorf("pane split: %w", context.DeadlineExceeded)
+				}
+			},
+		},
+		{
+			name: "layout deadline",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.ApplyTiledLayout = func(context.Context, string) error {
+					return fmt.Errorf("layout dependency: %w", context.DeadlineExceeded)
+				}
+			},
+		},
+		{
+			name: "launch deadline",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.LaunchAgent = func(context.Context, tmux.Pane, string, string, int, string, string) (SpawnedAgent, error) {
+					return SpawnedAgent{Error: "launch deadline"}, fmt.Errorf("launch dependency: %w", context.DeadlineExceeded)
+				}
+			},
+		},
+		{
+			name: "readiness deadline",
+			mutate: func(deps *SpawnLifecycleDependencies) {
+				deps.WaitForReady = func(context.Context, *SpawnOutput, time.Duration) error {
+					return fmt.Errorf("readiness dependency: %w", context.DeadlineExceeded)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			want := test.want
+			if want == "" {
+				want = "deadline"
+			}
+			deps := testSpawnLifecycleDependencies(panes)
+			test.mutate(deps)
+			out, err := GetSpawn(t.Context(), SpawnOptions{
+				Session: "typed-timeout", CCCount: 1, NoUserPane: true, WorkingDir: t.TempDir(),
+				WaitReady: true, ReadyTimeout: 500 * time.Millisecond, LifecycleDeps: deps,
+			}, testSpawnConfig())
+			if err != nil {
+				t.Fatalf("GetSpawn returned transport error: %v", err)
+			}
+			if out.Success || out.ErrorCode != ErrCodeTimeout || !strings.Contains(out.Error, want) {
+				t.Fatalf("output=%+v, want TIMEOUT", out)
+			}
+		})
+	}
+}
+
+func TestWaitForAgentsReadyDeadlineWrapsDeadlineExceeded(t *testing.T) {
+	started := time.Now()
+	err := waitForAgentsReadyWithCapture(
+		t.Context(),
+		&SpawnOutput{Session: "ready-deadline", Agents: []SpawnedAgent{{Pane: "0.0", Type: "claude"}}},
+		20*time.Millisecond,
+		func(context.Context, string, int) (string, error) { return "still loading", nil },
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v, want wrapped context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("20ms readiness deadline took %s", elapsed)
+	}
+}
+
+func TestWaitForAgentsReadyDeadlineCancelsBlockingCapture(t *testing.T) {
+	started := time.Now()
+	err := waitForAgentsReadyWithCapture(
+		t.Context(),
+		&SpawnOutput{Session: "ready-blocked", Agents: []SpawnedAgent{{Pane: "0.0", Type: "claude"}}},
+		20*time.Millisecond,
+		func(ctx context.Context, _ string, _ int) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v, want wrapped context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("20ms readiness deadline with blocking capture took %s", elapsed)
 	}
 }
 
@@ -71,7 +433,7 @@ func TestPrintSpawn(t *testing.T) {
 	// Clean up potential session
 	defer tmux.KillSession(opts.Session)
 
-	output, err := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, err := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 	if err != nil {
 		t.Fatalf("PrintSpawn failed: %v", err)
 	}
@@ -247,7 +609,7 @@ func TestSpawnOptions_DryRunMode(t *testing.T) {
 
 	cfg := config.Default()
 
-	output, err := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, err := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 	if err != nil {
 		t.Fatalf("[E2E-SPAWN] DryRun PrintSpawn failed: %v", err)
 	}
@@ -321,7 +683,7 @@ func TestSpawnOptions_DryRunIncludesAdmission(t *testing.T) {
 	cfg.SpawnPacing.AgentCaps.CodexMaxConcurrent = 1024
 	cfg.SpawnPacing.AgentCaps.GeminiMaxConcurrent = 1024
 
-	resp, err := GetSpawn(opts, cfg)
+	resp, err := GetSpawn(t.Context(), opts, cfg)
 	if err != nil {
 		t.Fatalf("GetSpawn returned error: %v", err)
 	}
@@ -345,7 +707,7 @@ func TestSpawnOptions_DryRunAdmissionRefusesAgentCap(t *testing.T) {
 	cfg.SpawnPacing.AgentCaps.CodexMaxConcurrent = 0
 	cfg.SpawnPacing.AgentCaps.GeminiMaxConcurrent = 0
 
-	resp, err := GetSpawn(SpawnOptions{
+	resp, err := GetSpawn(t.Context(), SpawnOptions{
 		Session:    "test_dryrun_admission_refuse",
 		CCCount:    2,
 		NoUserPane: true,
@@ -368,6 +730,34 @@ func TestSpawnOptions_DryRunAdmissionRefusesAgentCap(t *testing.T) {
 	}
 }
 
+func TestCollectSpawnAdmissionInputCancellationReachesTopology(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	started := make(chan struct{})
+	done := make(chan struct{})
+	cfg := config.Default()
+	cfg.SpawnPacing.Enabled = false
+	go func() {
+		defer close(done)
+		collectSpawnAdmissionInputWithPanes(ctx, SpawnOptions{Session: "cancel-admission"}, cfg, 1, 1,
+			func(callCtx context.Context) (map[string][]tmux.Pane, error) {
+				close(started)
+				<-callCtx.Done()
+				return nil, callCtx.Err()
+			})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("spawn topology collection did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("spawn topology collection ignored cancellation")
+	}
+}
+
 // TestSpawnOptions_NoAgentsSpecified validates error when no agents specified
 func TestSpawnOptions_NoAgentsSpecified(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
@@ -382,7 +772,7 @@ func TestSpawnOptions_NoAgentsSpecified(t *testing.T) {
 
 	cfg := config.Default()
 
-	output, _ := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, _ := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 
 	var resp SpawnOutput
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
@@ -422,7 +812,7 @@ func TestSpawnOptions_SafetyMode(t *testing.T) {
 	cfg := config.Default()
 	cfg.Agents.Claude = "echo test"
 
-	output, _ := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, _ := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 
 	var resp SpawnOutput
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
@@ -467,7 +857,7 @@ func TestSpawnOptions_MultipleAgentTypes(t *testing.T) {
 	cfg.Agents.Codex = "echo codex_test"
 	cfg.Agents.Gemini = "echo gemini_test"
 
-	output, err := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, err := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 	if err != nil {
 		t.Fatalf("[E2E-SPAWN] PrintSpawn failed: %v", err)
 	}
@@ -529,7 +919,7 @@ func TestSpawnOutput_SchemaStability(t *testing.T) {
 
 	cfg := config.Default()
 
-	output, err := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, err := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 	if err != nil {
 		t.Fatalf("[E2E-SPAWN] PrintSpawn failed: %v", err)
 	}
@@ -598,7 +988,7 @@ func TestSpawnOutput_DeterministicOrdering(t *testing.T) {
 	// Run multiple times to verify consistent ordering
 	var lastOrder []string
 	for i := 0; i < 3; i++ {
-		output, err := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+		output, err := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 		if err != nil {
 			t.Fatalf("[E2E-SPAWN] PrintSpawn iteration %d failed: %v", i, err)
 		}
@@ -658,7 +1048,7 @@ func TestPrintSpawn_TmuxNotInstalled(t *testing.T) {
 
 	cfg := config.Default()
 
-	output, err := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, err := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 	if err != nil {
 		t.Fatalf("[E2E-SPAWN] PrintSpawn failed: %v", err)
 	}
@@ -698,12 +1088,12 @@ func TestSpawnOptions_NoUserPane(t *testing.T) {
 	cfg := config.Default()
 
 	// With user pane
-	output1, _ := captureStdout(t, func() error { return PrintSpawn(optsWithUser, cfg) })
+	output1, _ := captureStdout(t, func() error { return PrintSpawn(t.Context(), optsWithUser, cfg) })
 	var resp1 SpawnOutput
 	json.Unmarshal([]byte(output1), &resp1)
 
 	// Without user pane
-	output2, _ := captureStdout(t, func() error { return PrintSpawn(optsNoUser, cfg) })
+	output2, _ := captureStdout(t, func() error { return PrintSpawn(t.Context(), optsNoUser, cfg) })
 	var resp2 SpawnOutput
 	json.Unmarshal([]byte(output2), &resp2)
 
@@ -747,7 +1137,7 @@ func TestSpawnedAgent_TitleFormat(t *testing.T) {
 
 	cfg := config.Default()
 
-	output, _ := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, _ := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 
 	var resp SpawnOutput
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
@@ -793,7 +1183,7 @@ func TestSpawnOutput_TimestampFormat(t *testing.T) {
 
 	cfg := config.Default()
 
-	output, _ := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, _ := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 
 	var resp SpawnOutput
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
@@ -834,7 +1224,7 @@ func TestSpawnOutput_WorkingDir(t *testing.T) {
 
 	cfg := config.Default()
 
-	output, _ := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, _ := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 
 	var resp SpawnOutput
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
@@ -862,7 +1252,7 @@ func TestSpawnOptions_PresetUsed(t *testing.T) {
 
 	cfg := config.Default()
 
-	output, _ := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, _ := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 
 	var resp SpawnOutput
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
@@ -926,9 +1316,7 @@ func spawnObservation(session string, state statuspkg.AgentState, panes ...tmux.
 	return observation
 }
 
-// TestNormalizeAssignStrategy validates strategy normalization
-func TestNormalizeAssignStrategy(t *testing.T) {
-
+func TestNormalizeAssignStrategyStrict(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected string
@@ -942,16 +1330,25 @@ func TestNormalizeAssignStrategy(t *testing.T) {
 		{"dependency", "dependency-aware"},
 		{"skill-matched", "skill-matched"},
 		{"skill", "skill-matched"},
-		{"", "top-n"},          // Default
-		{"invalid", "top-n"},   // Invalid falls back to default
 		{"  top-n  ", "top-n"}, // Whitespace trimmed
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			got := normalizeAssignStrategy(tc.input)
+			got, err := normalizeAssignStrategyStrict(tc.input)
+			if err != nil {
+				t.Fatalf("normalizeAssignStrategyStrict(%q): %v", tc.input, err)
+			}
 			if got != tc.expected {
-				t.Errorf("normalizeAssignStrategy(%q) = %q, want %q", tc.input, got, tc.expected)
+				t.Errorf("normalizeAssignStrategyStrict(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+
+	for _, input := range []string{"", "   ", "invalid"} {
+		t.Run("invalid_"+input, func(t *testing.T) {
+			if got, err := normalizeAssignStrategyStrict(input); err == nil || got != "" {
+				t.Fatalf("normalizeAssignStrategyStrict(%q) = %q, %v; want explicit error", input, got, err)
 			}
 		})
 	}
@@ -1005,7 +1402,7 @@ func TestSpawnOptions_AssignWorkDryRun(t *testing.T) {
 		AssignWork:     true,
 		AssignStrategy: "top-n",
 		AssignmentDeps: &SpawnAssignmentDependencies{
-			FetchTriage: func(string) (*bv.TriageResponse, error) {
+			FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 				t.Fatal("dry run called assignment triage")
 				return nil, nil
 			},
@@ -1018,7 +1415,7 @@ func TestSpawnOptions_AssignWorkDryRun(t *testing.T) {
 
 	cfg := config.Default()
 
-	output, err := captureStdout(t, func() error { return PrintSpawn(opts, cfg) })
+	output, err := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
 	if err != nil {
 		t.Fatalf("PrintSpawn failed: %v", err)
 	}
@@ -1056,10 +1453,10 @@ func TestAssignWorkUsesAtomicClaimReservationAndDispatchWithDurableReplay(t *tes
 	}
 	workDir := t.TempDir()
 	deps := &SpawnAssignmentDependencies{
-		FetchTriage: func(string) (*bv.TriageResponse, error) {
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 			return mockTriage([]bv.TriageRecommendation{{ID: "bd-spawn", Title: "Atomic spawn", Status: "ready", Priority: 1}}, nil), nil
 		},
-		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
 		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 			mu.Lock()
@@ -1113,8 +1510,8 @@ func TestAssignWorkUsesAtomicClaimReservationAndDispatchWithDurableReplay(t *tes
 	output := &SpawnOutput{Session: "spawn-atomic", Agents: []SpawnedAgent{{Pane: "1.0", Name: "GeneratedName", Type: "codex"}}}
 
 	reservationPaths := []string{"internal/robot/**"}
-	first := assignWorkToAgents(output, workDir, output.Session, "top-n", config.Default(), true, reservationPaths, deps)
-	second := assignWorkToAgents(output, workDir, output.Session, "top-n", config.Default(), true, reservationPaths, deps)
+	first := assignWorkToAgents(t.Context(), output, workDir, output.Session, "top-n", config.Default(), true, reservationPaths, deps)
+	second := assignWorkToAgents(t.Context(), output, workDir, output.Session, "top-n", config.Default(), true, reservationPaths, deps)
 	if len(first) != 1 || !first[0].Claimed || !first[0].PromptSent || first[0].DispatchReceiptID == "" {
 		t.Fatalf("first assignment=%+v", first)
 	}
@@ -1136,10 +1533,10 @@ func TestAssignWorkRequiredReservationWithoutIdentityFailsBeforeClaimAndDispatch
 	deliverCalls := 0
 	panes := []tmux.Pane{{ID: "%5", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude}}
 	deps := &SpawnAssignmentDependencies{
-		FetchTriage: func(string) (*bv.TriageResponse, error) {
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 			return mockTriage([]bv.TriageRecommendation{{ID: "bd-required", Title: "Required", Status: "ready"}}, nil), nil
 		},
-		ListPanes: func(string) ([]tmux.Pane, error) {
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
 			return append([]tmux.Pane(nil), panes...), nil
 		},
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("spawn-required"), nil },
@@ -1161,12 +1558,90 @@ func TestAssignWorkRequiredReservationWithoutIdentityFailsBeforeClaimAndDispatch
 		},
 	}
 	output := &SpawnOutput{Session: "spawn-required", Agents: []SpawnedAgent{{Pane: "0.1", Name: "BlueLake", Type: "claude"}}}
-	got := assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
+	got := assignWorkToAgents(t.Context(), output, t.TempDir(), output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
 	if len(got) != 1 || !strings.Contains(got[0].ClaimError, "no exact Agent Mail pane-identity resolver") {
 		t.Fatalf("assignment=%+v", got)
 	}
 	if claimCalls != 0 || reserveCalls != 0 || deliverCalls != 0 {
 		t.Fatalf("claim=%d reserve=%d dispatch=%d, want zero", claimCalls, reserveCalls, deliverCalls)
+	}
+}
+
+func TestAssignWorkCancellationAfterObservationStopsClaimReservationAndDispatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(t.Context())
+	panes := []tmux.Pane{{ID: "%31", WindowIndex: 0, Index: 1, Title: "cancel__cc_1", Type: tmux.AgentClaude}}
+	var claims, reservations, dispatches atomic.Int32
+	deps := &SpawnAssignmentDependencies{
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
+			return mockTriage([]bv.TriageRecommendation{{ID: "bd-cancel", Title: "Cancel", Status: "ready"}}, nil), nil
+		},
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore: func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("spawn-cancel"), nil },
+		ObserveSession: func(_ context.Context, session string) (statuspkg.SessionObservation, error) {
+			cancel()
+			return spawnObservation(session, statuspkg.StateIdle, panes...), nil
+		},
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			claims.Add(1)
+			return bv.BeadClaimResult{}, errors.New("claim must not run")
+		},
+		ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			reservations.Add(1)
+			return assignment.LeaseReceipt{}, errors.New("reservation must not run")
+		}),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			dispatches.Add(1)
+			return errors.New("dispatch must not run")
+		}),
+	}
+	output := &SpawnOutput{Session: "spawn-cancel", Agents: []SpawnedAgent{{Pane: "0.1", Name: "CancelAgent", Type: "claude"}}}
+	got := assignWorkToAgents(ctx, output, t.TempDir(), output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
+	if len(got) == 0 || !strings.Contains(got[0].ClaimError, "canceled") {
+		t.Fatalf("canceled assignment = %+v", got)
+	}
+	if claims.Load() != 0 || reservations.Load() != 0 || dispatches.Load() != 0 {
+		t.Fatalf("post-cancel side effects claim=%d reservation=%d dispatch=%d", claims.Load(), reservations.Load(), dispatches.Load())
+	}
+}
+
+func TestWaitForAgentsReadyCancellationInterruptsPolling(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := waitForAgentsReady(ctx, &SpawnOutput{Session: "cancel-ready", Agents: []SpawnedAgent{{Type: "claude", Pane: "0.1"}}}, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForAgentsReady error = %v, want context.Canceled", err)
+	}
+}
+
+func TestLaunchAgentCanceledContextStopsBeforePaneMutation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	agent, err := launchAgent(ctx, tmux.Pane{ID: "%does-not-exist", WindowIndex: 0, Index: 1}, "cancel", "claude", 1, t.TempDir(), "claude")
+	if !strings.Contains(agent.Error, "canceled") || agent.Ready {
+		t.Fatalf("canceled launch agent = %+v", agent)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled launch error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSpawnCancellationErrorRecognizesWrappedPartialActuation(t *testing.T) {
+	partial := fmt.Errorf("tmux pane was created before cancellation: %w", context.Canceled)
+	if got := spawnCancellationError(t.Context(), partial); !errors.Is(got, context.Canceled) || got.Error() != partial.Error() {
+		t.Fatalf("spawnCancellationError() = %v, want wrapped partial-actuation cancellation", got)
+	}
+}
+
+func TestGetSpawnCanceledContextReturnsSingleStructuredFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	out, err := GetSpawn(ctx, SpawnOptions{Session: "cancel-spawn", CCCount: 1}, config.Default())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
+	}
+	if out == nil || out.Success || out.ErrorCode != ErrCodeTimeout || !strings.Contains(out.Error, "canceled") {
+		t.Fatalf("canceled spawn output = %+v", out)
 	}
 }
 
@@ -1179,10 +1654,10 @@ func TestAssignWorkUnsafeObservationHasNoAssignmentSideEffects(t *testing.T) {
 	keyCalls := 0
 	resolverCalls := 0
 	deps := &SpawnAssignmentDependencies{
-		FetchTriage: func(string) (*bv.TriageResponse, error) {
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 			return mockTriage([]bv.TriageRecommendation{{ID: "bd-unsafe", Title: "Unsafe pane", Status: "ready"}}, nil), nil
 		},
-		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("spawn-unsafe"), nil },
 		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
 			claimCalls++
@@ -1210,7 +1685,7 @@ func TestAssignWorkUnsafeObservationHasNoAssignmentSideEffects(t *testing.T) {
 	}
 	output := &SpawnOutput{Session: "spawn-unsafe", Agents: []SpawnedAgent{{Pane: "0.1", Name: "UnsafeAgent", Type: "claude"}}}
 
-	got := assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
+	got := assignWorkToAgents(t.Context(), output, t.TempDir(), output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
 	if len(got) != 1 || !strings.Contains(got[0].ClaimError, "not safe to dispatch") {
 		t.Fatalf("assignment=%+v", got)
 	}
@@ -1248,10 +1723,10 @@ func TestAssignWorkRequiredReservationRejectsIdentityAndTargetReceiptMismatch(t 
 			reserveCalls := 0
 			deliverCalls := 0
 			deps := &SpawnAssignmentDependencies{
-				FetchTriage: func(string) (*bv.TriageResponse, error) {
+				FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 					return mockTriage([]bv.TriageRecommendation{{ID: "bd-mismatch-" + test.name, Title: "Receipt mismatch", Status: "ready"}}, nil), nil
 				},
-				ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+				ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
 				LoadStore: func(string) (*assignment.AssignmentStore, error) {
 					return assignment.NewStore("spawn-mismatch-" + test.name), nil
 				},
@@ -1293,7 +1768,7 @@ func TestAssignWorkRequiredReservationRejectsIdentityAndTargetReceiptMismatch(t 
 			}
 			output := &SpawnOutput{Session: "spawn-receipts", Agents: []SpawnedAgent{{Pane: "2.0", Name: "GeneratedButNotCanonical", Type: "codex"}}}
 
-			got := assignWorkToAgents(output, workDir, output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
+			got := assignWorkToAgents(t.Context(), output, workDir, output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
 			if len(got) != 1 || !got[0].Claimed || got[0].PromptSent || !strings.Contains(got[0].PromptError, test.wantError) {
 				t.Fatalf("assignment=%+v", got)
 			}
@@ -1310,10 +1785,10 @@ func TestAssignWorkDoesNotFabricateMissingIdentity(t *testing.T) {
 	claimCalls := 0
 	deliverCalls := 0
 	deps := &SpawnAssignmentDependencies{
-		FetchTriage: func(string) (*bv.TriageResponse, error) {
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 			return mockTriage([]bv.TriageRecommendation{{ID: "bd-no-name", Title: "No name", Status: "ready"}}, nil), nil
 		},
-		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("spawn-no-name"), nil },
 		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
 			claimCalls++
@@ -1329,7 +1804,7 @@ func TestAssignWorkDoesNotFabricateMissingIdentity(t *testing.T) {
 	}
 	output := &SpawnOutput{Session: "spawn-no-name", Agents: []SpawnedAgent{{Pane: "0.1", Name: "  ", Type: "claude"}}}
 
-	got := assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
+	got := assignWorkToAgents(t.Context(), output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
 	if len(got) != 1 || !strings.Contains(got[0].ClaimError, "no canonical assignment identity") {
 		t.Fatalf("assignment=%+v", got)
 	}
@@ -1349,13 +1824,13 @@ func TestAssignWorkCanonicalMultiWindowDuplicateLocalIndices(t *testing.T) {
 	keyIndex := 0
 	var delivered []string
 	deps := &SpawnAssignmentDependencies{
-		FetchTriage: func(string) (*bv.TriageResponse, error) {
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 			return mockTriage([]bv.TriageRecommendation{
 				{ID: "bd-window-0", Title: "Window zero", Status: "ready", Priority: 1},
 				{ID: "bd-window-1", Title: "Window one", Status: "ready", Priority: 2},
 			}, nil), nil
 		},
-		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
 		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
@@ -1378,7 +1853,7 @@ func TestAssignWorkCanonicalMultiWindowDuplicateLocalIndices(t *testing.T) {
 		{Pane: "1.0", Name: "WindowOne", Type: "codex"},
 	}}
 
-	got := assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
+	got := assignWorkToAgents(t.Context(), output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
 	if len(got) != 2 || !got[0].Claimed || !got[0].PromptSent || !got[1].Claimed || !got[1].PromptSent {
 		t.Fatalf("assignments=%+v", got)
 	}
@@ -1410,13 +1885,13 @@ func TestFinalizeSpawnAssignmentOutputReturnsStructuredTerminalFailure(t *testin
 	claimCalls := 0
 	var delivered []string
 	deps := &SpawnAssignmentDependencies{
-		FetchTriage: func(string) (*bv.TriageResponse, error) {
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 			return mockTriage([]bv.TriageRecommendation{
 				{ID: "bd-ok", Title: "Safe target", Status: "ready"},
 				{ID: "bd-failed", Title: "Unsafe target", Status: "ready"},
 			}, nil), nil
 		},
-		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
 		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 			claimCalls++
@@ -1446,7 +1921,7 @@ func TestFinalizeSpawnAssignmentOutputReturnsStructuredTerminalFailure(t *testin
 			{Pane: "1.0", Name: "UnsafeAgent", Type: "codex"},
 		},
 	}
-	output.Assignments = assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
+	output.Assignments = assignWorkToAgents(t.Context(), output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
 	if len(output.Assignments) != 2 || !output.Assignments[0].PromptSent || !strings.Contains(output.Assignments[1].ClaimError, "not safe to dispatch") {
 		t.Fatalf("assignments=%+v", output.Assignments)
 	}
@@ -1454,7 +1929,7 @@ func TestFinalizeSpawnAssignmentOutputReturnsStructuredTerminalFailure(t *testin
 		t.Fatalf("claim calls=%d delivered=%v, want one safe transaction", claimCalls, delivered)
 	}
 	finalizeSpawnAssignmentOutput(output)
-	if output.Success || output.ErrorCode != ErrCodeInternalError || !strings.Contains(output.Error, "1 of 2") {
+	if output.Success || output.ErrorCode != "ASSIGNMENT_FAILED" || !strings.Contains(output.Error, "1 of 2") {
 		t.Fatalf("response=%+v error=%q", output.RobotResponse, output.Error)
 	}
 
@@ -1474,9 +1949,127 @@ func TestFinalizeSpawnAssignmentOutputReturnsStructuredTerminalFailure(t *testin
 	}
 }
 
+func TestFinalizeSpawnAssignmentOutputRequiresEveryEligibleAgent(t *testing.T) {
+	agents := []SpawnedAgent{
+		{Pane: "0.0", Name: "One", Type: "claude"},
+		{Pane: "0.1", Name: "Two", Type: "codex"},
+		{Pane: "0.2", Name: "Operator", Type: "user"},
+	}
+	tests := []struct {
+		name        string
+		assignments []SpawnAssignment
+		wantSuccess bool
+		wantFailed  int
+	}{
+		{name: "zero", wantFailed: 2},
+		{
+			name: "partial",
+			assignments: []SpawnAssignment{{
+				Pane: "0.0", AgentType: "claude", BeadID: "bd-one", Claimed: true, PromptSent: true,
+			}},
+			wantFailed: 1,
+		},
+		{
+			name: "partial canonical single-window pane",
+			assignments: []SpawnAssignment{{
+				Pane: "0", AgentType: "claude", BeadID: "bd-one", Claimed: true, PromptSent: true,
+			}},
+			wantFailed: 1,
+		},
+		{
+			name: "complete",
+			assignments: []SpawnAssignment{
+				{Pane: "0.0", AgentType: "claude", BeadID: "bd-one", Claimed: true, PromptSent: true},
+				{Pane: "0.1", AgentType: "codex", BeadID: "bd-two", Claimed: true, PromptSent: true},
+			},
+			wantSuccess: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := &SpawnOutput{
+				RobotResponse: NewRobotResponse(true),
+				Agents:        append([]SpawnedAgent(nil), agents...),
+				Assignments:   append([]SpawnAssignment(nil), test.assignments...),
+			}
+			finalizeSpawnAssignmentOutput(output)
+			if len(output.Assignments) != 2 {
+				t.Fatalf("assignments=%+v, want every non-user agent represented", output.Assignments)
+			}
+			failed := 0
+			for _, assignment := range output.Assignments {
+				if assignment.ClaimError != "" || assignment.PromptError != "" || !assignment.Claimed || !assignment.PromptSent {
+					failed++
+				}
+			}
+			if failed != test.wantFailed {
+				t.Fatalf("failed=%d assignments=%+v, want %d", failed, output.Assignments, test.wantFailed)
+			}
+			if output.Success != test.wantSuccess {
+				t.Fatalf("success=%v, want %v; output=%+v", output.Success, test.wantSuccess, output)
+			}
+			if !test.wantSuccess && output.ErrorCode != "ASSIGNMENT_FAILED" {
+				t.Fatalf("error_code=%q, want ASSIGNMENT_FAILED", output.ErrorCode)
+			}
+		})
+	}
+}
+
+func TestGetSpawnReportsZeroAssignmentCoverageAsFailure(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%1", WindowIndex: 0, Index: 0},
+		{ID: "%2", WindowIndex: 0, Index: 1},
+	}
+	deps := testSpawnLifecycleDependencies(panes)
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "zero-assignment", CCCount: 1, CodCount: 1, NoUserPane: true,
+		WorkingDir: t.TempDir(), AssignWork: true, AssignStrategy: "top-n", LifecycleDeps: deps,
+		AssignmentDeps: &SpawnAssignmentDependencies{
+			FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
+				return mockTriage(nil, nil), nil
+			},
+		},
+	}, testSpawnConfig())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
+	}
+	if out.Success || out.ErrorCode != "ASSIGNMENT_FAILED" || len(out.Assignments) != 2 {
+		t.Fatalf("output=%+v, want two-agent ASSIGNMENT_FAILED", out)
+	}
+	for _, assignment := range out.Assignments {
+		if assignment.ClaimError == "" {
+			t.Fatalf("assignment lacks coverage diagnostic: %+v", assignment)
+		}
+	}
+}
+
+func TestGetSpawnPreservesTypedAssignmentTimeout(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}}
+	deps := testSpawnLifecycleDependencies(panes)
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "assignment-timeout", CCCount: 1, NoUserPane: true,
+		WorkingDir: t.TempDir(), AssignWork: true, AssignStrategy: "top-n", LifecycleDeps: deps,
+		AssignmentDeps: &SpawnAssignmentDependencies{
+			FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
+				return nil, fmt.Errorf("triage dependency: %w", context.DeadlineExceeded)
+			},
+		},
+	}, testSpawnConfig())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
+	}
+	if out.Success || out.ErrorCode != ErrCodeTimeout || len(out.Assignments) != 1 {
+		t.Fatalf("output=%+v, want assignment TIMEOUT with diagnostics", out)
+	}
+	if !strings.Contains(out.Assignments[0].ClaimError, "deadline exceeded") {
+		t.Fatalf("assignment diagnostics=%+v", out.Assignments)
+	}
+}
+
 func TestAssignWorkTriageFailureIsStructured(t *testing.T) {
 	deps := &SpawnAssignmentDependencies{
-		FetchTriage: func(string) (*bv.TriageResponse, error) {
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
 			return nil, errors.New("bv unavailable")
 		},
 		LoadStore: func(string) (*assignment.AssignmentStore, error) {
@@ -1491,7 +2084,7 @@ func TestAssignWorkTriageFailureIsStructured(t *testing.T) {
 			{Pane: "1.0", Name: "Two", Type: "codex"},
 		},
 	}
-	output.Assignments = assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
+	output.Assignments = assignWorkToAgents(t.Context(), output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
 	if len(output.Assignments) != 2 {
 		t.Fatalf("assignments=%+v", output.Assignments)
 	}

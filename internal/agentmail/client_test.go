@@ -114,6 +114,51 @@ func TestIsAvailable(t *testing.T) {
 	}
 }
 
+func TestIsAvailableContextCancelsWhileAnotherHealthCheckOwnsLock(t *testing.T) {
+	probeStarted := make(chan struct{}, 1)
+	releaseProbe := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probeStarted <- struct{}{}
+		<-releaseProbe
+		var req JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return
+		}
+		statusJSON, _ := json.Marshal(HealthStatus{Status: "ok"})
+		_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: statusJSON})
+	}))
+	defer server.Close()
+
+	client := NewClient(WithBaseURL(server.URL + "/"))
+	firstDone := make(chan bool, 1)
+	go func() { firstDone <- client.IsAvailableContext(context.Background()) }()
+	select {
+	case <-probeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first availability probe did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if client.IsAvailableContext(ctx) {
+		t.Fatal("canceled availability waiter reported success")
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("availability waiter ignored cancellation for %v", elapsed)
+	}
+
+	close(releaseProbe)
+	select {
+	case available := <-firstDone:
+		if !available {
+			t.Fatal("owning availability probe reported unavailable")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("owning availability probe did not finish")
+	}
+}
+
 func TestCallTool(t *testing.T) {
 	// Mock JSON-RPC server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -86,16 +86,18 @@ func (d *UnifiedDetector) determineState(output, agentType string, lastActivity 
 
 func (d *UnifiedDetector) determineStateAt(output, agentType string, lastActivity, observedAt time.Time) (AgentState, ErrorType) {
 	// Detection priority:
-	// 1. Check for idle prompt when velocity is low (agent waiting for input)
-	// 2. Check for errors (but only if not clearly at a prompt)
-	// 3. Check activity recency (working vs unknown)
-	// 4. Heuristic check for likely-idle state
+	// 1. Check authoritative live-tail markers for active work
+	// 2. Check for idle prompt when velocity is low (agent waiting for input)
+	// 3. Check for errors (but only if not clearly at a prompt)
+	// 4. Check activity recency and agent-parser work evidence
+	// 5. Heuristic check for likely-idle state
 	//
 	// Key insight: if an agent is showing an idle prompt and not actively outputting,
 	// it should be classified as WAITING regardless of historical error messages
 	// in the scrollback. Error patterns from earlier in the session are not relevant
 	// when the agent has clearly recovered and is now waiting for input.
 
+	agentType = string(agent.AgentType(agentType).Canonical())
 	threshold := time.Duration(d.config.ActivityThreshold) * time.Second
 	isLowVelocity := observedAt.Sub(lastActivity) >= threshold
 
@@ -113,6 +115,15 @@ func (d *UnifiedDetector) determineStateAt(output, agentType string, lastActivit
 			return StateIdle, ErrorNone
 		}
 		// Fall through to error/heuristic handling below.
+	}
+
+	// Codex, like Claude, keeps its input chrome visible while a turn is in
+	// flight. A structural spinner or interrupt hint in the bounded live tail is
+	// therefore stronger evidence than a co-present chevron or a stale activity
+	// timestamp. CodexActivelyWorking deliberately ignores markers that have
+	// scrolled out of the live window.
+	if agentType == string(agent.AgentTypeCodex) && agent.CodexActivelyWorking(output) {
+		return StateWorking, ErrorNone
 	}
 
 	// Check if at prompt (idle) - prioritize this when velocity is low
@@ -139,6 +150,23 @@ func (d *UnifiedDetector) determineStateAt(output, agentType string, lastActivit
 	// etc. as part of active work (code examples, progress lines).
 	if !isLowVelocity {
 		return StateWorking, ErrorNone
+	}
+
+	// Some agents expose useful work verbs but no durable spinner or tmux
+	// activity update. Reuse the canonical agent parser for that positive
+	// evidence after prompt and error handling, so low-velocity Windsurf/Cursor
+	// panes do not collapse to unknown while preserving the detector's existing
+	// idle and error priorities.
+	switch agent.AgentType(agentType) {
+	case agent.AgentTypeGemini,
+		agent.AgentTypeCursor,
+		agent.AgentTypeWindsurf,
+		agent.AgentTypeAider,
+		agent.AgentTypeOllama:
+		parser := agent.NewParser()
+		if parsed, err := parser.ParseWithHint(output, agent.AgentType(agentType)); err == nil && parsed.IsWorking {
+			return StateWorking, ErrorNone
+		}
 	}
 
 	// Defensive: prompt + low velocity should have been caught at line 88,

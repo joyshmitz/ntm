@@ -192,15 +192,43 @@ func NewClient(opts ...Option) *Client {
 // IsAvailable checks if the Agent Mail server is reachable.
 // Results are cached for 30 seconds to avoid repeated health checks.
 func (c *Client) IsAvailable() bool {
+	return c.IsAvailableContext(context.Background())
+}
+
+// IsAvailableContext checks Agent Mail health while honoring caller
+// cancellation. IsAvailable remains the compatibility entry point for callers
+// without a lifecycle context.
+func (c *Client) IsAvailableContext(ctx context.Context) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
 	// Optimistic check (lock-free)
 	cacheTime := c.availableCacheTime.Load()
 	if cacheTime > 0 && time.Now().Unix()-cacheTime < int64(AvailabilityCacheTTL.Seconds()) {
 		return c.availableCache.Load()
 	}
 
-	// Acquire lock to prevent thundering herd
-	c.healthCheckMu.Lock()
+	// Acquire the health-check lock without losing caller cancellation while a
+	// concurrent probe is in flight. A plain Mutex.Lock would make the context
+	// API wait for that unrelated probe even after its own deadline expired.
+	for !c.healthCheckMu.TryLock() {
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return false
+		case <-timer.C:
+		}
+	}
 	defer c.healthCheckMu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
 
 	// Double-check after acquiring lock
 	cacheTime = c.availableCacheTime.Load()
@@ -209,7 +237,7 @@ func (c *Client) IsAvailable() bool {
 	}
 
 	// Perform health check
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	_, err := c.HealthCheck(ctx)

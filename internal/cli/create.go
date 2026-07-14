@@ -140,25 +140,25 @@ func runCreate(session string, panes int) (err error) {
 			Panes:   panes,
 		})
 		if err != nil {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		resp, err := coerceCreateResponse(result)
 		if err != nil {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return output.PrintJSON(resp)
 	}
 
 	if err := tmux.EnsureInstalled(); err != nil {
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return err
 	}
 
 	if err := tmux.ValidateSessionName(session); err != nil {
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return err
 	}
@@ -226,13 +226,15 @@ func runCreate(session string, panes int) (err error) {
 		results, err := hookExec.RunHooksForEvent(ctx, hooks.EventPreCreate, hookCtx)
 		if err != nil {
 			if IsJSONOutput() {
-				return output.PrintJSON(output.NewError(fmt.Sprintf("pre-create hooks failed: %v", err)))
+				wrapped := fmt.Errorf("pre-create hooks failed: %w", err)
+				return emitJSONFailureEnvelopeWithCause(output.NewError(wrapped.Error()), wrapped)
 			}
 			return fmt.Errorf("pre-create hooks failed: %w", err)
 		}
 		if hooks.AnyFailed(results) {
 			if IsJSONOutput() {
-				return output.PrintJSON(output.NewError(hooks.AllErrors(results).Error()))
+				hookErr := hooks.AllErrors(results)
+				return emitJSONFailureEnvelopeWithCause(output.NewError(hookErr.Error()), hookErr)
 			}
 			return hooks.AllErrors(results)
 		}
@@ -243,7 +245,8 @@ func runCreate(session string, panes int) (err error) {
 		if IsJSONOutput() {
 			// In JSON mode, auto-create directory without prompting
 			if err := os.MkdirAll(dir, 0755); err != nil {
-				return output.PrintJSON(output.NewError(fmt.Sprintf("creating directory: %v", err)))
+				wrapped := fmt.Errorf("creating directory: %w", err)
+				return emitJSONFailureEnvelopeWithCause(output.NewError(wrapped.Error()), wrapped)
 			}
 		} else {
 			fmt.Printf("Directory not found: %s\n", dir)
@@ -267,16 +270,7 @@ func runCreate(session string, panes int) (err error) {
 			existingPanes, _ := tmux.GetPanes(session)
 			paneResponses := make([]output.PaneResponse, len(existingPanes))
 			for i, p := range existingPanes {
-				paneResponses[i] = output.PaneResponse{
-					Index:   p.Index,
-					Title:   p.Title,
-					Type:    agentTypeToString(p.Type),
-					Variant: p.Variant,
-					Active:  p.Active,
-					Width:   p.Width,
-					Height:  p.Height,
-					Command: p.Command,
-				}
+				paneResponses[i] = paneResponseFromTMUX(p)
 			}
 			return output.PrintJSON(output.CreateResponse{
 				TimestampedResponse: output.NewTimestamped(),
@@ -303,7 +297,8 @@ func runCreate(session string, panes int) (err error) {
 	}
 	if err := tmux.CreateSessionWithHistoryLimit(session, dir, historyLimit); err != nil {
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(fmt.Sprintf("creating session: %v", err)))
+			wrapped := fmt.Errorf("creating session: %w", err)
+			return emitJSONFailureEnvelopeWithCause(output.NewError(wrapped.Error()), wrapped)
 		}
 		return fmt.Errorf("creating session: %w", err)
 	}
@@ -314,7 +309,8 @@ func runCreate(session string, panes int) (err error) {
 		for i := 1; i < panes; i++ {
 			if _, err := tmux.SplitWindow(session, dir); err != nil {
 				if IsJSONOutput() {
-					return output.PrintJSON(output.NewError(fmt.Sprintf("creating pane %d: %v", i+1, err)))
+					wrapped := fmt.Errorf("creating pane %d: %w", i+1, err)
+					return emitJSONFailureEnvelopeWithCause(output.NewError(wrapped.Error()), wrapped)
 				}
 				return fmt.Errorf("creating pane %d: %w", i+1, err)
 			}
@@ -334,16 +330,7 @@ func runCreate(session string, panes int) (err error) {
 		finalPanes, _ := tmux.GetPanes(session)
 		paneResponses := make([]output.PaneResponse, len(finalPanes))
 		for i, p := range finalPanes {
-			paneResponses[i] = output.PaneResponse{
-				Index:   p.Index,
-				Title:   p.Title,
-				Type:    agentTypeToString(p.Type),
-				Variant: p.Variant,
-				Active:  p.Active,
-				Width:   p.Width,
-				Height:  p.Height,
-				Command: p.Command,
-			}
+			paneResponses[i] = paneResponseFromTMUX(p)
 		}
 		return output.PrintJSON(output.CreateResponse{
 			TimestampedResponse: output.NewTimestamped(),
@@ -456,16 +443,7 @@ func buildCreateResponse(session string, panes int) (resp output.CreateResponse,
 		existingPanes, _ := tmux.GetPanes(session)
 		paneResponses := make([]output.PaneResponse, len(existingPanes))
 		for i, p := range existingPanes {
-			paneResponses[i] = output.PaneResponse{
-				Index:   p.Index,
-				Title:   p.Title,
-				Type:    agentTypeToString(p.Type),
-				Variant: p.Variant,
-				Active:  p.Active,
-				Width:   p.Width,
-				Height:  p.Height,
-				Command: p.Command,
-			}
+			paneResponses[i] = paneResponseFromTMUX(p)
 		}
 		resp = output.CreateResponse{
 			TimestampedResponse: output.NewTimestamped(),
@@ -506,16 +484,7 @@ func buildCreateResponse(session string, panes int) (resp output.CreateResponse,
 	finalPanes, _ := tmux.GetPanes(session)
 	paneResponses := make([]output.PaneResponse, len(finalPanes))
 	for i, p := range finalPanes {
-		paneResponses[i] = output.PaneResponse{
-			Index:   p.Index,
-			Title:   p.Title,
-			Type:    agentTypeToString(p.Type),
-			Variant: p.Variant,
-			Active:  p.Active,
-			Width:   p.Width,
-			Height:  p.Height,
-			Command: p.Command,
-		}
+		paneResponses[i] = paneResponseFromTMUX(p)
 	}
 
 	resp = output.CreateResponse{

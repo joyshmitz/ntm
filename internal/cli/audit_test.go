@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -188,6 +190,111 @@ func TestRunAuditVerify_ValidLog(t *testing.T) {
 	err := runAuditVerify("test_session")
 	if err != nil {
 		t.Errorf("verify should pass for valid log: %v", err)
+	}
+}
+
+type auditFailureWriter struct {
+	err error
+}
+
+func (w auditFailureWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestRunAuditVerify_JSONAggregatesAllFilesAndFailsOnCorruption(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTestAuditLog(t, tmpDir, "aggregate", 3)
+	corruptPath := filepath.Join(tmpDir, "aggregate-2000-01-01.jsonl")
+	if err := os.WriteFile(corruptPath, []byte("{not-json}\n"), 0o644); err != nil {
+		t.Fatalf("write corrupt audit fixture: %v", err)
+	}
+	withTestSearcher(t, tmpDir)
+
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	var buf bytes.Buffer
+	err := runAuditVerifyTo(&buf, "aggregate")
+	if !errors.Is(err, errJSONFailure) {
+		t.Fatalf("runAuditVerifyTo error = %v, want terminal JSON failure", err)
+	}
+
+	var result auditVerifyResult
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("decode one audit verification document: %v; output=%q", err, buf.String())
+	}
+	if result.Success || result.Verified {
+		t.Fatalf("audit verification result = %+v, want explicit failure", result)
+	}
+	if len(result.Files) != 2 {
+		t.Fatalf("audit verification files = %d, want both matched files", len(result.Files))
+	}
+	failed := 0
+	passed := 0
+	for _, file := range result.Files {
+		if file.Verified {
+			passed++
+		} else {
+			failed++
+		}
+	}
+	if passed != 1 || failed != 1 {
+		t.Fatalf("audit verification aggregate = %+v, want one pass and one failure", result.Files)
+	}
+}
+
+func TestRunAuditVerify_JSONAggregatesSuccessfulFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTestAuditLog(t, tmpDir, "verified", 2)
+	currentPath := filepath.Join(tmpDir, fmt.Sprintf("verified-%s.jsonl", time.Now().Format("2006-01-02")))
+	data, err := os.ReadFile(currentPath)
+	if err != nil {
+		t.Fatalf("read valid audit fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "verified-2000-01-01.jsonl"), data, 0o644); err != nil {
+		t.Fatalf("write second valid audit fixture: %v", err)
+	}
+	withTestSearcher(t, tmpDir)
+
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	var buf bytes.Buffer
+	if err := runAuditVerifyTo(&buf, "verified"); err != nil {
+		t.Fatalf("runAuditVerifyTo error = %v", err)
+	}
+	var result auditVerifyResult
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("decode one audit verification document: %v; output=%q", err, buf.String())
+	}
+	if !result.Success || !result.Verified || len(result.Files) != 2 {
+		t.Fatalf("audit verification result = %+v, want two-file success", result)
+	}
+	for _, file := range result.Files {
+		if !file.Verified || file.Status != "PASS" || file.Error != "" {
+			t.Fatalf("audit verification file = %+v, want clean pass", file)
+		}
+	}
+}
+
+func TestRunAuditVerify_JSONSurfacesEncoderError(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTestAuditLog(t, tmpDir, "encode", 1)
+	withTestSearcher(t, tmpDir)
+
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	writeErr := errors.New("audit writer closed")
+	err := runAuditVerifyTo(auditFailureWriter{err: writeErr}, "encode")
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("runAuditVerifyTo error = %v, want encoder error", err)
+	}
+	if errors.Is(err, errJSONFailure) {
+		t.Fatalf("runAuditVerifyTo error = %v, must not claim a written JSON result", err)
 	}
 }
 

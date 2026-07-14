@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -29,6 +31,31 @@ func TestRenderEnsembleStopOutput_JSON(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "json-session") {
 		t.Error("JSON output should contain session name")
+	}
+}
+
+func TestRenderEnsembleStopFailureOutput_JSONOwnsTerminalFailure(t *testing.T) {
+	cause := errors.New("kill session failed")
+	payload := ensembleStopOutput{
+		GeneratedAt: output.Timestamp(),
+		Session:     "failed-session",
+		Success:     false,
+		FinalStatus: "active",
+		Errors:      1,
+		Error:       cause.Error(),
+	}
+
+	var buf bytes.Buffer
+	err := renderEnsembleStopFailureOutput(&buf, payload, "json", false, cause)
+	if !errors.Is(err, errJSONFailure) || !errors.Is(err, cause) {
+		t.Fatalf("render error = %v, want terminal sentinel and original cause", err)
+	}
+	var decoded ensembleStopOutput
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode exactly one stop failure document: %v; output=%q", err, buf.String())
+	}
+	if decoded.Success || decoded.Error != cause.Error() {
+		t.Fatalf("stop failure payload = %+v", decoded)
 	}
 }
 

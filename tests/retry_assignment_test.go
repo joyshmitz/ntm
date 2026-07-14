@@ -167,23 +167,29 @@ func TestRetryToSpecificPane_Success(t *testing.T) {
 func TestRetryToSpecificPane_ConflictWithExistingAssignment(t *testing.T) {
 	store, _ := setupRetryTestStore(t)
 
-	// Create two assignments
+	// The local index is display-only: both records use index 4 but occupy
+	// different physical tmux panes.
 	_, _ = store.Assign("bd-existing", "Existing Task", 4, "claude", "Agent4", "prompt")
-	_, _ = store.Assign("bd-tofail", "To Fail", 1, "codex", "Agent1", "prompt")
+	setAssignmentCanonicalPaneIdentity(t, store, "bd-existing", "%44")
+	_, _ = store.Assign("bd-tofail", "To Fail", 4, "codex", "Agent1", "prompt")
+	setAssignmentCanonicalPaneIdentity(t, store, "bd-tofail", "%45")
 	_ = store.MarkFailed("bd-tofail", "crashed")
 
-	// Check if pane 4 already has an active assignment
-	paneAssignments := store.ListByPane(4)
+	// Check if physical pane %44 already has an active assignment.
 	hasActiveOnPane := false
-	for _, a := range paneAssignments {
-		if a.Status == assignment.StatusAssigned || a.Status == assignment.StatusWorking {
+	for _, a := range store.List() {
+		paneID, err := assignment.CanonicalPaneIdentity(a)
+		if err != nil {
+			t.Fatalf("resolve assignment %s identity: %v", a.BeadID, err)
+		}
+		if paneID == "%44" && (a.Status == assignment.StatusAssigned || a.Status == assignment.StatusWorking) {
 			hasActiveOnPane = true
 			break
 		}
 	}
 
 	if !hasActiveOnPane {
-		t.Error("expected pane 4 to have active assignment")
+		t.Error("expected physical pane %44 to have active assignment")
 	}
 }
 

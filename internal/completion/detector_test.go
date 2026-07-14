@@ -3,10 +3,12 @@ package completion
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -247,7 +249,7 @@ func TestDetectionMethods(t *testing.T) {
 func TestCheckNowNoStore(t *testing.T) {
 	d := New("test-session", nil)
 
-	_, err := d.CheckNow(0)
+	_, err := d.CheckNow("%1")
 	if err == nil {
 		t.Error("CheckNow should fail without assignment store")
 	}
@@ -257,7 +259,7 @@ func TestCheckNowNoAssignment(t *testing.T) {
 	store := assignment.NewStore("test-session")
 	d := New("test-session", store)
 
-	_, err := d.CheckNow(99)
+	_, err := d.CheckNow("%99")
 	if err == nil {
 		t.Error("CheckNow should fail for pane with no assignment")
 	}
@@ -271,10 +273,11 @@ func TestIdleDetection(t *testing.T) {
 
 	now := time.Now()
 	a := &assignment.Assignment{
-		BeadID:     "bd-test",
-		Pane:       0,
-		AgentType:  "claude",
-		AssignedAt: now,
+		BeadID:       "bd-test",
+		Pane:         0,
+		OccupancyKey: "%1",
+		AgentType:    "claude",
+		AssignedAt:   now,
 	}
 
 	// First check - initialize activity state
@@ -313,7 +316,7 @@ func TestIdleDetectionRequiresContinuousSafeObservation(t *testing.T) {
 	cfg.IdleThreshold = 10 * time.Millisecond
 	d := NewWithConfig("test-session", assignment.NewStore("test-session"), cfg)
 	now := time.Now()
-	a := &assignment.Assignment{BeadID: "bd-safe", Pane: 0, AssignedAt: now}
+	a := &assignment.Assignment{BeadID: "bd-safe", Pane: 0, OccupancyKey: "%1", AssignedAt: now}
 	safe := statuspkg.PaneObservation{Current: statuspkg.StateObservation{
 		Status:     statuspkg.AgentStatus{State: statuspkg.StateIdle},
 		Freshness:  statuspkg.FreshnessFresh,
@@ -351,16 +354,18 @@ func TestIdleDetectionResetsForNewAssignmentOnSamePane(t *testing.T) {
 
 	now := time.Now()
 	first := &assignment.Assignment{
-		BeadID:     "bd-old",
-		Pane:       0,
-		AgentType:  "claude",
-		AssignedAt: now,
+		BeadID:       "bd-old",
+		Pane:         0,
+		OccupancyKey: "%1",
+		AgentType:    "claude",
+		AssignedAt:   now,
 	}
 	second := &assignment.Assignment{
-		BeadID:     "bd-new",
-		Pane:       0,
-		AgentType:  "claude",
-		AssignedAt: now.Add(time.Second),
+		BeadID:       "bd-new",
+		Pane:         0,
+		OccupancyKey: "%1",
+		AgentType:    "claude",
+		AssignedAt:   now.Add(time.Second),
 	}
 
 	if event := d.checkIdle(first, "initial output", now); event != nil {
@@ -428,14 +433,18 @@ func TestRecordEventLockedScopesDedupToAssignmentAttempt(t *testing.T) {
 
 	now := time.Now()
 	first := &assignment.Assignment{
-		BeadID:     "bd-test",
-		Pane:       0,
-		AssignedAt: now,
+		BeadID:         "bd-test",
+		Pane:           0,
+		OccupancyKey:   "%1",
+		AssignedAt:     now,
+		IdempotencyKey: "first-generation",
 	}
 	retry := &assignment.Assignment{
-		BeadID:     "bd-test",
-		Pane:       0,
-		AssignedAt: now.Add(time.Second),
+		BeadID:         "bd-test",
+		Pane:           0,
+		OccupancyKey:   "%1",
+		AssignedAt:     now,
+		IdempotencyKey: "retry-generation",
 	}
 
 	d.mu.Lock()
@@ -458,6 +467,457 @@ func TestRecordEventLockedScopesDedupToAssignmentAttempt(t *testing.T) {
 	}
 }
 
+func TestPersistCompletionEventRejectsSupersededGeneration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "completion-generation-cas"
+	const beadID = "ntm-completion-generation-cas"
+	store := assignment.NewStore(session)
+	observed, err := store.Assign(beadID, "Old generation", 1, "codex", "OldAgent", "old work")
+	if err != nil {
+		t.Fatalf("Assign old generation: %v", err)
+	}
+	winner, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("LoadStoreStrict winner: %v", err)
+	}
+	newGeneration, err := winner.Assign(beadID, "New generation", 2, "codex", "NewAgent", "new work")
+	if err != nil {
+		t.Fatalf("Assign new generation: %v", err)
+	}
+	winner.Assignments[beadID].ClaimActor = "NewAgent/new-generation"
+	winner.Assignments[beadID].ReservationRequired = true
+	winner.Assignments[beadID].ReservationState = assignment.ReservationReserved
+	winner.Assignments[beadID].ReservationCompleted = true
+	winner.Assignments[beadID].ReservationIDs = []int{902}
+	winner.Assignments[beadID].ReservedPaths = []string{"internal/completion/winner.go"}
+	if err := winner.Save(); err != nil {
+		t.Fatalf("persist winner lease: %v", err)
+	}
+	newGeneration = winner.Get(beadID)
+	detector := New(session, store)
+	reconcileCalls := 0
+	detector.SetTerminalReconciler(func(context.Context, *assignment.Assignment) (bool, error) {
+		reconcileCalls++
+		return false, errors.New("stale generation reached external reconciliation")
+	})
+	applied, err := detector.persistCompletionEvent(t.Context(), observed, &CompletionEvent{BeadID: beadID, Pane: 1, Method: MethodPatternMatch})
+	if err != nil || applied {
+		t.Fatalf("stale completion applied=%v error=%v", applied, err)
+	}
+	failedApplied, err := detector.persistCompletionEvent(t.Context(), observed, &CompletionEvent{BeadID: beadID, Pane: 1, Method: MethodIdle, IsFailed: true, FailReason: "stale idle"})
+	if err != nil || failedApplied {
+		t.Fatalf("stale failure applied=%v error=%v", failedApplied, err)
+	}
+	stored, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload winner: %v", err)
+	}
+	current := stored.Get(beadID)
+	if reconcileCalls != 0 {
+		t.Fatalf("stale completion invoked external reconciler %d times", reconcileCalls)
+	}
+	if current == nil || current.AssignedAt != newGeneration.AssignedAt || current.AgentName != "NewAgent" || current.Status != assignment.StatusAssigned || current.CompletedAt != nil || current.FailedAt != nil ||
+		current.ClearState != assignment.ClearStateNone || !reflect.DeepEqual(current.ReservationIDs, []int{902}) || !reflect.DeepEqual(current.ReservedPaths, []string{"internal/completion/winner.go"}) {
+		t.Fatalf("stale completion mutated replacement: %+v", current)
+	}
+}
+
+func TestPersistCompletionEventAppliesExactGeneration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := assignment.NewStore("completion-exact-generation")
+	observed, err := store.Assign("ntm-completion-exact", "Exact", 1, "codex", "CodexOne", "work")
+	if err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	detector := New("completion-exact-generation", store)
+	applied, err := detector.persistCompletionEvent(t.Context(), observed, &CompletionEvent{BeadID: observed.BeadID, Pane: observed.Pane, Method: MethodBeadClosed})
+	if err != nil || !applied {
+		t.Fatalf("exact completion applied=%v error=%v", applied, err)
+	}
+	completed := store.Get(observed.BeadID)
+	if completed == nil || completed.Status != assignment.StatusCompleted || completed.CompletedAt == nil {
+		t.Fatalf("exact completion state=%+v", completed)
+	}
+}
+
+func TestPersistCompletionEventRejectsDifferentReasonFromDurableBarrier(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "completion-durable-reason-wins"
+	const beadID = "ntm-completion-durable-reason-wins"
+	store := assignment.NewStore(session)
+	observed, err := store.Assign(beadID, "Durable failure reason", 1, "codex", "CodexOne", "work")
+	if err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	barrier, applied, err := store.BeginTerminalReconciliationIfCurrent(t.Context(), observed, assignment.StatusFailed, "durable reason")
+	if err != nil || !applied || barrier == nil {
+		t.Fatalf("seed terminal barrier=%+v applied=%v error=%v", barrier, applied, err)
+	}
+
+	detector := New(session, store)
+	reconcileCalls := 0
+	detector.SetTerminalReconciler(func(context.Context, *assignment.Assignment) (bool, error) {
+		reconcileCalls++
+		return true, nil
+	})
+	applied, err = detector.persistCompletionEvent(t.Context(), observed, &CompletionEvent{
+		BeadID: beadID, Pane: 1, Method: MethodIdle, IsFailed: true, FailReason: "competing reason",
+	})
+	if err != nil || applied {
+		t.Fatalf("competing reason applied=%v error=%v", applied, err)
+	}
+	if reconcileCalls != 0 {
+		t.Fatalf("competing reason invoked reconciler %d times", reconcileCalls)
+	}
+	current := store.Get(beadID)
+	if current == nil || current.PendingTerminalStatus != assignment.StatusFailed || current.PendingTerminalReason != "durable reason" {
+		t.Fatalf("durable barrier changed: %+v", current)
+	}
+}
+
+func TestPendingCompletionReconciliationReleasesLeaseOnceAndEmitsOnlyAfterTerminal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "completion-terminal-retry"
+	const beadID = "ntm-completion-terminal-retry"
+	store := assignment.NewStore(session)
+	now := time.Now().UTC()
+	store.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Reserved completion", Pane: 1, AgentType: "codex", AgentName: "CodexOne",
+		Status: assignment.StatusAssigned, AssignedAt: now, IdempotencyKey: "completion-terminal-retry-key",
+		ClaimActor: "CodexOne/completion-terminal-retry-key", DispatchTarget: "%91", OccupancyKey: "%91",
+		DispatchState: assignment.DispatchSent, DispatchReceiptID: "mail-91", ReservationRequired: true,
+		ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservedPaths: []string{"internal/completion/detector.go"}, ReservationIDs: []int{911},
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed reserved completion: %v", err)
+	}
+	observed := store.Get(beadID)
+	detector := New(session, store)
+	leaseReleases := 0
+	claimReleases := 0
+	attempts := 0
+	detector.SetTerminalReconciler(func(ctx context.Context, current *assignment.Assignment) (bool, error) {
+		attempts++
+		if current.ClearState == assignment.ClearStateReservationReleasing {
+			leaseReleases++
+			if !reflect.DeepEqual(current.ReservationIDs, []int{911}) {
+				t.Fatalf("lease release observed IDs=%v", current.ReservationIDs)
+			}
+			if _, err := store.RecordClearLeasesReleased(ctx, current.BeadID); err != nil {
+				return false, err
+			}
+			if attempts == 1 {
+				return false, errors.New("injected interruption after durable lease checkpoint")
+			}
+		}
+		current = store.Get(current.BeadID)
+		if !current.TerminalClaimReleased {
+			claimReleases++
+			var err error
+			current, err = store.RecordTerminalClaimReleased(ctx, current.BeadID)
+			if err != nil {
+				return false, err
+			}
+		}
+		if err := store.CompleteTerminalReconciliation(ctx, current.BeadID, current.PendingTerminalStatus, current.PendingTerminalReason); err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+
+	applied, err := detector.persistCompletionEvent(t.Context(), observed, &CompletionEvent{BeadID: beadID, Pane: 1, Method: MethodPatternMatch})
+	if err == nil || applied || !strings.Contains(err.Error(), "injected interruption") {
+		t.Fatalf("interrupted completion applied=%v error=%v", applied, err)
+	}
+	pending := store.Get(beadID)
+	if pending == nil || pending.Status != assignment.StatusAssigned || pending.ClearState != assignment.ClearStateLeasesReleased ||
+		pending.PendingTerminalStatus != assignment.StatusCompleted || len(pending.ReservationIDs) != 0 || len(pending.ReservedPaths) != 0 {
+		t.Fatalf("interrupted completion barrier=%+v", pending)
+	}
+
+	events := make(chan CompletionEvent, 1)
+	detector.checkAll(t.Context(), events)
+	select {
+	case event := <-events:
+		if event.BeadID != beadID || event.IsFailed {
+			t.Fatalf("resumed completion event=%+v", event)
+		}
+	default:
+		t.Fatal("completion event was not emitted after terminal reconciliation")
+	}
+	if leaseReleases != 1 || claimReleases != 1 || attempts != 2 {
+		t.Fatalf("reconciliation side effects lease=%d claim=%d attempts=%d, want 1/1/2", leaseReleases, claimReleases, attempts)
+	}
+	terminal := store.Get(beadID)
+	if terminal == nil || terminal.Status != assignment.StatusCompleted || terminal.CompletedAt == nil || terminal.ClearState != assignment.ClearStateNone ||
+		terminal.PendingTerminalStatus != "" || len(terminal.ReservationIDs) != 0 || len(terminal.ReservedPaths) != 0 {
+		t.Fatalf("terminal completion=%+v", terminal)
+	}
+}
+
+func TestCompletionOutboxSingleConsumerLeaseAndExpiryRecoveryAcrossDetectors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "completion-outbox-restart"
+	const beadID = "ntm-completion-outbox-restart"
+	now := time.Now().UTC()
+	store := assignment.NewStore(session)
+	store.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Outbox restart", Pane: 1, AgentType: "codex", AgentName: "CodexOne",
+		Status: assignment.StatusAssigned, AssignedAt: now, IdempotencyKey: "completion-outbox-generation",
+		DispatchTarget: "%91", OccupancyKey: "%91", DispatchState: assignment.DispatchSent,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed assignment: %v", err)
+	}
+	observed := store.Get(beadID)
+	detector := New(session, store)
+	applied, err := detector.persistCompletionEvent(t.Context(), observed, &CompletionEvent{
+		BeadID: beadID, Pane: 1, PaneID: "%91", Method: MethodPatternMatch, Timestamp: now,
+	})
+	if err != nil || !applied {
+		t.Fatalf("persist terminal completion applied=%v error=%v", applied, err)
+	}
+	terminal := store.Get(beadID)
+	if terminal == nil || terminal.Status != assignment.StatusCompleted || terminal.ClearState != assignment.ClearStateNone || terminal.PendingCompletionEventID == "" {
+		t.Fatalf("terminal outbox row=%+v", terminal)
+	}
+	eventID := terminal.PendingCompletionEventID
+	event, err := completionEventFromDurableTerminal(terminal, nil)
+	if err != nil {
+		t.Fatalf("build durable completion event: %v", err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if detector.emitCompletionEvent(cancelled, terminal, event, make(chan CompletionEvent)) {
+		t.Fatal("cancelled enqueue reported success")
+	}
+	if current := store.Get(beadID); current == nil || current.PendingCompletionEventID != eventID {
+		t.Fatalf("cancelled enqueue cleared outbox: %+v", current)
+	}
+	if current := store.Get(beadID); current.CompletionConsumerToken != "" || current.CompletionLeaseExpiresAt != nil {
+		t.Fatalf("canceled pre-claim enqueue created a lease: %+v", current)
+	}
+
+	cfg := DefaultConfig()
+	cfg.CompletionLeaseDuration = 500 * time.Millisecond
+	storeA, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load detector A store: %v", err)
+	}
+	storeB, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load detector B store: %v", err)
+	}
+	detectorA := NewWithConfig(session, storeA, cfg)
+	detectorA.consumerToken = "completion-consumer-a"
+	detectorB := NewWithConfig(session, storeB, cfg)
+	detectorB.consumerToken = "completion-consumer-b"
+	eventsA := make(chan CompletionEvent, 1)
+	eventsB := make(chan CompletionEvent, 1)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, contender := range []struct {
+		detector *CompletionDetector
+		events   chan CompletionEvent
+	}{{detectorA, eventsA}, {detectorB, eventsB}} {
+		contender := contender
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			contender.detector.checkAll(t.Context(), contender.events)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	handlerCalls := 0
+	var firstReplay CompletionEvent
+	for _, events := range []chan CompletionEvent{eventsA, eventsB} {
+		select {
+		case replay := <-events:
+			handlerCalls++
+			firstReplay = replay
+		default:
+		}
+	}
+	if handlerCalls != 1 || firstReplay.EventID != eventID || firstReplay.BeadID != beadID || firstReplay.ConsumerToken == "" {
+		t.Fatalf("concurrent detector handlers=%d replay=%+v, want exactly one", handlerCalls, firstReplay)
+	}
+	durable, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload claimed completion event: %v", err)
+	}
+	claimed := durable.Get(beadID)
+	if claimed == nil || claimed.CompletionConsumerToken != firstReplay.ConsumerToken || claimed.CompletionLeaseExpiresAt == nil {
+		t.Fatalf("durable completion consumer lease=%+v replay=%+v", claimed, firstReplay)
+	}
+
+	immediateStore, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load immediate recovery store: %v", err)
+	}
+	immediate := NewWithConfig(session, immediateStore, cfg)
+	immediate.consumerToken = "completion-consumer-immediate"
+	immediateEvents := make(chan CompletionEvent, 1)
+	immediate.checkAll(t.Context(), immediateEvents)
+	select {
+	case replay := <-immediateEvents:
+		t.Fatalf("live completion lease replayed to second handler: %+v", replay)
+	default:
+	}
+
+	// Model a process crash: no acknowledgement and no heartbeat renewal. Once
+	// the durable lease expires, a fresh detector may claim and replay it.
+	time.Sleep(750 * time.Millisecond)
+	recoveryStore, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load expired-lease recovery store: %v", err)
+	}
+	recovery := NewWithConfig(session, recoveryStore, cfg)
+	recovery.consumerToken = "completion-consumer-recovery"
+	recoveryEvents := make(chan CompletionEvent, 1)
+	recovery.checkAll(t.Context(), recoveryEvents)
+	var recovered CompletionEvent
+	select {
+	case recovered = <-recoveryEvents:
+	default:
+		t.Fatal("expired completion lease was not replayed")
+	}
+	if recovered.EventID != eventID || recovered.ConsumerToken != recovery.consumerToken ||
+		recovered.Timestamp != firstReplay.Timestamp || recovered.Duration != firstReplay.Duration {
+		t.Fatalf("expired-lease recovery replay=%+v first=%+v", recovered, firstReplay)
+	}
+	if acknowledged, err := durable.AcknowledgeCompletionEvent(t.Context(), beadID, eventID, firstReplay.ConsumerToken); err != nil || acknowledged {
+		t.Fatalf("stale consumer acknowledgement applied=%v error=%v", acknowledged, err)
+	}
+	if acknowledged, err := recoveryStore.AcknowledgeCompletionEvent(t.Context(), beadID, eventID, recovered.ConsumerToken); err != nil || !acknowledged {
+		t.Fatalf("recovery consumer acknowledgement applied=%v error=%v", acknowledged, err)
+	}
+	afterAck := make(chan CompletionEvent, 1)
+	New(session, recoveryStore).checkAll(t.Context(), afterAck)
+	select {
+	case replay := <-afterAck:
+		t.Fatalf("acknowledged event replayed: %+v", replay)
+	default:
+	}
+}
+
+func TestCompletionDetectorDoesNotRefreshRecentlyQueuedExpiredLease(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "completion-queued-dedup-lease"
+		beadID  = "ntm-completion-queued-dedup-lease"
+		eventID = "completion-queued-dedup-event"
+	)
+	detectedAt := time.Now().UTC()
+	store := assignment.NewStore(session)
+	store.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, Status: assignment.StatusCompleted, AssignedAt: detectedAt,
+		DispatchTarget: "%92", OccupancyKey: "%92", IdempotencyKey: "queued-dedup-generation",
+		PendingCompletionEventID: eventID, CompletionDetectedAt: &detectedAt,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed queued completion event: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.CompletionLeaseDuration = 40 * time.Millisecond
+	cfg.DedupWindow = 5 * time.Second
+	detector := NewWithConfig(session, store, cfg)
+	detector.consumerToken = "completion-queued-dedup-consumer"
+	events := make(chan CompletionEvent, 1)
+	terminal := store.Get(beadID)
+	event, err := completionEventFromDurableTerminal(terminal, nil)
+	if err != nil {
+		t.Fatalf("build queued completion event: %v", err)
+	}
+	if !detector.emitCompletionEvent(t.Context(), terminal, event, events) {
+		t.Fatal("initial queued completion emission was canceled")
+	}
+	select {
+	case <-events:
+	default:
+		t.Fatal("initial queued completion event was not emitted")
+	}
+	claimed := store.Get(beadID)
+	if claimed == nil || claimed.CompletionLeaseExpiresAt == nil {
+		t.Fatalf("initial queued completion lease=%+v", claimed)
+	}
+	initialExpiry := *claimed.CompletionLeaseExpiresAt
+	time.Sleep(cfg.CompletionLeaseDuration + 20*time.Millisecond)
+
+	if !detector.emitCompletionEvent(t.Context(), store.Get(beadID), event, events) {
+		t.Fatal("deduplicated queued completion emission was canceled")
+	}
+	select {
+	case replay := <-events:
+		t.Fatalf("recent queued completion event was re-emitted: %+v", replay)
+	default:
+	}
+	afterDedup := store.Get(beadID)
+	if afterDedup == nil || afterDedup.CompletionLeaseExpiresAt == nil || !afterDedup.CompletionLeaseExpiresAt.Equal(initialExpiry) || afterDedup.CompletionLeaseExpiresAt.After(time.Now().UTC()) {
+		t.Fatalf("recent queued completion lease was refreshed: initial=%v current=%+v", initialExpiry, afterDedup)
+	}
+
+	// Move the detector's read-only dedup marker past its window. A later scan
+	// may now reacquire and replay the still-pending expired event for ACK retry.
+	detector.mu.Lock()
+	detector.recentEvents[assignmentAttemptKey(afterDedup)] = time.Now().Add(-cfg.DedupWindow)
+	detector.mu.Unlock()
+	if !detector.emitCompletionEvent(t.Context(), afterDedup, event, events) {
+		t.Fatal("post-dedup queued completion emission was canceled")
+	}
+	select {
+	case replay := <-events:
+		if replay.EventID != eventID || replay.ConsumerToken != detector.consumerToken {
+			t.Fatalf("post-dedup replay=%+v", replay)
+		}
+	default:
+		t.Fatal("expired queued completion event was not replayed after dedup window")
+	}
+	replayed := store.Get(beadID)
+	if replayed == nil || replayed.CompletionLeaseExpiresAt == nil || !replayed.CompletionLeaseExpiresAt.After(initialExpiry) {
+		t.Fatalf("post-dedup completion lease was not reacquired: initial=%v current=%+v", initialExpiry, replayed)
+	}
+}
+
+func TestCompletionOutboxRejectsAmbiguousPaneIdentityAndRemainsPending(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "completion-outbox-pane-migration"
+	const beadID = "ntm-completion-outbox-pane-migration"
+	now := time.Now().UTC()
+	store := assignment.NewStore(session)
+	store.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, Pane: 1, Status: assignment.StatusCompleted, AssignedAt: now,
+		DispatchTarget: "0.1", OccupancyKey: "0.1", IdempotencyKey: "legacy-completion-generation",
+		PendingCompletionEventID: "legacy-completion-event", CompletionDetectedAt: &now,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed ambiguous completion outbox: %v", err)
+	}
+
+	terminal := store.Get(beadID)
+	event, err := completionEventFromDurableTerminal(terminal, nil)
+	var migrationErr *assignment.PaneIdentityMigrationError
+	if event != nil || !errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) || !errors.As(err, &migrationErr) {
+		t.Fatalf("durable completion event=%+v error=%v, want typed pane migration error", event, err)
+	}
+
+	events := make(chan CompletionEvent, 1)
+	New(session, store).checkAll(t.Context(), events)
+	select {
+	case emitted := <-events:
+		t.Fatalf("ambiguous completion event emitted: %+v", emitted)
+	default:
+	}
+	current := store.Get(beadID)
+	if current == nil || current.PendingCompletionEventID != "legacy-completion-event" || current.CompletionDetectedAt == nil {
+		t.Fatalf("ambiguous completion outbox was acknowledged or discarded: %+v", current)
+	}
+}
+
 func TestResolveAssignmentPaneUsesDurableIdentityAcrossWindows(t *testing.T) {
 	panes := []tmux.Pane{
 		{ID: "%1", WindowIndex: 0, Index: 0},
@@ -473,11 +933,9 @@ func TestResolveAssignmentPaneUsesDurableIdentityAcrossWindows(t *testing.T) {
 	}
 
 	byAddress, err := resolveAssignmentPane("proj", &assignment.Assignment{Pane: 0, DispatchTarget: "proj:1.0"}, panes)
-	if err != nil {
-		t.Fatalf("resolve by canonical address: %v", err)
-	}
-	if byAddress.ID != "%9" {
-		t.Fatalf("resolved by address=%+v", byAddress)
+	var migrationErr *assignment.PaneIdentityMigrationError
+	if byAddress.ID != "" || !errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) || !errors.As(err, &migrationErr) {
+		t.Fatalf("window-address resolution=%+v error=%v, want typed migration error", byAddress, err)
 	}
 
 	stable, err := resolveAssignmentPane("proj", &assignment.Assignment{
@@ -543,25 +1001,41 @@ func TestAssignmentObservationShowsWorkingRequiresFreshAssignedEvidence(t *testi
 	}
 }
 
-func TestResolveAssignmentPaneRejectsAmbiguousLegacyIndex(t *testing.T) {
+func TestResolveAssignmentPaneRejectsLegacyIndexWithTypedMigrationError(t *testing.T) {
 	panes := []tmux.Pane{
 		{ID: "%1", WindowIndex: 0, Index: 0},
 		{ID: "%9", WindowIndex: 1, Index: 0},
 	}
-	_, err := resolveAssignmentPane("proj", &assignment.Assignment{Pane: 0}, panes)
-	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
-		t.Fatalf("resolve legacy error=%v, want ambiguity", err)
+	legacy := &assignment.Assignment{BeadID: "ntm-legacy-pane", Pane: 0, Status: assignment.StatusAssigned}
+	_, err := resolveAssignmentPane("proj", legacy, panes)
+	var migrationErr *assignment.PaneIdentityMigrationError
+	if !errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) || !errors.As(err, &migrationErr) {
+		t.Fatalf("resolve legacy error=%v, want typed migration error", err)
+	}
+	if migrationErr.BeadID != legacy.BeadID || migrationErr.Pane != legacy.Pane {
+		t.Fatalf("migration error=%+v", migrationErr)
+	}
+
+	store := assignment.NewStore("completion-legacy-no-mutation")
+	store.Assignments[legacy.BeadID] = legacy
+	detector := New("completion-legacy-no-mutation", store)
+	event, checkErr := detector.checkAssignment(t.Context(), legacy)
+	if event != nil || !errors.Is(checkErr, assignment.ErrPaneIdentityMigrationRequired) {
+		t.Fatalf("check legacy event=%+v error=%v", event, checkErr)
+	}
+	if current := store.Get(legacy.BeadID); current == nil || current.Status != assignment.StatusAssigned {
+		t.Fatalf("legacy rejection mutated assignment: %+v", current)
 	}
 }
 
-func TestCheckNowRejectsDuplicateLegacyPaneAssignments(t *testing.T) {
+func TestCheckNowRejectsLegacyPaneAssignmentsWithMigrationError(t *testing.T) {
 	store := assignment.NewStore("completion-ambiguous")
 	now := time.Now().UTC()
 	store.Assignments["bd-a"] = &assignment.Assignment{BeadID: "bd-a", Pane: 0, Status: assignment.StatusAssigned, AssignedAt: now}
 	store.Assignments["bd-b"] = &assignment.Assignment{BeadID: "bd-b", Pane: 0, Status: assignment.StatusAssigned, AssignedAt: now}
 	detector := New("completion-ambiguous", store)
-	if _, err := detector.CheckNow(0); err == nil || !strings.Contains(err.Error(), "2 active assignments") {
-		t.Fatalf("CheckNow error=%v, want explicit ambiguity", err)
+	if _, err := detector.CheckNow("%1"); !errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) {
+		t.Fatalf("CheckNow error=%v, want migration requirement", err)
 	}
 }
 
@@ -845,12 +1319,17 @@ func TestCheckNowWithActiveAssignment(t *testing.T) {
 	if _, err := store.Assign("bd-test", "Test Bead", 5, "claude", "agent-1", "test prompt"); err != nil {
 		t.Fatalf("Assign: %v", err)
 	}
+	store.Assignments["bd-test"].OccupancyKey = "%5"
+	store.Assignments["bd-test"].DispatchTarget = "%5"
+	if err := store.Save(); err != nil {
+		t.Fatalf("persist canonical pane identity: %v", err)
+	}
 
 	d := New(session, store)
 
 	// CheckNow will fail because we can't query real tmux panes,
 	// but it should find the assignment and attempt to check it
-	event, err := d.CheckNow(5)
+	event, err := d.CheckNow("%5")
 	// The error comes from tmux.GetPanes failing, not from assignment lookup
 	// In test environment without tmux, this returns nil event
 	if err != nil {
@@ -870,10 +1349,11 @@ func TestIdleDetectionNoBurstActive(t *testing.T) {
 
 	now := time.Now()
 	a := &assignment.Assignment{
-		BeadID:     "bd-test",
-		Pane:       0,
-		AgentType:  "claude",
-		AssignedAt: now,
+		BeadID:       "bd-test",
+		Pane:         0,
+		OccupancyKey: "%1",
+		AgentType:    "claude",
+		AssignedAt:   now,
 	}
 
 	// Initialize state
@@ -1113,15 +1593,19 @@ func TestCompletionPatternRequiresBeadClosedConfirmation(t *testing.T) {
 	d.brAvailable = &brAvail
 
 	a := &assignment.Assignment{
-		BeadID:     "bd-echo",
-		Pane:       pane.Index,
-		AgentType:  "claude",
-		AssignedAt: time.Now(),
+		BeadID:       "bd-echo",
+		Pane:         pane.Index,
+		OccupancyKey: pane.ID,
+		AgentType:    "claude",
+		AssignedAt:   time.Now(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	event := d.checkAssignment(ctx, a)
+	event, checkErr := d.checkAssignment(ctx, a)
+	if checkErr != nil {
+		t.Fatalf("checkAssignment: %v", checkErr)
+	}
 	if event != nil && !event.IsFailed && event.Method == MethodPatternMatch {
 		t.Fatalf("prompt echo wrongly marked complete: %+v", event)
 	}
@@ -1160,19 +1644,23 @@ func TestIdleTimeoutWithOpenBeadReportsFailed(t *testing.T) {
 	d.brAvailable = &brAvail
 
 	a := &assignment.Assignment{
-		BeadID:     "bd-stalled",
-		Pane:       pane.Index,
-		AgentType:  "claude",
-		AssignedAt: time.Now(),
+		BeadID:       "bd-stalled",
+		Pane:         pane.Index,
+		OccupancyKey: pane.ID,
+		AgentType:    "claude",
+		AssignedAt:   time.Now(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// Prime the idle tracker, then let the pane go quiet past the threshold.
-	_ = d.checkAssignment(ctx, a)
+	_, _ = d.checkAssignment(ctx, a)
 	time.Sleep(20 * time.Millisecond)
 
-	event := d.checkAssignment(ctx, a)
+	event, checkErr := d.checkAssignment(ctx, a)
+	if checkErr != nil {
+		t.Fatalf("checkAssignment: %v", checkErr)
+	}
 	if event == nil {
 		t.Skip("no idle event produced in this environment (pane churn)")
 	}

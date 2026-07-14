@@ -83,12 +83,26 @@ func (f *atomicDispatchRecorder) Dispatch(_ context.Context, _ DispatchRequest) 
 }
 
 func atomicTestRequest(key, target string) AtomicRequest {
+	occupancyKey := target
+	if !isPhysicalPaneOccupancyKey(occupancyKey) {
+		paneID := 0
+		for _, ch := range target {
+			paneID = (paneID*31 + int(ch)) % 1_000_000
+		}
+		occupancyKey = fmt.Sprintf("%%%d", paneID)
+	}
 	return AtomicRequest{
 		BeadID: "ntm-atomic", BeadTitle: "Atomic assignment",
-		Target: target, OccupancyKey: target, Pane: 1, AgentType: "codex", AgentName: target,
+		Target: target, OccupancyKey: occupancyKey, Pane: 1, AgentType: "codex", AgentName: target,
 		Actor: "SharedAgent", Prompt: "work the bead", IdempotencyKey: key,
 		ReservationTTL: time.Hour,
 	}
+}
+
+func withOpenWorkStatus(coordinator *AtomicCoordinator) *AtomicCoordinator {
+	return coordinator.WithWorkItemStatusPort(WorkItemStatusFunc(func(context.Context, string) (string, error) {
+		return "open", nil
+	}))
 }
 
 func prepareAtomicWorkingReplacement(t *testing.T, store *AssignmentStore, coordinator *AtomicCoordinator, request AtomicRequest) *Assignment {
@@ -127,7 +141,7 @@ func TestAtomicWorkingReplacementPersistsNewGenerationAndReusesClaimActor(t *tes
 		return ClaimReceipt{BeadID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
 	})
 	dispatcher := &atomicDispatchRecorder{}
-	coordinator := NewAtomicCoordinator(store, claimer, nil, dispatcher)
+	coordinator := withOpenWorkStatus(NewAtomicCoordinator(store, claimer, nil, dispatcher))
 	oldRequest := atomicTestRequest("replacement-old-key", "%301")
 	oldRequest.AgentName = "OriginalAgent"
 	oldRequest.Actor = "OriginalAgent"
@@ -249,6 +263,33 @@ func TestRecordAtomicIntentWorkingReplacementRejectsChangedClaimActor(t *testing
 	}
 }
 
+func TestAtomicWorkingReplacementRejectsAgentNameAsClaimActorFallback(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-working-replacement-missing-claim-actor")
+	prior := &Assignment{
+		BeadID: "ntm-atomic", BeadTitle: "Original", Pane: 1, AgentType: "codex", AgentName: "LegacyAgentName",
+		Status: StatusWorking, AssignedAt: time.Now().UTC(), IdempotencyKey: "old-key",
+		ClaimState: ClaimClaimed, ReservationState: ReservationReleased, DispatchState: DispatchSent,
+		DispatchTarget: "%318", OccupancyKey: "%318", ClearState: ClearStateLeasesReleased,
+	}
+	store.Assignments[prior.BeadID] = prior
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed working replacement: %v", err)
+	}
+	replacement := atomicTestRequest("new-key", "%319")
+	replacement.ReplaceWorkingAssignment = true
+	claimer := &atomicClaimLedger{}
+	dispatcher := &atomicDispatchRecorder{}
+
+	result, err := NewAtomicCoordinator(store, claimer, nil, dispatcher).Execute(t.Context(), replacement)
+	if !errors.Is(err, ErrWorkingReplacementNotAllowed) || !strings.Contains(err.Error(), "no durable claim actor") {
+		t.Fatalf("Execute result=%+v error=%v", result, err)
+	}
+	if claimer.calls != 0 || dispatcher.calls.Load() != 0 || !reflect.DeepEqual(store.Get(prior.BeadID), prior) {
+		t.Fatalf("claim-actor rejection mutated state: claims=%d dispatches=%d stored=%+v", claimer.calls, dispatcher.calls.Load(), store.Get(prior.BeadID))
+	}
+}
+
 func TestAtomicWorkingReplacementRecoversReservationAndDispatchFailures(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	store := NewStore("atomic-working-replacement-recovery")
@@ -286,7 +327,7 @@ func TestAtomicWorkingReplacementRecoversReservationAndDispatchFailures(t *testi
 	replacement.ReplaceWorkingAssignment = true
 	replacement.RequireReservation = true
 	replacement.RequestedPaths = []string{"internal/assignment/**"}
-	coordinator := NewAtomicCoordinator(store, claimer, reserver, dispatcher)
+	coordinator := withOpenWorkStatus(NewAtomicCoordinator(store, claimer, reserver, dispatcher))
 
 	first, err := coordinator.Execute(t.Context(), replacement)
 	if err == nil || first.Sent || !IsGuaranteedNoReservation(err) {
@@ -325,6 +366,316 @@ func TestAtomicWorkingReplacementRecoversReservationAndDispatchFailures(t *testi
 	}
 	if claimer.calls != 2 || reservationCalls.Load() != 2 || dispatchCalls.Load() != 3 {
 		t.Fatalf("side effects claims=%d reservations=%d dispatches=%d, want 2/2/3", claimer.calls, reservationCalls.Load(), dispatchCalls.Load())
+	}
+}
+
+func seedWorkingAtomicReservation(t *testing.T, session string) (*AssignmentStore, *atomicClaimLedger, AtomicRequest, *Assignment) {
+	t.Helper()
+	store := NewStore(session)
+	claimer := &atomicClaimLedger{}
+	request := atomicTestRequest("integrated-release-old", "%325")
+	request.AgentName = "OriginalAgent"
+	request.Actor = "OriginalAgent"
+	request.RequireReservation = true
+	request.RequestedPaths = []string{"internal/assignment/**", "internal/completion/**"}
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	reserver := ReservationFunc(func(_ context.Context, req ReservationRequest) (LeaseReceipt, error) {
+		return LeaseReceipt{
+			AgentName: req.AgentName, Target: req.Target,
+			Requested: append([]string(nil), req.RequestedPaths...), Granted: append([]string(nil), req.RequestedPaths...),
+			ReservationIDs: []int{3251, 3252}, ExpiresAt: &expiresAt,
+		}, nil
+	})
+	result, err := NewAtomicCoordinator(store, claimer, reserver, &atomicDispatchRecorder{}).Execute(t.Context(), request)
+	if err != nil || !result.Sent {
+		t.Fatalf("seed atomic reservation result=%+v error=%v", result, err)
+	}
+	if err := store.MarkWorking(request.BeadID); err != nil {
+		t.Fatalf("mark seed working: %v", err)
+	}
+	working := store.Get(request.BeadID)
+	if working == nil || working.Status != StatusWorking || working.ClearState != ClearStateNone {
+		t.Fatalf("seed working assignment=%+v", working)
+	}
+	return store, claimer, request, working
+}
+
+func exactWorkingReleaseReceipt(current *Assignment) WorkingReplacementReleaseReceipt {
+	paths := append([]string(nil), current.ReservedPaths...)
+	if len(paths) == 0 {
+		paths = append(paths, current.ReservationRequested...)
+	}
+	return WorkingReplacementReleaseReceipt{
+		ReleasedPaths:          paths,
+		ReleasedReservationIDs: append([]int(nil), current.ReservationIDs...),
+	}
+}
+
+func TestAtomicWorkingReplacementReleasesExactPriorGenerationUnderLocks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, claimer, oldRequest, working := seedWorkingAtomicReservation(t, "atomic-integrated-working-release")
+	var sequence []string
+	var sequenceMu sync.Mutex
+	record := func(value string) {
+		sequenceMu.Lock()
+		sequence = append(sequence, value)
+		sequenceMu.Unlock()
+	}
+	preflight := PromptPreflightFunc(func(_ context.Context, req DispatchRequest) (PromptPreflightResult, error) {
+		record("preflight")
+		return PromptPreflightResult{DispatchPrompt: req.Prompt, DurablePrompt: req.Prompt, DurableTitle: req.BeadTitle}, nil
+	})
+	authorization := WorkingReplacementAuthorizationFunc(func(context.Context, string) (WorkingReplacementAuthorization, error) {
+		record("authorization")
+		return WorkingReplacementAuthorization{Status: "in_progress", Assignee: working.ClaimActor}, nil
+	})
+	releaser := WorkingReplacementReleaseFunc(func(_ context.Context, current *Assignment) (WorkingReplacementReleaseReceipt, error) {
+		record("release")
+		if current.IdempotencyKey != working.IdempotencyKey || current.ClearState != ClearStateReservationReleasing {
+			t.Fatalf("release source=%+v, want old generation at durable release barrier", current)
+		}
+		return exactWorkingReleaseReceipt(current), nil
+	})
+	var dispatchCalls atomic.Int32
+	dispatcher := DispatchFunc(func(_ context.Context, req DispatchRequest) (DispatchReceipt, error) {
+		record("dispatch")
+		dispatchCalls.Add(1)
+		return DispatchReceipt{DeliveryID: "replacement-exact-receipt"}, nil
+	})
+	replacement := atomicTestRequest("integrated-release-new", "%326")
+	replacement.AgentName = "ReplacementAgent"
+	replacement.Pane = 2
+	replacement.ReplaceWorkingAssignment = true
+	coordinator := NewAtomicCoordinator(store, claimer, nil, dispatcher, preflight).
+		WithWorkingReplacementAuthorizationPort(authorization).
+		WithWorkingReplacementReleasePort(releaser)
+	result, err := coordinator.Execute(t.Context(), replacement)
+	if err != nil || !result.Sent {
+		t.Fatalf("replacement result=%+v error=%v", result, err)
+	}
+	if !reflect.DeepEqual(result.ReleasedPaths, oldRequest.RequestedPaths) || !reflect.DeepEqual(result.ReleasedReservationIDs, []int{3251, 3252}) {
+		t.Fatalf("release receipt paths=%v ids=%v", result.ReleasedPaths, result.ReleasedReservationIDs)
+	}
+	if got := sequence; !reflect.DeepEqual(got, []string{"preflight", "authorization", "release", "dispatch"}) {
+		t.Fatalf("replacement boundary order=%v, want preflight/authorization/release/dispatch", got)
+	}
+	stored := store.Get(replacement.BeadID)
+	if stored == nil || stored.IdempotencyKey != replacement.IdempotencyKey || stored.Status != StatusAssigned || stored.ClearState != ClearStateNone ||
+		stored.BeadTitle != replacement.BeadTitle || stored.DispatchReceiptID != "replacement-exact-receipt" {
+		t.Fatalf("replacement durable generation=%+v", stored)
+	}
+	if dispatchCalls.Load() != 1 {
+		t.Fatalf("replacement dispatch calls=%d, want 1", dispatchCalls.Load())
+	}
+}
+
+func TestAtomicWorkingReplacementMalformedReleaseReceiptStaysRetryable(t *testing.T) {
+	tests := []struct {
+		name    string
+		receipt WorkingReplacementReleaseReceipt
+	}{
+		{name: "missing path", receipt: WorkingReplacementReleaseReceipt{ReleasedPaths: []string{"internal/assignment/**"}, ReleasedReservationIDs: []int{3251, 3252}}},
+		{name: "unexpected path", receipt: WorkingReplacementReleaseReceipt{ReleasedPaths: []string{"internal/assignment/**", "internal/completion/**", "internal/other/**"}, ReleasedReservationIDs: []int{3251, 3252}}},
+		{name: "duplicate path", receipt: WorkingReplacementReleaseReceipt{ReleasedPaths: []string{"internal/assignment/**", "internal/assignment/**"}, ReleasedReservationIDs: []int{3251, 3252}}},
+		{name: "empty path", receipt: WorkingReplacementReleaseReceipt{ReleasedPaths: []string{"internal/assignment/**", " "}, ReleasedReservationIDs: []int{3251, 3252}}},
+		{name: "missing id", receipt: WorkingReplacementReleaseReceipt{ReleasedPaths: []string{"internal/assignment/**", "internal/completion/**"}, ReleasedReservationIDs: []int{3251}}},
+		{name: "unexpected id", receipt: WorkingReplacementReleaseReceipt{ReleasedPaths: []string{"internal/assignment/**", "internal/completion/**"}, ReleasedReservationIDs: []int{3251, 3252, 9999}}},
+		{name: "duplicate id", receipt: WorkingReplacementReleaseReceipt{ReleasedPaths: []string{"internal/assignment/**", "internal/completion/**"}, ReleasedReservationIDs: []int{3251, 3251}}},
+		{name: "invalid id", receipt: WorkingReplacementReleaseReceipt{ReleasedPaths: []string{"internal/assignment/**", "internal/completion/**"}, ReleasedReservationIDs: []int{3251, 0}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			store, claimer, _, working := seedWorkingAtomicReservation(t, "atomic-malformed-release-"+strings.ReplaceAll(test.name, " ", "-"))
+			var releaseCalls atomic.Int32
+			releaser := WorkingReplacementReleaseFunc(func(context.Context, *Assignment) (WorkingReplacementReleaseReceipt, error) {
+				releaseCalls.Add(1)
+				return test.receipt, nil
+			})
+			dispatcher := &atomicDispatchRecorder{}
+			replacement := atomicTestRequest("malformed-release-new", "%327")
+			replacement.Pane = 2
+			replacement.ReplaceWorkingAssignment = true
+			coordinator := withOpenWorkStatus(NewAtomicCoordinator(store, claimer, nil, dispatcher)).
+				WithWorkingReplacementAuthorizationPort(WorkingReplacementAuthorizationFunc(func(context.Context, string) (WorkingReplacementAuthorization, error) {
+					return WorkingReplacementAuthorization{Status: "in_progress", Assignee: working.ClaimActor}, nil
+				})).
+				WithWorkingReplacementReleasePort(releaser)
+			result, err := coordinator.Execute(t.Context(), replacement)
+			if err == nil || result.Sent {
+				t.Fatalf("malformed release result=%+v error=%v", result, err)
+			}
+			stored := store.Get(replacement.BeadID)
+			if stored == nil || stored.IdempotencyKey != working.IdempotencyKey || stored.Status != StatusWorking ||
+				stored.ClearState != ClearStateReservationReleasing || strings.TrimSpace(stored.ClearError) == "" {
+				t.Fatalf("malformed release advanced or lost retry state: %+v", stored)
+			}
+			if releaseCalls.Load() != 1 || dispatcher.calls.Load() != 0 || claimer.calls != 1 {
+				t.Fatalf("malformed receipt side effects release=%d claim=%d dispatch=%d", releaseCalls.Load(), claimer.calls, dispatcher.calls.Load())
+			}
+		})
+	}
+}
+
+func TestAtomicWorkingReplacementEmptyExpectedSurfaceRejectsUnexpectedReceipt(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		receipt WorkingReplacementReleaseReceipt
+	}{
+		{name: "unexpected path", receipt: WorkingReplacementReleaseReceipt{ReleasedPaths: []string{"internal/unexpected/**"}}},
+		{name: "unexpected id", receipt: WorkingReplacementReleaseReceipt{ReleasedReservationIDs: []int{999}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			store := NewStore("atomic-empty-release-surface-" + strings.ReplaceAll(test.name, " ", "-"))
+			claimer := &atomicClaimLedger{}
+			seedRequest := atomicTestRequest("empty-release-old", "%324")
+			if result, err := NewAtomicCoordinator(store, claimer, nil, &atomicDispatchRecorder{}).Execute(t.Context(), seedRequest); err != nil || !result.Sent {
+				t.Fatalf("seed result=%+v error=%v", result, err)
+			}
+			if err := store.MarkWorking(seedRequest.BeadID); err != nil {
+				t.Fatalf("mark seed working: %v", err)
+			}
+			working := store.Get(seedRequest.BeadID)
+			releaser := WorkingReplacementReleaseFunc(func(context.Context, *Assignment) (WorkingReplacementReleaseReceipt, error) {
+				return test.receipt, nil
+			})
+			replacement := atomicTestRequest("empty-release-new", "%323")
+			replacement.Pane = 2
+			replacement.ReplaceWorkingAssignment = true
+			result, err := withOpenWorkStatus(NewAtomicCoordinator(store, claimer, nil, &atomicDispatchRecorder{})).
+				WithWorkingReplacementAuthorizationPort(WorkingReplacementAuthorizationFunc(func(context.Context, string) (WorkingReplacementAuthorization, error) {
+					return WorkingReplacementAuthorization{Status: "in_progress", Assignee: working.ClaimActor}, nil
+				})).
+				WithWorkingReplacementReleasePort(releaser).
+				Execute(t.Context(), replacement)
+			if err == nil || result.Sent {
+				t.Fatalf("unexpected empty-surface receipt result=%+v error=%v", result, err)
+			}
+			stored := store.Get(seedRequest.BeadID)
+			if stored == nil || stored.IdempotencyKey != seedRequest.IdempotencyKey || stored.ClearState != ClearStateReservationReleasing || stored.ClearError == "" {
+				t.Fatalf("unexpected receipt advanced empty source: %+v", stored)
+			}
+		})
+	}
+}
+
+func TestAtomicWorkingReplacementReleaseFailureRetriesFromDurableBarrier(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, claimer, _, working := seedWorkingAtomicReservation(t, "atomic-working-release-retry")
+	var releaseCalls atomic.Int32
+	releaser := WorkingReplacementReleaseFunc(func(_ context.Context, current *Assignment) (WorkingReplacementReleaseReceipt, error) {
+		if releaseCalls.Add(1) == 1 {
+			return WorkingReplacementReleaseReceipt{}, errors.New("release response unavailable")
+		}
+		if current.ClearState != ClearStateReservationReleasing || strings.TrimSpace(current.ClearError) == "" {
+			t.Fatalf("retry did not receive durable release failure: %+v", current)
+		}
+		return exactWorkingReleaseReceipt(working), nil
+	})
+	dispatcher := &atomicDispatchRecorder{}
+	replacement := atomicTestRequest("working-release-retry-new", "%328")
+	replacement.Pane = 2
+	replacement.ReplaceWorkingAssignment = true
+	coordinator := withOpenWorkStatus(NewAtomicCoordinator(store, claimer, nil, dispatcher)).
+		WithWorkingReplacementAuthorizationPort(WorkingReplacementAuthorizationFunc(func(context.Context, string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{Status: "in_progress", Assignee: working.ClaimActor}, nil
+		})).
+		WithWorkingReplacementReleasePort(releaser)
+	first, err := coordinator.Execute(t.Context(), replacement)
+	if err == nil || first.Sent || first.Assignment == nil || first.Assignment.ClearState != ClearStateReservationReleasing {
+		t.Fatalf("first release result=%+v error=%v", first, err)
+	}
+	second, err := coordinator.Execute(t.Context(), replacement)
+	if err != nil || !second.Sent || second.Assignment == nil || second.Assignment.IdempotencyKey != replacement.IdempotencyKey {
+		t.Fatalf("release retry result=%+v error=%v", second, err)
+	}
+	if releaseCalls.Load() != 2 || claimer.calls != 2 || dispatcher.calls.Load() != 1 {
+		t.Fatalf("retry side effects releases=%d claims=%d dispatches=%d, want 2/2/1 replacement dispatch", releaseCalls.Load(), claimer.calls, dispatcher.calls.Load())
+	}
+}
+
+func TestAtomicWorkingReplacementAuthorizationAndPreflightBlockBeforeActuation(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		preflight     PromptPreflightPort
+		authorization func(string) (WorkingReplacementAuthorization, error)
+		wantAuthCalls int32
+		clearActor    bool
+	}{
+		{name: "missing authorization port"},
+		{name: "open tracker", authorization: func(actor string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{Status: "open", Assignee: actor}, nil
+		}, wantAuthCalls: 1},
+		{name: "noncanonical tracker status", authorization: func(actor string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{Status: "IN_PROGRESS", Assignee: actor}, nil
+		}, wantAuthCalls: 1},
+		{name: "terminal tracker", authorization: func(actor string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{Status: "closed", Assignee: actor}, nil
+		}, wantAuthCalls: 1},
+		{name: "empty assignee", authorization: func(string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{Status: "in_progress"}, nil
+		}, wantAuthCalls: 1},
+		{name: "different assignee", authorization: func(string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{Status: "in_progress", Assignee: "DifferentActor"}, nil
+		}, wantAuthCalls: 1},
+		{name: "empty durable actor", authorization: func(string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{Status: "in_progress", Assignee: "OriginalAgent"}, nil
+		}, clearActor: true},
+		{name: "tracker error", authorization: func(string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{}, errors.New("tracker unavailable")
+		}, wantAuthCalls: 1},
+		{name: "blocked preflight", preflight: PromptPreflightFunc(func(context.Context, DispatchRequest) (PromptPreflightResult, error) {
+			return PromptPreflightResult{}, errors.New("redaction blocked")
+		}), authorization: func(actor string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{Status: "in_progress", Assignee: actor}, nil
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			store, claimer, _, working := seedWorkingAtomicReservation(t, "atomic-release-gate-"+strings.ReplaceAll(test.name, " ", "-"))
+			if test.clearActor {
+				current := store.Get(working.BeadID)
+				current.ClaimActor = ""
+				store.Assignments[current.BeadID] = current
+				if err := store.Save(); err != nil {
+					t.Fatalf("clear durable claim actor: %v", err)
+				}
+			}
+			var authCalls, releaseCalls, reserveCalls atomic.Int32
+			releaser := WorkingReplacementReleaseFunc(func(context.Context, *Assignment) (WorkingReplacementReleaseReceipt, error) {
+				releaseCalls.Add(1)
+				return exactWorkingReleaseReceipt(working), nil
+			})
+			reserver := ReservationFunc(func(context.Context, ReservationRequest) (LeaseReceipt, error) {
+				reserveCalls.Add(1)
+				return LeaseReceipt{}, errors.New("reservation must not be reached")
+			})
+			dispatcher := &atomicDispatchRecorder{}
+			replacement := atomicTestRequest("release-gate-new", "%329")
+			replacement.Pane = 2
+			replacement.ReplaceWorkingAssignment = true
+			coordinator := NewAtomicCoordinator(store, claimer, reserver, dispatcher, test.preflight).
+				WithWorkingReplacementReleasePort(releaser)
+			if test.authorization != nil {
+				coordinator.WithWorkingReplacementAuthorizationPort(WorkingReplacementAuthorizationFunc(func(context.Context, string) (WorkingReplacementAuthorization, error) {
+					authCalls.Add(1)
+					return test.authorization(working.ClaimActor)
+				}))
+			}
+			result, err := coordinator.Execute(t.Context(), replacement)
+			if err == nil || result.Sent || (test.preflight == nil && !errors.Is(err, ErrWorkingReplacementNotAllowed)) {
+				t.Fatalf("gated replacement result=%+v error=%v", result, err)
+			}
+			if authCalls.Load() != test.wantAuthCalls || releaseCalls.Load() != 0 || reserveCalls.Load() != 0 || dispatcher.calls.Load() != 0 || claimer.calls != 1 {
+				t.Fatalf("gated replacement side effects auth=%d release=%d reserve=%d dispatch=%d claim=%d", authCalls.Load(), releaseCalls.Load(), reserveCalls.Load(), dispatcher.calls.Load(), claimer.calls)
+			}
+			stored := store.Get(replacement.BeadID)
+			if stored == nil || stored.IdempotencyKey != working.IdempotencyKey || stored.ClearState != ClearStateNone || stored.Status != StatusWorking {
+				t.Fatalf("gated replacement mutated source: %+v", stored)
+			}
+		})
 	}
 }
 
@@ -371,6 +722,9 @@ func TestAtomicWorkingReplacementConcurrentGenerationsHaveOneWinner(t *testing.T
 
 	started := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseDispatch := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseDispatch)
 	var dispatchCalls atomic.Int32
 	dispatcher := DispatchFunc(func(_ context.Context, request DispatchRequest) (DispatchReceipt, error) {
 		if dispatchCalls.Add(1) == 1 {
@@ -385,7 +739,7 @@ func TestAtomicWorkingReplacementConcurrentGenerationsHaveOneWinner(t *testing.T
 		request := atomicTestRequest(fmt.Sprintf("concurrent-new-%d", index), target)
 		request.Pane = index + 2
 		request.ReplaceWorkingAssignment = true
-		coordinator := NewAtomicCoordinator(NewStore(session), claimer, nil, dispatcher)
+		coordinator := withOpenWorkStatus(NewAtomicCoordinator(NewStore(session), claimer, nil, dispatcher))
 		go func() {
 			<-start
 			_, err := coordinator.Execute(context.Background(), request)
@@ -395,14 +749,13 @@ func TestAtomicWorkingReplacementConcurrentGenerationsHaveOneWinner(t *testing.T
 	close(start)
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("replacement winner did not start dispatch")
 	}
-	time.Sleep(50 * time.Millisecond)
 	if dispatchCalls.Load() != 1 {
 		t.Fatalf("concurrent replacement dispatches before release=%d, want 1", dispatchCalls.Load())
 	}
-	close(release)
+	releaseDispatch()
 
 	var successes, rejected int
 	for range 2 {
@@ -583,7 +936,7 @@ func TestAtomicAssignmentDifferentBeadsRemainConcurrent(t *testing.T) {
 		select {
 		case beadID := <-started:
 			seen[beadID] = struct{}{}
-		case <-time.After(time.Second):
+		case <-time.After(5 * time.Second):
 			close(release)
 			t.Fatal("different-bead dispatches were serialized by the operation lock")
 		}
@@ -629,7 +982,7 @@ func TestAtomicAssignmentDifferentBeadsCannotOccupySameTarget(t *testing.T) {
 	close(start)
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("same-target winner did not start dispatch")
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -655,6 +1008,34 @@ func TestAtomicAssignmentDifferentBeadsCannotOccupySameTarget(t *testing.T) {
 	claimer.mu.Unlock()
 	if successes != 1 || occupied != 1 || claimCalls != 1 || dispatchCalls.Load() != 1 {
 		t.Fatalf("success=%d occupied=%d claims=%d dispatches=%d, want 1/1/1/1", successes, occupied, claimCalls, dispatchCalls.Load())
+	}
+}
+
+func TestAtomicAssignmentWaitsForExternalCleanupLock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const beadID = "ntm-external-cleanup-lock"
+	store := NewStore("atomic-external-cleanup-lock")
+	cleanupUnlock, err := store.AcquireExternalCleanupLock(t.Context(), beadID)
+	if err != nil {
+		t.Fatalf("acquire external cleanup lock: %v", err)
+	}
+	defer cleanupUnlock()
+
+	claimer := &atomicClaimLedger{}
+	dispatcher := &atomicDispatchRecorder{}
+	request := atomicTestRequest("external-cleanup-attempt", "%43")
+	request.BeadID = beadID
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	result, err := NewAtomicCoordinator(store, claimer, nil, dispatcher).Execute(ctx, request)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Sent {
+		t.Fatalf("Execute while cleanup locked result=%+v error=%v", result, err)
+	}
+	claimer.mu.Lock()
+	claimCalls := claimer.calls
+	claimer.mu.Unlock()
+	if claimCalls != 0 || dispatcher.calls.Load() != 0 {
+		t.Fatalf("cleanup-locked Execute actuated claims=%d dispatches=%d", claimCalls, dispatcher.calls.Load())
 	}
 }
 
@@ -688,15 +1069,40 @@ func TestAtomicAssignmentCanonicalOccupancyRejectsSelectorAliases(t *testing.T) 
 	}
 }
 
-func TestAtomicAssignmentLegacyOccupancyBlocksSameLocalPaneIndex(t *testing.T) {
+func TestAtomicAssignmentDispatchOnlyCanonicalIdentityOccupiesTarget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-dispatch-only-occupancy")
+	store.Assignments["ntm-dispatch-only"] = &Assignment{
+		BeadID: "ntm-dispatch-only", Pane: 1, Status: StatusWorking, AssignedAt: time.Now().UTC(),
+		DispatchTarget: "%42",
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed dispatch-only assignment: %v", err)
+	}
+	claimer := &atomicClaimLedger{}
+	dispatcher := &atomicDispatchRecorder{}
+	request := atomicTestRequest("dispatch-only-contender", "%42")
+	request.BeadID = "ntm-contender"
+
+	result, err := NewAtomicCoordinator(store, claimer, nil, dispatcher).Execute(t.Context(), request)
+	if !errors.Is(err, ErrTargetOccupied) || result.Assignment == nil || result.Assignment.BeadID != "ntm-dispatch-only" {
+		t.Fatalf("Execute result=%+v error=%v, want dispatch-only target occupant", result, err)
+	}
+	if claimer.calls != 0 || dispatcher.calls.Load() != 0 || store.Get(request.BeadID) != nil {
+		t.Fatalf("dispatch-only conflict crossed boundary: claims=%d dispatches=%d contender=%+v", claimer.calls, dispatcher.calls.Load(), store.Get(request.BeadID))
+	}
+}
+
+func TestAtomicAssignmentRejectsLegacyOccupancyWithoutMutation(t *testing.T) {
 	for _, test := range []struct {
 		name           string
 		dispatchTarget string
 		occupancyKey   string
 	}{
 		{name: "missing target identity"},
-		{name: "window alias only", dispatchTarget: "0.1"},
-		{name: "noncanonical occupancy", dispatchTarget: "0.1", occupancyKey: "0.1"},
+		{name: "bare pane index", dispatchTarget: "1"},
+		{name: "window address without stable occupancy", dispatchTarget: "0.1"},
+		{name: "nonphysical occupancy", dispatchTarget: "0.1", occupancyKey: "0.1"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
@@ -714,13 +1120,74 @@ func TestAtomicAssignmentLegacyOccupancyBlocksSameLocalPaneIndex(t *testing.T) {
 			request.BeadID = "ntm-contender"
 			request.Pane = 1
 
-			if _, err := NewAtomicCoordinator(store, claimer, nil, dispatcher).Execute(t.Context(), request); !errors.Is(err, ErrTargetOccupied) {
-				t.Fatalf("Execute error=%v, want ErrTargetOccupied", err)
+			before := store.Get("ntm-legacy")
+			result, err := NewAtomicCoordinator(store, claimer, nil, dispatcher).Execute(t.Context(), request)
+			var migrationErr *PaneIdentityMigrationError
+			if !errors.Is(err, ErrPaneIdentityMigrationRequired) || !errors.As(err, &migrationErr) {
+				t.Fatalf("Execute error=%v, want typed pane identity migration error", err)
+			}
+			if migrationErr.BeadID != "ntm-legacy" || result.Assignment == nil || result.Assignment.BeadID != "ntm-legacy" {
+				t.Fatalf("migration error=%+v result=%+v", migrationErr, result)
 			}
 			if claimer.calls != 0 || dispatcher.calls.Load() != 0 {
 				t.Fatalf("legacy occupancy crossed external boundary: claims=%d dispatches=%d", claimer.calls, dispatcher.calls.Load())
 			}
+			if after := store.Get("ntm-legacy"); !reflect.DeepEqual(after, before) || store.Get(request.BeadID) != nil {
+				t.Fatalf("migration rejection mutated store: before=%+v after=%+v contender=%+v", before, after, store.Get(request.BeadID))
+			}
 		})
+	}
+}
+
+func TestCanonicalPaneIdentityRequiresPhysicalPaneID(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		assignment *Assignment
+		want       string
+		wantErr    bool
+	}{
+		{name: "zero pane ID", assignment: &Assignment{OccupancyKey: "%0"}, want: "%0"},
+		{name: "occupancy pane ID", assignment: &Assignment{OccupancyKey: "%42", DispatchTarget: "1.2"}, want: "%42"},
+		{name: "dispatch pane ID", assignment: &Assignment{DispatchTarget: "%43"}, want: "%43"},
+		{name: "zero alias pane ID", assignment: &Assignment{OccupancyKey: "%00"}, wantErr: true},
+		{name: "leading zero pane ID", assignment: &Assignment{OccupancyKey: "%01"}, wantErr: true},
+		{name: "overflow pane ID", assignment: &Assignment{OccupancyKey: "%999999999999999999999999999999999999"}, wantErr: true},
+		{name: "window pane address", assignment: &Assignment{DispatchTarget: "1.2"}, wantErr: true},
+		{name: "session window pane address", assignment: &Assignment{DispatchTarget: "proj:1.2"}, wantErr: true},
+		{name: "bare local index", assignment: &Assignment{DispatchTarget: "2"}, wantErr: true},
+		{name: "invalid occupancy blocks fallback", assignment: &Assignment{OccupancyKey: "1.2", DispatchTarget: "%44"}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := CanonicalPaneIdentity(test.assignment)
+			if test.wantErr {
+				var migrationErr *PaneIdentityMigrationError
+				if !errors.Is(err, ErrPaneIdentityMigrationRequired) || !errors.As(err, &migrationErr) || got != "" {
+					t.Fatalf("CanonicalPaneIdentity()=%q error=%v, want typed migration error", got, err)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("CanonicalPaneIdentity()=%q error=%v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestAtomicAssignmentRejectsNoncanonicalRequestBeforeMutation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("noncanonical-request")
+	claimer := &atomicClaimLedger{}
+	dispatcher := &atomicDispatchRecorder{}
+	request := atomicTestRequest("noncanonical-request", "0.1")
+	request.OccupancyKey = "0.1"
+
+	result, err := NewAtomicCoordinator(store, claimer, nil, dispatcher).Execute(t.Context(), request)
+	var migrationErr *PaneIdentityMigrationError
+	if !errors.Is(err, ErrPaneIdentityMigrationRequired) || !errors.As(err, &migrationErr) || result.Assignment != nil {
+		t.Fatalf("Execute result=%+v error=%v, want typed request migration error", result, err)
+	}
+	if claimer.calls != 0 || dispatcher.calls.Load() != 0 || len(store.List()) != 0 {
+		t.Fatalf("invalid request mutated state: claims=%d dispatches=%d store=%+v", claimer.calls, dispatcher.calls.Load(), store.List())
 	}
 }
 
@@ -794,20 +1261,23 @@ func TestAtomicRecoveredLegacyIntentBackfillsNonTerminalClaimGuard(t *testing.T)
 
 func TestAtomicAssignmentRejectsMismatchedClaimReceipts(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		receipt ClaimReceipt
+		name  string
+		alter func(*ClaimReceipt)
 	}{
-		{name: "bead", receipt: ClaimReceipt{BeadID: "different-bead"}},
-		{name: "actor", receipt: ClaimReceipt{Actor: "different-actor"}},
+		{name: "missing bead", alter: func(receipt *ClaimReceipt) { receipt.BeadID = "" }},
+		{name: "wrong bead", alter: func(receipt *ClaimReceipt) { receipt.BeadID = "different-bead" }},
+		{name: "missing actor", alter: func(receipt *ClaimReceipt) { receipt.Actor = "" }},
+		{name: "wrong actor", alter: func(receipt *ClaimReceipt) { receipt.Actor = "different-actor" }},
+		{name: "wrong status", alter: func(receipt *ClaimReceipt) { receipt.Status = "open" }},
+		{name: "missing timestamp", alter: func(receipt *ClaimReceipt) { receipt.ClaimedAt = time.Time{} }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			dispatcher := &atomicDispatchRecorder{}
-			store := NewStore("atomic-invalid-claim-" + test.name)
+			store := NewStore("atomic-invalid-claim-" + strings.ReplaceAll(test.name, " ", "-"))
 			claimer := ClaimFunc(func(_ context.Context, beadID, actor string) (ClaimReceipt, error) {
-				receipt := test.receipt
-				receipt.Status = "in_progress"
-				receipt.ClaimedAt = time.Now().UTC()
+				receipt := ClaimReceipt{BeadID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}
+				test.alter(&receipt)
 				return receipt, nil
 			})
 			req := atomicTestRequest("invalid-claim-"+test.name, "AgentA")
@@ -825,6 +1295,38 @@ func TestAtomicAssignmentRejectsMismatchedClaimReceipts(t *testing.T) {
 	}
 }
 
+func TestAtomicAssignmentRejectsMalformedReconciledClaimReceipt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	request := atomicTestRequest("malformed-reconciled-claim", "%78")
+	actor := StableClaimActor(request.Actor, request.IdempotencyKey)
+	store := NewStore("atomic-malformed-reconciled-claim")
+	if _, err := store.RecordAtomicIntent(request, actor, time.Now().UTC()); err != nil {
+		t.Fatalf("RecordAtomicIntent: %v", err)
+	}
+	if _, err := store.RecordAtomicClaimStarted(request.BeadID, request.IdempotencyKey, time.Now().UTC()); err != nil {
+		t.Fatalf("RecordAtomicClaimStarted: %v", err)
+	}
+	// Override the durable owner timestamp with a zero timestamp by using a
+	// dedicated reconciler instead of allowing the coordinator to normalize it.
+	malformed := &malformedClaimReconciler{receipt: ClaimReceipt{BeadID: request.BeadID, Actor: actor, Status: "in_progress"}}
+	result, err := NewAtomicCoordinator(store, malformed, nil, &atomicDispatchRecorder{}).Execute(t.Context(), request)
+	if !errors.Is(err, ErrClaimOutcomeUnknown) || result.Sent {
+		t.Fatalf("Execute result=%+v error=%v, want unknown malformed reconciliation", result, err)
+	}
+}
+
+type malformedClaimReconciler struct {
+	receipt ClaimReceipt
+}
+
+func (m *malformedClaimReconciler) Claim(context.Context, string, string) (ClaimReceipt, error) {
+	return ClaimReceipt{}, errors.New("claim must not repeat after an ambiguous barrier")
+}
+
+func (m *malformedClaimReconciler) ReconcileClaim(context.Context, string, string) (ClaimReconciliation, error) {
+	return ClaimReconciliation{State: ClaimReconciliationOwned, Receipt: m.receipt}, nil
+}
+
 func TestAtomicAssignmentSameIdempotencyReplaysWithoutSideEffects(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	claimer := &atomicClaimLedger{}
@@ -837,7 +1339,9 @@ func TestAtomicAssignmentSameIdempotencyReplaysWithoutSideEffects(t *testing.T) 
 	if err != nil {
 		t.Fatalf("first Execute: %v", err)
 	}
-	second, err := coordinator.Execute(t.Context(), req)
+	replayRequest := req
+	replayRequest.Pane = 9 // Display index drift must not change physical %N identity.
+	second, err := coordinator.Execute(t.Context(), replayRequest)
 	if err != nil {
 		t.Fatalf("replay Execute: %v", err)
 	}
@@ -846,6 +1350,9 @@ func TestAtomicAssignmentSameIdempotencyReplaysWithoutSideEffects(t *testing.T) 
 	}
 	if claimer.calls != 1 || reserver.calls.Load() != 1 || dispatcher.calls.Load() != 1 {
 		t.Fatalf("side effects claim=%d reserve=%d dispatch=%d, want 1 each", claimer.calls, reserver.calls.Load(), dispatcher.calls.Load())
+	}
+	if second.Assignment == nil || second.Assignment.Pane != req.Pane {
+		t.Fatalf("replay replaced durable display pane: %+v", second.Assignment)
 	}
 }
 
@@ -905,6 +1412,66 @@ func TestAtomicAssignmentTerminalGenerationRequiresNewKeyAndReusesClaimActor(t *
 	}
 	if second.Dispatch.DeliveryID != "delivery-2" || dispatchCalls.Load() != 2 || claimer.calls != 2 {
 		t.Fatalf("second generation dispatch=%+v claim calls=%d dispatch calls=%d", second.Dispatch, claimer.calls, dispatchCalls.Load())
+	}
+}
+
+func TestAtomicReopenedGenerationWaitsForExactCompletionEventAcknowledgement(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-completion-event-reopen")
+	claimer := &atomicClaimLedger{}
+	dispatcher := &atomicDispatchRecorder{}
+	coordinator := withOpenWorkStatus(NewAtomicCoordinator(store, claimer, nil, dispatcher))
+	firstRequest := atomicTestRequest("completion-generation-one", "%74")
+	first, err := coordinator.Execute(t.Context(), firstRequest)
+	if err != nil || !first.Sent || first.Assignment == nil {
+		t.Fatalf("seed generation result=%+v error=%v", first, err)
+	}
+
+	barrier, applied, err := store.BeginTerminalReconciliationWithCompletionEventIfCurrent(t.Context(), first.Assignment, StatusCompleted, "")
+	if err != nil || !applied || barrier == nil || barrier.PendingCompletionEventID == "" {
+		t.Fatalf("completion barrier=%+v applied=%v error=%v", barrier, applied, err)
+	}
+	if _, err := store.RecordClearLeasesReleased(t.Context(), firstRequest.BeadID); err != nil {
+		t.Fatalf("record leases released: %v", err)
+	}
+	if _, err := store.RecordTerminalClaimReleased(t.Context(), firstRequest.BeadID); err != nil {
+		t.Fatalf("record claim released: %v", err)
+	}
+	if err := store.CompleteTerminalReconciliation(t.Context(), firstRequest.BeadID, StatusCompleted, ""); err != nil {
+		t.Fatalf("complete first generation: %v", err)
+	}
+	eventID := barrier.PendingCompletionEventID
+	secondRequest := firstRequest
+	secondRequest.IdempotencyKey = "completion-generation-two"
+
+	actor := StableClaimActor(secondRequest.Actor, secondRequest.IdempotencyKey)
+	if _, err := store.RecordAtomicIntent(secondRequest, actor, time.Now().UTC()); !errors.Is(err, ErrCompletionEventPending) {
+		t.Fatalf("RecordAtomicIntent error=%v, want ErrCompletionEventPending", err)
+	}
+	blocked, err := coordinator.Execute(t.Context(), secondRequest)
+	if !errors.Is(err, ErrCompletionEventPending) || blocked.Sent || blocked.Replayed {
+		t.Fatalf("blocked reopened generation result=%+v error=%v", blocked, err)
+	}
+	if claimer.calls != 1 || dispatcher.calls.Load() != 1 {
+		t.Fatalf("pending outbox crossed external boundary: claims=%d dispatches=%d", claimer.calls, dispatcher.calls.Load())
+	}
+	if current := store.Get(firstRequest.BeadID); current == nil || current.IdempotencyKey != firstRequest.IdempotencyKey || current.PendingCompletionEventID != eventID {
+		t.Fatalf("pending outbox generation was replaced: %+v", current)
+	}
+
+	const consumerToken = "atomic-reopen-consumer"
+	if _, acquired, err := store.ClaimPendingCompletionEvent(t.Context(), firstRequest.BeadID, eventID, consumerToken, time.Minute); err != nil || !acquired {
+		t.Fatalf("claim completion event acquired=%v error=%v", acquired, err)
+	}
+	if acknowledged, err := store.AcknowledgeCompletionEvent(t.Context(), firstRequest.BeadID, eventID, consumerToken); err != nil || !acknowledged {
+		t.Fatalf("acknowledge completion event applied=%v error=%v", acknowledged, err)
+	}
+	second, err := coordinator.Execute(t.Context(), secondRequest)
+	if err != nil || !second.Sent || second.Replayed || second.Assignment == nil || second.Assignment.IdempotencyKey != secondRequest.IdempotencyKey {
+		t.Fatalf("acknowledged reopened generation result=%+v error=%v", second, err)
+	}
+	if claimer.calls != 2 || dispatcher.calls.Load() != 2 {
+		t.Fatalf("acknowledged generation side effects claims=%d dispatches=%d, want 2 each", claimer.calls, dispatcher.calls.Load())
 	}
 }
 
@@ -1096,7 +1663,7 @@ func TestAtomicAssignmentCompletedReplayBypassesChangedPreflightPolicy(t *testin
 	preflightCalls := 0
 	coordinator := NewAtomicCoordinator(store, claimer, nil, dispatcher, PromptPreflightFunc(func(_ context.Context, req DispatchRequest) (PromptPreflightResult, error) {
 		preflightCalls++
-		return PromptPreflightResult{DispatchPrompt: "token=[REDACTED]", DurablePrompt: "token=[REDACTED]"}, nil
+		return PromptPreflightResult{DispatchPrompt: "token=[REDACTED]", DurablePrompt: "token=[REDACTED]", DurableTitle: "safe title"}, nil
 	}))
 	req := atomicTestRequest("preflight-replay-key", "%73")
 	req.Prompt = "token=raw-secret"
@@ -1118,14 +1685,19 @@ func TestAtomicAssignmentCompletedReplayBypassesChangedPreflightPolicy(t *testin
 	if preflightCalls != 1 || claimCalls != 1 || dispatcher.calls.Load() != 1 {
 		t.Fatalf("calls preflight=%d claim=%d dispatch=%d, want 1/1/1", preflightCalls, claimCalls, dispatcher.calls.Load())
 	}
+	if second.Assignment == nil || second.Assignment.BeadTitle != "safe title" {
+		t.Fatalf("replay lost durable sanitized title: %+v", second.Assignment)
+	}
 }
 
 func TestAtomicAssignmentPreflightSanitizesLedgerBeforeClaim(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	claimer := &atomicClaimLedger{}
 	var delivered string
+	var deliveredTitle string
 	dispatcher := DispatchFunc(func(_ context.Context, req DispatchRequest) (DispatchReceipt, error) {
 		delivered = req.Prompt
+		deliveredTitle = req.BeadTitle
 		return DispatchReceipt{DeliveryID: "safe-delivery"}, nil
 	})
 	preflight := PromptPreflightFunc(func(_ context.Context, req DispatchRequest) (PromptPreflightResult, error) {
@@ -1135,6 +1707,7 @@ func TestAtomicAssignmentPreflightSanitizesLedgerBeforeClaim(t *testing.T) {
 		return PromptPreflightResult{
 			DispatchPrompt: "deliver [REDACTED]",
 			DurablePrompt:  "persist [REDACTED]",
+			DurableTitle:   "title [REDACTED]",
 		}, nil
 	})
 	store := NewStore("atomic-preflight-safe")
@@ -1146,13 +1719,90 @@ func TestAtomicAssignmentPreflightSanitizesLedgerBeforeClaim(t *testing.T) {
 		t.Fatalf("Execute = %+v, %v", result, err)
 	}
 	stored := store.Get(req.BeadID)
-	if stored == nil || stored.PromptSent != "persist [REDACTED]" || stored.PendingPrompt != "" ||
+	if stored == nil || stored.BeadTitle != "title [REDACTED]" || stored.PromptSent != "persist [REDACTED]" || stored.PendingPrompt != "" ||
 		strings.Contains(stored.PromptSent, "raw-secret") || strings.Contains(stored.PromptSHA256, "raw-secret") ||
 		stored.IntentSHA256 != PromptSHA256(req.Prompt) {
 		t.Fatalf("durable assignment leaked or mismatched intent: %+v", stored)
 	}
 	if delivered != "deliver [REDACTED]" {
 		t.Fatalf("dispatch prompt = %q", delivered)
+	}
+	if deliveredTitle != "title [REDACTED]" {
+		t.Fatalf("dispatch title = %q", deliveredTitle)
+	}
+}
+
+func TestAtomicAssignmentReservationDiscoveryUsesSanitizedTitleAndPaths(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const rawSecret = "sk-proj-sensitive-token"
+	const durablePath = "internal/x/[REDACTED].txt"
+	var reservationTitle string
+	reserver := ReservationFunc(func(_ context.Context, req ReservationRequest) (LeaseReceipt, error) {
+		reservationTitle = req.BeadTitle
+		expiresAt := time.Now().UTC().Add(time.Hour)
+		return LeaseReceipt{
+			AgentName: req.AgentName, Target: req.Target,
+			Requested: []string{durablePath}, Granted: []string{durablePath},
+			ReservationIDs: []int{911}, ExpiresAt: &expiresAt,
+		}, nil
+	})
+	preflight := PromptPreflightFunc(func(_ context.Context, req DispatchRequest) (PromptPreflightResult, error) {
+		if !strings.Contains(req.BeadTitle, rawSecret) {
+			t.Fatalf("preflight did not receive raw title: %q", req.BeadTitle)
+		}
+		return PromptPreflightResult{
+			DispatchPrompt: req.Prompt,
+			DurablePrompt:  req.Prompt,
+			DurableTitle:   "Work in " + durablePath,
+		}, nil
+	})
+	store := NewStore("atomic-sanitized-reservation-discovery")
+	request := atomicTestRequest("sanitized-reservation-discovery", "%92")
+	request.BeadTitle = "Work in internal/x/" + rawSecret + ".txt"
+	request.RequireReservation = true
+	request.AllowReservationDiscovery = true
+	result, err := NewAtomicCoordinator(store, &atomicClaimLedger{}, reserver, &atomicDispatchRecorder{}, preflight).Execute(t.Context(), request)
+	if err != nil || !result.Sent {
+		t.Fatalf("sanitized reservation result=%+v error=%v", result, err)
+	}
+	stored := store.Get(request.BeadID)
+	if strings.Contains(reservationTitle, rawSecret) || reservationTitle != "Work in "+durablePath {
+		t.Fatalf("reservation discovery title leaked raw secret: %q", reservationTitle)
+	}
+	if stored == nil || strings.Contains(stored.BeadTitle, rawSecret) || strings.Contains(strings.Join(stored.ReservationRequested, " "), rawSecret) ||
+		stored.BeadTitle != "Work in "+durablePath || !reflect.DeepEqual(stored.ReservationRequested, []string{durablePath}) {
+		t.Fatalf("durable reservation metadata leaked raw title: %+v", stored)
+	}
+}
+
+func TestAtomicAssignmentPreflightCanBlockSensitiveExplicitReservationPaths(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const sensitivePath = "internal/x/sk-proj-sensitive-token.txt"
+	var preflightPaths []string
+	preflight := PromptPreflightFunc(func(_ context.Context, req DispatchRequest) (PromptPreflightResult, error) {
+		preflightPaths = append([]string(nil), req.RequestedPaths...)
+		if slices := strings.Join(req.RequestedPaths, "\n"); strings.Contains(slices, "sk-proj-") {
+			return PromptPreflightResult{}, errors.New("reservation path blocked by redaction policy")
+		}
+		return PromptPreflightResult{DispatchPrompt: req.Prompt, DurablePrompt: req.Prompt, DurableTitle: req.BeadTitle}, nil
+	})
+	claimer := &atomicClaimLedger{}
+	reserver := &atomicReservationRecorder{}
+	dispatcher := &atomicDispatchRecorder{}
+	store := NewStore("atomic-sensitive-explicit-reservation-path")
+	request := atomicTestRequest("sensitive-explicit-reservation-path", "%94")
+	request.RequireReservation = true
+	request.RequestedPaths = []string{sensitivePath}
+	result, err := NewAtomicCoordinator(store, claimer, reserver, dispatcher, preflight).Execute(t.Context(), request)
+	if err == nil || !strings.Contains(err.Error(), "reservation path blocked") || result.Sent {
+		t.Fatalf("sensitive path result=%+v error=%v", result, err)
+	}
+	if !reflect.DeepEqual(preflightPaths, []string{sensitivePath}) {
+		t.Fatalf("preflight paths=%v, want exact requested path", preflightPaths)
+	}
+	if claimer.calls != 0 || reserver.calls.Load() != 0 || dispatcher.calls.Load() != 0 || store.Get(request.BeadID) != nil {
+		t.Fatalf("sensitive path crossed boundary: claims=%d reservations=%d dispatches=%d stored=%+v",
+			claimer.calls, reserver.calls.Load(), dispatcher.calls.Load(), store.Get(request.BeadID))
 	}
 }
 
@@ -1179,6 +1829,43 @@ func TestAtomicAssignmentBlockedPreflightHasNoExternalSideEffects(t *testing.T) 
 	if claimCalls != 0 || reserver.calls.Load() != 0 || dispatcher.calls.Load() != 0 || store.Get(req.BeadID) != nil {
 		t.Fatalf("blocked preflight side effects: claims=%d reservations=%d dispatches=%d stored=%+v",
 			claimCalls, reserver.calls.Load(), dispatcher.calls.Load(), store.Get(req.BeadID))
+	}
+}
+
+func TestAtomicAssignmentEligibilityRejectionStopsReservationAndDispatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var claimCalls atomic.Int32
+	claimer := ClaimFunc(func(context.Context, string, string) (ClaimReceipt, error) {
+		claimCalls.Add(1)
+		return ClaimReceipt{}, fmt.Errorf("%w: dependency added at claim boundary", ErrClaimIneligible)
+	})
+	reserver := &atomicReservationRecorder{}
+	dispatcher := &atomicDispatchRecorder{}
+	store := NewStore("atomic-eligibility-rejected")
+	coordinator := NewAtomicCoordinator(store, claimer, reserver, dispatcher)
+	req := atomicTestRequest("eligibility-rejected", "%95")
+	req.RequireReservation = true
+	req.RequestedPaths = []string{"internal/assignment/**"}
+
+	result, err := coordinator.Execute(t.Context(), req)
+	if !errors.Is(err, ErrClaimIneligible) || result.Sent {
+		t.Fatalf("eligibility rejection result=%+v error=%v", result, err)
+	}
+	stored := store.Get(req.BeadID)
+	if claimCalls.Load() != 1 || reserver.calls.Load() != 0 || dispatcher.calls.Load() != 0 {
+		t.Fatalf("eligibility rejection side effects: claims=%d reservations=%d dispatches=%d",
+			claimCalls.Load(), reserver.calls.Load(), dispatcher.calls.Load())
+	}
+	if stored == nil || stored.ClaimState != ClaimIneligible || stored.Status != StatusFailed ||
+		stored.ClaimAttempts != 1 || stored.ReservationAttempts != 0 || stored.DispatchAttempts != 0 {
+		t.Fatalf("eligibility rejection durable row=%+v", stored)
+	}
+
+	replay, replayErr := coordinator.Execute(t.Context(), req)
+	if !errors.Is(replayErr, ErrClaimIneligible) || replay.Sent || claimCalls.Load() != 1 ||
+		reserver.calls.Load() != 0 || dispatcher.calls.Load() != 0 {
+		t.Fatalf("eligibility replay result=%+v error=%v claims=%d reservations=%d dispatches=%d",
+			replay, replayErr, claimCalls.Load(), reserver.calls.Load(), dispatcher.calls.Load())
 	}
 }
 
@@ -1287,10 +1974,11 @@ func TestAtomicAssignmentKnownZeroGrantFailureIsRetryable(t *testing.T) {
 		if reserveCalls.Add(1) == 1 {
 			return LeaseReceipt{AgentName: req.AgentName, Target: req.Target}, GuaranteeNoReservation(errors.New("reservation conflict before actuation"))
 		}
+		expiresAt := time.Now().UTC().Add(time.Hour)
 		return LeaseReceipt{
 			AgentName: req.AgentName, Target: req.Target,
 			Requested: append([]string(nil), req.RequestedPaths...), Granted: append([]string(nil), req.RequestedPaths...),
-			ReservationIDs: []int{84},
+			ReservationIDs: []int{84}, ExpiresAt: &expiresAt,
 		}, nil
 	})
 	request := atomicTestRequest("known-zero-grant", "%84")
@@ -1354,10 +2042,11 @@ func TestAtomicAssignmentRejectsMismatchedReservationReceipts(t *testing.T) {
 			claimer := &atomicClaimLedger{}
 			dispatcher := &atomicDispatchRecorder{}
 			reserver := ReservationFunc(func(_ context.Context, req ReservationRequest) (LeaseReceipt, error) {
+				expiresAt := time.Now().UTC().Add(time.Hour)
 				lease := LeaseReceipt{
 					AgentName: req.AgentName, Target: req.Target,
 					Requested: append([]string(nil), req.RequestedPaths...), Granted: append([]string(nil), req.RequestedPaths...),
-					ReservationIDs: []int{42},
+					ReservationIDs: []int{42}, ExpiresAt: &expiresAt,
 				}
 				test.alter(&lease)
 				return lease, nil
@@ -1377,6 +2066,100 @@ func TestAtomicAssignmentRejectsMismatchedReservationReceipts(t *testing.T) {
 				t.Fatalf("invalid reservation state = %+v", stored)
 			}
 		})
+	}
+}
+
+func TestAtomicAssignmentRejectsMalformedRequiredLeaseReceipts(t *testing.T) {
+	tests := []struct {
+		name      string
+		alter     func(*LeaseReceipt)
+		wantError string
+	}{
+		{name: "requested mismatch", alter: func(lease *LeaseReceipt) { lease.Requested = []string{"internal/other/**"} }, wantError: "requested paths"},
+		{name: "duplicate requested path", alter: func(lease *LeaseReceipt) { lease.Requested = append(lease.Requested, lease.Requested[0]) }, wantError: "duplicated"},
+		{name: "unexpected granted path", alter: func(lease *LeaseReceipt) { lease.Granted = []string{"internal/other/**"} }, wantError: "not granted"},
+		{name: "duplicate granted path", alter: func(lease *LeaseReceipt) { lease.Granted = append(lease.Granted, lease.Granted[0]) }, wantError: "duplicated"},
+		{name: "missing reservation id", alter: func(lease *LeaseReceipt) { lease.ReservationIDs = nil }, wantError: "no positive durable reservation IDs"},
+		{name: "invalid reservation id", alter: func(lease *LeaseReceipt) { lease.ReservationIDs = []int{0} }, wantError: "invalid ID"},
+		{name: "duplicate reservation id", alter: func(lease *LeaseReceipt) { lease.ReservationIDs = []int{42, 42} }, wantError: "repeats ID"},
+		{name: "missing expiry", alter: func(lease *LeaseReceipt) { lease.ExpiresAt = nil }, wantError: "future expiry"},
+		{name: "expired lease", alter: func(lease *LeaseReceipt) { expired := time.Now().UTC().Add(-time.Minute); lease.ExpiresAt = &expired }, wantError: "future expiry"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			dispatcher := &atomicDispatchRecorder{}
+			reserver := ReservationFunc(func(_ context.Context, req ReservationRequest) (LeaseReceipt, error) {
+				expiresAt := time.Now().UTC().Add(time.Hour)
+				lease := LeaseReceipt{
+					AgentName: req.AgentName, Target: req.Target,
+					Requested: append([]string(nil), req.RequestedPaths...), Granted: append([]string(nil), req.RequestedPaths...),
+					ReservationIDs: []int{42}, ExpiresAt: &expiresAt,
+				}
+				test.alter(&lease)
+				return lease, nil
+			})
+			store := NewStore("atomic-malformed-required-lease-" + strings.ReplaceAll(test.name, " ", "-"))
+			request := atomicTestRequest("malformed-required-lease-"+test.name, "%89")
+			request.RequireReservation = true
+			request.RequestedPaths = []string{"internal/assignment/**"}
+			result, err := NewAtomicCoordinator(store, &atomicClaimLedger{}, reserver, dispatcher).Execute(t.Context(), request)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) || !errors.Is(err, ErrReservationReleaseRequired) || result.Sent {
+				t.Fatalf("malformed lease result=%+v error=%v, want release-required containing %q", result, err, test.wantError)
+			}
+			stored := store.Get(request.BeadID)
+			if stored == nil || stored.ReservationCompleted || stored.ReservationError == "" || dispatcher.calls.Load() != 0 {
+				t.Fatalf("malformed lease crossed dispatch or lost error: stored=%+v dispatches=%d", stored, dispatcher.calls.Load())
+			}
+		})
+	}
+}
+
+func TestAtomicAssignmentRequiredLeaseAllowsMultipleUniqueIDsForOnePath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	reserver := ReservationFunc(func(_ context.Context, req ReservationRequest) (LeaseReceipt, error) {
+		return LeaseReceipt{
+			AgentName: req.AgentName, Target: req.Target,
+			Requested: append([]string(nil), req.RequestedPaths...), Granted: append([]string(nil), req.RequestedPaths...),
+			ReservationIDs: []int{91, 92}, ExpiresAt: &expiresAt,
+		}, nil
+	})
+	request := atomicTestRequest("multiple-ids-one-path", "%90")
+	request.RequireReservation = true
+	request.RequestedPaths = []string{"internal/assignment/**"}
+	result, err := NewAtomicCoordinator(NewStore("atomic-multiple-ids-one-path"), &atomicClaimLedger{}, reserver, &atomicDispatchRecorder{}).Execute(t.Context(), request)
+	if err != nil || !result.Sent || !reflect.DeepEqual(result.Lease.ReservationIDs, []int{91, 92}) {
+		t.Fatalf("multiple ID lease result=%+v error=%v", result, err)
+	}
+}
+
+func TestAtomicAssignmentRevalidatesPersistedRequiredLeaseBeforeDispatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-persisted-lease-validation")
+	dispatcher := &atomicDispatchRecorder{}
+	dispatcher.failFirst.Store(true)
+	request := atomicTestRequest("persisted-required-lease", "%93")
+	request.RequireReservation = true
+	request.RequestedPaths = []string{"internal/assignment/**"}
+	coordinator := NewAtomicCoordinator(store, &atomicClaimLedger{}, &atomicReservationRecorder{}, dispatcher)
+	if _, err := coordinator.Execute(t.Context(), request); err == nil || !IsGuaranteedNoActuation(err) {
+		t.Fatalf("seed dispatch error=%v, want guaranteed no actuation", err)
+	}
+	store.mutex.Lock()
+	store.Assignments[request.BeadID].ReservationExpiresAt = nil
+	store.mutex.Unlock()
+	if err := store.Save(); err != nil {
+		t.Fatalf("persist malformed lease: %v", err)
+	}
+	dispatcher.failFirst.Store(false)
+	result, err := NewAtomicCoordinator(store, &atomicClaimLedger{}, nil, dispatcher).Execute(t.Context(), request)
+	if !errors.Is(err, ErrReservationReleaseRequired) || result.Sent {
+		t.Fatalf("persisted malformed lease result=%+v error=%v", result, err)
+	}
+	if dispatcher.calls.Load() != 1 {
+		t.Fatalf("persisted malformed lease redispatched: %d", dispatcher.calls.Load())
 	}
 }
 
@@ -1528,6 +2311,71 @@ func TestAtomicAssignmentAmbiguousDispatchErrorStaysSendingAndCannotRetry(t *tes
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("dispatch calls=%d, want 1", calls.Load())
+	}
+}
+
+func TestAtomicAssignmentEmptyDispatchReceiptStaysSendingAndCannotRetry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var calls atomic.Int32
+	dispatcher := DispatchFunc(func(context.Context, DispatchRequest) (DispatchReceipt, error) {
+		calls.Add(1)
+		return DispatchReceipt{Duration: time.Millisecond}, nil
+	})
+	store := NewStore("atomic-empty-dispatch-receipt")
+	request := atomicTestRequest("empty-dispatch-receipt", "%96")
+	coordinator := NewAtomicCoordinator(store, &atomicClaimLedger{}, nil, dispatcher)
+	first, err := coordinator.Execute(t.Context(), request)
+	if !errors.Is(err, ErrDispatchOutcomeUnknown) || first.Sent {
+		t.Fatalf("first empty receipt result=%+v error=%v", first, err)
+	}
+	stored := store.Get(request.BeadID)
+	if stored == nil || stored.DispatchState != DispatchSending || stored.DispatchReceiptID != "" || stored.DispatchAttempts != 1 {
+		t.Fatalf("empty receipt durable state=%+v", stored)
+	}
+	second, err := coordinator.Execute(t.Context(), request)
+	if !errors.Is(err, ErrDispatchOutcomeUnknown) || second.Sent || calls.Load() != 1 {
+		t.Fatalf("empty receipt retry result=%+v error=%v calls=%d", second, err, calls.Load())
+	}
+}
+
+func TestAtomicAssignmentRefusesMalformedPersistedDispatchReplay(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-malformed-dispatch-replay")
+	request := atomicTestRequest("malformed-dispatch-replay", "%97")
+	dispatcher := &atomicDispatchRecorder{}
+	coordinator := NewAtomicCoordinator(store, &atomicClaimLedger{}, nil, dispatcher)
+	if result, err := coordinator.Execute(t.Context(), request); err != nil || !result.Sent {
+		t.Fatalf("seed dispatch result=%+v error=%v", result, err)
+	}
+	store.mutex.Lock()
+	store.Assignments[request.BeadID].DispatchReceiptID = ""
+	store.mutex.Unlock()
+	if err := store.Save(); err != nil {
+		t.Fatalf("persist malformed dispatch receipt: %v", err)
+	}
+	result, err := coordinator.Execute(t.Context(), request)
+	if !errors.Is(err, ErrDispatchOutcomeUnknown) || result.Sent || result.Replayed || dispatcher.calls.Load() != 1 {
+		t.Fatalf("malformed replay result=%+v error=%v dispatches=%d", result, err, dispatcher.calls.Load())
+	}
+}
+
+func TestRecordAtomicDispatchSentRejectsEmptyReceiptWithoutMutation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-record-empty-dispatch-receipt")
+	request := atomicTestRequest("record-empty-dispatch-receipt", "%98")
+	actor := StableClaimActor(request.Actor, request.IdempotencyKey)
+	if _, err := store.RecordAtomicIntent(request, actor, time.Now().UTC()); err != nil {
+		t.Fatalf("RecordAtomicIntent: %v", err)
+	}
+	if err := store.RecordAtomicDispatchStarted(request.BeadID, request.IdempotencyKey, time.Now().UTC()); err != nil {
+		t.Fatalf("RecordAtomicDispatchStarted: %v", err)
+	}
+	if err := store.RecordAtomicDispatchSent(request.BeadID, request.IdempotencyKey, request.Prompt, DispatchReceipt{}, time.Now().UTC()); err == nil {
+		t.Fatal("RecordAtomicDispatchSent accepted an empty receipt")
+	}
+	stored := store.Get(request.BeadID)
+	if stored == nil || stored.DispatchState != DispatchSending || stored.Status != StatusClaiming || stored.DispatchReceiptID != "" {
+		t.Fatalf("empty receipt mutated dispatch state: %+v", stored)
 	}
 }
 

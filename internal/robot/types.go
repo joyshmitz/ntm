@@ -135,6 +135,10 @@ const (
 
 	// ErrCodePromptSendFailed indicates failed to send prompt.
 	ErrCodePromptSendFailed = "PROMPT_SEND_FAILED"
+
+	// ErrCodeDispatchUnknown means delivery may have occurred but no trustworthy
+	// final receipt was available, so blind retry could duplicate the prompt.
+	ErrCodeDispatchUnknown = "DISPATCH_UNKNOWN"
 )
 
 // ResponseMeta provides optional metadata about response generation.

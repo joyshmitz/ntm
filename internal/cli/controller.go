@@ -186,7 +186,7 @@ func runController(opts ControllerInput) error {
 	if IsJSONOutput() {
 		result, err := kernel.Run(context.Background(), "sessions.controller", opts)
 		if err != nil {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return output.PrintJSON(result)
 	}

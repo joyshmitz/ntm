@@ -54,6 +54,48 @@ func captureStdout(t *testing.T, f func() error) (string, error) {
 	return buf.String(), err
 }
 
+func TestCaptureNormalizedTmuxPanesCancellationJoinsWorkers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan string, 2)
+	var joined atomic.Int32
+	blockingCapture := func(ctx context.Context, paneID string) (string, error) {
+		started <- paneID
+		defer joined.Add(1)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := captureNormalizedTmuxPanes(ctx, []normalizedTmuxCaptureJob{
+			{paneID: "%1"},
+			{paneID: "%2", modelName: "codex"},
+		}, 2, blockingCapture, blockingCapture)
+		done <- err
+	}()
+
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("capture worker did not start")
+		}
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("capture error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("capture pool did not join after cancellation")
+	}
+	if got := joined.Load(); got != 2 {
+		t.Fatalf("joined workers = %d, want 2", got)
+	}
+}
+
 // ====================
 // Test Helper Functions
 // ====================
@@ -4552,10 +4594,10 @@ func TestGenerateAssignHints(t *testing.T) {
 
 	t.Run("recommendations generated", func(t *testing.T) {
 		recs := []AssignRecommend{
-			{Agent: "1", AssignBead: "ntm-123"},
-			{Agent: "2", AssignBead: "ntm-456"},
+			{PaneID: "%11", PaneTarget: "0.1", AssignBead: "ntm-123"},
+			{PaneID: "%22", PaneTarget: "1.2", AssignBead: "ntm-456"},
 		}
-		idleAgents := []string{"1", "2"}
+		idleAgents := []string{"%11", "%22"}
 		hints := generateAssignHints(recs, idleAgents, nil, nil)
 		if !strings.Contains(hints.Summary, "2 assignments recommended") {
 			t.Errorf("Expected summary about 2 assignments, got %q", hints.Summary)
@@ -4592,7 +4634,8 @@ func TestAssignOutputJSON(t *testing.T) {
 		GeneratedAt:   time.Now().UTC(),
 		Recommendations: []AssignRecommend{
 			{
-				Agent:      "1",
+				PaneID:     "%11",
+				PaneTarget: "0.1",
 				AgentType:  "claude",
 				Model:      "sonnet",
 				AssignBead: "ntm-abc",
@@ -4603,7 +4646,7 @@ func TestAssignOutputJSON(t *testing.T) {
 			},
 		},
 		BlockedBeads: []BlockedBead{},
-		IdleAgents:   []string{"1"},
+		IdleAgents:   []string{"%11"},
 		Summary: AssignSummary{
 			TotalAgents:     2,
 			IdleAgents:      1,

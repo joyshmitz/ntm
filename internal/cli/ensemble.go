@@ -124,7 +124,7 @@ Primary usage:
 			projectDir, err := resolveEnsembleProjectDir(opts.Project)
 			if err != nil {
 				if IsJSONOutput() {
-					_ = output.PrintJSON(output.NewError(err.Error()))
+					return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 				}
 				return err
 			}
@@ -132,7 +132,7 @@ Primary usage:
 
 			if err := tmux.EnsureInstalled(); err != nil {
 				if IsJSONOutput() {
-					_ = output.PrintJSON(output.NewError(err.Error()))
+					return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 				}
 				return err
 			}
@@ -448,13 +448,22 @@ func runEnsembleStop(w io.Writer, session string, opts ensembleStopOptions) erro
 		"errors", len(stopErrors)+len(collectErrors),
 	)
 
+	if !result.Success {
+		return renderEnsembleStopFailureOutput(w, result, format, opts.Quiet, errors.Join(stopErrors...))
+	}
 	return renderEnsembleStopOutput(w, result, format, opts.Quiet)
 }
 
 func renderEnsembleStopOutput(w io.Writer, payload ensembleStopOutput, format string, quiet bool) error {
 	switch format {
 	case "json":
-		return output.WriteJSON(w, payload, true)
+		if err := output.WriteJSON(w, payload, true); err != nil {
+			return err
+		}
+		if !payload.Success {
+			return jsonFailureExit()
+		}
+		return nil
 	case "yaml", "yml":
 		data, err := yaml.Marshal(payload)
 		if err != nil {
@@ -494,6 +503,14 @@ func renderEnsembleStopOutput(w io.Writer, payload ensembleStopOutput, format st
 	default:
 		return fmt.Errorf("invalid format %q (expected text, json, yaml)", format)
 	}
+}
+
+func renderEnsembleStopFailureOutput(w io.Writer, payload ensembleStopOutput, format string, quiet bool, cause error) error {
+	err := renderEnsembleStopOutput(w, payload, format, quiet)
+	if cause != nil && errors.Is(err, errJSONFailure) {
+		return errors.Join(err, cause)
+	}
+	return err
 }
 
 func runEnsembleStatus(w io.Writer, session string, opts ensembleStatusOptions) error {
@@ -2800,29 +2817,31 @@ func runEnsembleResume(w io.Writer, runID, format string, quiet, skipDone bool) 
 			Success:     false,
 			Error:       err.Error(),
 		}
-		return renderCheckpointResumeOutput(w, result, format, quiet)
+		return renderCheckpointResumeFailureOutput(w, result, format, quiet, err)
 	}
 
 	if !store.RunExists(runID) {
 		errMsg := fmt.Sprintf("checkpoint run '%s' not found", runID)
+		cause := errors.New(errMsg)
 		result := checkpointResumeOutput{
 			GeneratedAt: output.Timestamp(),
 			RunID:       runID,
 			Success:     false,
 			Error:       errMsg,
 		}
-		return renderCheckpointResumeOutput(w, result, format, quiet)
+		return renderCheckpointResumeFailureOutput(w, result, format, quiet, cause)
 	}
 
 	meta, err := store.LoadMetadata(runID)
 	if err != nil {
+		cause := fmt.Errorf("load checkpoint metadata: %w", err)
 		errPayload := checkpointResumeOutput{
 			GeneratedAt: output.Timestamp(),
 			RunID:       runID,
 			Success:     false,
-			Error:       fmt.Sprintf("load checkpoint metadata: %v", err),
+			Error:       cause.Error(),
 		}
-		return renderCheckpointResumeOutput(w, errPayload, format, quiet)
+		return renderCheckpointResumeFailureOutput(w, errPayload, format, quiet, cause)
 	}
 
 	slog.Default().Info("resuming ensemble run",
@@ -2904,6 +2923,14 @@ func renderCheckpointResumeOutput(w io.Writer, payload checkpointResumeOutput, f
 	}
 }
 
+func renderCheckpointResumeFailureOutput(w io.Writer, payload checkpointResumeOutput, format string, quiet bool, cause error) error {
+	err := renderCheckpointResumeOutput(w, payload, format, quiet)
+	if cause != nil && errors.Is(err, errJSONFailure) {
+		return errors.Join(err, cause)
+	}
+	return err
+}
+
 func newEnsembleRerunModeCmd() *cobra.Command {
 	var (
 		format string
@@ -2954,35 +2981,45 @@ func runEnsembleRerunMode(w io.Writer, runID, modeRef, format string, quiet bool
 			Success:     false,
 			Error:       err.Error(),
 		}
-		return renderCheckpointResumeOutput(w, errPayload, format, quiet)
+		return renderCheckpointResumeFailureOutput(w, errPayload, format, quiet, err)
 	}
 
 	if !store.RunExists(runID) {
+		cause := fmt.Errorf("checkpoint run '%s' not found", runID)
 		errPayload := checkpointResumeOutput{
 			GeneratedAt: output.Timestamp(),
 			RunID:       runID,
 			Success:     false,
-			Error:       fmt.Sprintf("checkpoint run '%s' not found", runID),
+			Error:       cause.Error(),
 		}
-		return renderCheckpointResumeOutput(w, errPayload, format, quiet)
+		return renderCheckpointResumeFailureOutput(w, errPayload, format, quiet, cause)
 	}
 
 	meta, err := store.LoadMetadata(runID)
 	if err != nil {
+		cause := fmt.Errorf("load checkpoint metadata: %w", err)
 		errPayload := checkpointResumeOutput{
 			GeneratedAt: output.Timestamp(),
 			RunID:       runID,
 			Success:     false,
-			Error:       fmt.Sprintf("load checkpoint metadata: %v", err),
+			Error:       cause.Error(),
 		}
-		return renderCheckpointResumeOutput(w, errPayload, format, quiet)
+		return renderCheckpointResumeFailureOutput(w, errPayload, format, quiet, cause)
 	}
 
 	modeID := strings.TrimSpace(modeRef)
 	if !checkpointRunContainsMode(meta, modeID) {
 		catalog, err := loadModeCatalogForProjectDir(projectDir)
 		if err != nil {
-			return fmt.Errorf("load mode catalog: %w", err)
+			cause := fmt.Errorf("load mode catalog: %w", err)
+			errPayload := checkpointResumeOutput{
+				GeneratedAt: output.Timestamp(),
+				RunID:       runID,
+				Session:     meta.SessionName,
+				Success:     false,
+				Error:       cause.Error(),
+			}
+			return renderCheckpointResumeFailureOutput(w, errPayload, format, quiet, cause)
 		}
 		resolvedModeID, _, err := resolveModeID(modeRef, catalog)
 		if err != nil {
@@ -2993,18 +3030,19 @@ func runEnsembleRerunMode(w io.Writer, runID, modeRef, format string, quiet bool
 				Success:     false,
 				Error:       err.Error(),
 			}
-			return renderCheckpointResumeOutput(w, errPayload, format, quiet)
+			return renderCheckpointResumeFailureOutput(w, errPayload, format, quiet, err)
 		}
 		modeID = resolvedModeID
 		if !checkpointRunContainsMode(meta, modeID) {
+			cause := fmt.Errorf("mode %q not found in checkpoint run '%s'", modeID, runID)
 			errPayload := checkpointResumeOutput{
 				GeneratedAt: output.Timestamp(),
 				RunID:       runID,
 				Session:     meta.SessionName,
 				Success:     false,
-				Error:       fmt.Sprintf("mode %q not found in checkpoint run '%s'", modeID, runID),
+				Error:       cause.Error(),
 			}
-			return renderCheckpointResumeOutput(w, errPayload, format, quiet)
+			return renderCheckpointResumeFailureOutput(w, errPayload, format, quiet, cause)
 		}
 	}
 

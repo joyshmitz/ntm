@@ -1,9 +1,14 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/health"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
 
 func TestStatusSeverity(t *testing.T) {
@@ -120,4 +125,118 @@ func TestCoerceHealthOutput(t *testing.T) {
 			t.Error("expected error for int type, got nil")
 		}
 	})
+}
+
+func TestRunHealthOnceJSONHardFailuresEmitOneDocument(t *testing.T) {
+	oldJSONOutput := jsonOutput
+	oldHealthWatch := healthWatch
+	oldKernelRun := healthKernelRun
+	jsonOutput = true
+	healthWatch = false
+	t.Cleanup(func() {
+		jsonOutput = oldJSONOutput
+		healthWatch = oldHealthWatch
+		healthKernelRun = oldKernelRun
+	})
+
+	t.Run("kernel error", func(t *testing.T) {
+		cause := errors.New("kernel sentinel")
+		healthKernelRun = func(context.Context, string, any) (any, error) {
+			return nil, cause
+		}
+		stdout, runErr := captureStdout(t, func() error { return runHealthOnce("test-session") })
+		if !errors.Is(runErr, errJSONFailure) || !errors.Is(runErr, cause) {
+			t.Fatalf("error = %v, want errJSONFailure joined with kernel cause", runErr)
+		}
+		assertHealthFailureJSON(t, stdout, "kernel sentinel")
+	})
+
+	t.Run("coercion error", func(t *testing.T) {
+		healthKernelRun = func(context.Context, string, any) (any, error) {
+			return struct{}{}, nil
+		}
+		stdout, runErr := captureStdout(t, func() error { return runHealthOnce("test-session") })
+		if !errors.Is(runErr, errJSONFailure) {
+			t.Fatalf("error = %v, want errJSONFailure", runErr)
+		}
+		assertHealthFailureJSON(t, stdout, "unexpected type")
+	})
+}
+
+func TestRunHealthOnceJSONSeverityExitLadder(t *testing.T) {
+	oldJSONOutput := jsonOutput
+	oldHealthWatch := healthWatch
+	oldKernelRun := healthKernelRun
+	jsonOutput = true
+	healthWatch = false
+	t.Cleanup(func() {
+		jsonOutput = oldJSONOutput
+		healthWatch = oldHealthWatch
+		healthKernelRun = oldKernelRun
+	})
+
+	tests := []struct {
+		name     string
+		status   health.Status
+		wantCode int
+	}{
+		{name: "ok", status: health.StatusOK, wantCode: 0},
+		{name: "warning", status: health.StatusWarning, wantCode: 1},
+		{name: "error", status: health.StatusError, wantCode: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			healthKernelRun = func(context.Context, string, any) (any, error) {
+				return HealthOutput{SessionHealth: &health.SessionHealth{
+					Session:       "test-session",
+					OverallStatus: tt.status,
+				}}, nil
+			}
+			stdout, runErr := captureStdout(t, func() error { return runHealthOnce("test-session") })
+
+			var response map[string]interface{}
+			if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+				t.Fatalf("single JSON response decode failed: %v\nstdout=%s", err, stdout)
+			}
+			if tt.wantCode == 0 {
+				if runErr != nil {
+					t.Fatalf("error = %v, want nil", runErr)
+				}
+				if response["success"] != true {
+					t.Fatalf("success = %v, want true", response["success"])
+				}
+				return
+			}
+
+			var exitErr *robot.ProcessExitError
+			if !errors.As(runErr, &exitErr) {
+				t.Fatalf("error = %v, want ProcessExitError", runErr)
+			}
+			if exitErr.ExitCode() != tt.wantCode || !exitErr.JSONWritten() {
+				t.Fatalf("exit result = code %d, json_written %v; want %d, true", exitErr.ExitCode(), exitErr.JSONWritten(), tt.wantCode)
+			}
+			if response["success"] != false {
+				t.Fatalf("success = %v, want false", response["success"])
+			}
+			if response["error"] == "" || response["error"] == nil {
+				t.Fatalf("error = %v, want severity cause", response["error"])
+			}
+		})
+	}
+}
+
+func assertHealthFailureJSON(t *testing.T, stdout, wantError string) {
+	t.Helper()
+	var response map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("single JSON response decode failed: %v\nstdout=%s", err, stdout)
+	}
+	if response["success"] != false {
+		t.Fatalf("success = %v, want false", response["success"])
+	}
+	errorText, _ := response["error"].(string)
+	if !strings.Contains(errorText, wantError) {
+		t.Fatalf("error = %q, want substring %q", errorText, wantError)
+	}
 }

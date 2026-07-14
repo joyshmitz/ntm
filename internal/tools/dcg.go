@@ -142,8 +142,11 @@ var (
 	dcgAvailabilityMutex  sync.RWMutex
 	dcgAvailabilityTTL    = 5 * time.Minute
 	dcgMinVersion         = Version{Major: 0, Minor: 1, Patch: 0}
-	dcgLogger             = slog.Default().With("component", "tools.dcg")
 )
+
+func dcgLogger() *slog.Logger {
+	return slog.Default().With("component", "tools.dcg")
+}
 
 // BlockedCommand represents a command that was blocked by DCG
 type BlockedCommand struct {
@@ -269,7 +272,7 @@ func (a *DCGAdapter) fetchAvailability(ctx context.Context) *DCGAvailability {
 	path, err := exec.LookPath(a.BinaryName())
 	if err != nil {
 		availability.Error = err.Error()
-		dcgLogger.Warn("dcg binary not found", "error", err)
+		dcgLogger().Warn("dcg binary not found", "error", err)
 		return availability
 	}
 
@@ -279,13 +282,13 @@ func (a *DCGAdapter) fetchAvailability(ctx context.Context) *DCGAvailability {
 	version, err := a.Version(ctx)
 	if err != nil {
 		availability.Error = err.Error()
-		dcgLogger.Warn("dcg version check failed", "path", path, "error", err)
+		dcgLogger().Warn("dcg version check failed", "path", path, "error", err)
 		return availability
 	}
 
 	availability.Version = version
 	if !dcgCompatible(version) {
-		dcgLogger.Warn("dcg version incompatible", "path", path, "version", version.String(), "min_version", dcgMinVersion.String())
+		dcgLogger().Warn("dcg version incompatible", "path", path, "version", version.String(), "min_version", dcgMinVersion.String())
 		return availability
 	}
 

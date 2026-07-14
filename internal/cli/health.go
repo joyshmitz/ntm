@@ -28,6 +28,7 @@ var (
 	healthStatus           string
 	healthAutoRestartStuck bool
 	healthThreshold        string
+	healthKernelRun        = kernel.Run
 )
 
 // SessionHealthInput is the kernel input for sessions.health.
@@ -228,94 +229,36 @@ func runHealthOnce(session string) error {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		result, err := kernel.Run(ctx, "sessions.health", SessionHealthInput{
+		result, err := healthKernelRun(ctx, "sessions.health", SessionHealthInput{
 			Session: session,
 			Pane:    pane,
 			Status:  healthStatus,
 			Verbose: healthVerbose,
 		})
 		if err != nil {
-			if encErr := encodeHealthOutput(HealthOutput{
+			return emitHealthJSONFailure(HealthOutput{
 				SessionHealth: &health.SessionHealth{Session: session},
 				Error:         err.Error(),
-			}); encErr != nil {
-				return encErr
-			}
-			return err
+			}, err)
 		}
 		output, err := coerceHealthOutput(result)
 		if err != nil {
-			if encErr := encodeHealthOutput(HealthOutput{
+			return emitHealthJSONFailure(HealthOutput{
 				SessionHealth: &health.SessionHealth{Session: session},
 				Error:         err.Error(),
-			}); encErr != nil {
-				return encErr
-			}
-			return err
+			}, err)
 		}
-		// Print the JSON document first so automation can still
-		// parse the report. Only after that do we surface a non-OK
-		// outcome via the documented severity ladder (#112) — the
-		// non-JSON path at the bottom of `renderHealthTUI` already
-		// uses `os.Exit(1)` for warning and `os.Exit(2)` for
-		// error; mirror that here so the contract is the same in
-		// both modes.
-		//
-		// `os.Exit` skips audit teardown (root.go's
-		// `logCommandAuditEnd` / `audit.CloseAll`), but that is
-		// the pre-existing trade-off the non-JSON path already
-		// made — keeping the two modes in lockstep is more
-		// valuable than smuggling a richer exit code through
-		// cobra.
+		exitCode, cause := healthOutputExitResult(output)
+		if cause != nil {
+			output.Error = cause.Error()
+		}
 		if err := encodeHealthOutput(output); err != nil {
 			return err
 		}
-		// In watch mode `runHealthOnce` is invoked from inside
-		// `runHealthWatch`'s ticker loop, which deliberately
-		// keeps running across non-OK ticks (see the
-		// `// Don't exit on transient errors in watch mode`
-		// comment in the watch loop). The non-JSON path mirrors
-		// that with an `if !healthWatch` guard around its
-		// severity-ladder `os.Exit` calls; do the same here so a
-		// `--json --watch` session doesn't terminate on the
-		// first warning/error tick.
 		if healthWatch {
 			return nil
 		}
-		// `Error` covers the "buildHealthOutput surfaced a soft
-		// failure (e.g. session not found) but still produced a
-		// JSON-shaped report" case — those legitimately had an
-		// empty `OverallStatus` and slipped through the previous
-		// status-only check. Map to exit 1 to match the non-JSON
-		// path's `SessionNotFoundError` handling, which returns a
-		// `fmt.Errorf` and lets cobra exit 1 (the default
-		// returned-error code).
-		if output.Error != "" {
-			os.Exit(1)
-		}
-		// A nil `SessionHealth` after a successful kernel return
-		// is degenerate — `buildHealthOutput` always populates
-		// the embedded pointer, even on the soft "session not
-		// found" path. Treat it as warning-level rather than
-		// silently exiting 0.
-		if output.SessionHealth == nil {
-			os.Exit(1)
-		}
-		// Mirror the severity ladder from the non-JSON path:
-		// `StatusError` → 2, anything else not-OK (warning,
-		// unknown, or the empty-string zero value) → 1, OK → 0.
-		switch output.OverallStatus {
-		case health.StatusOK:
-			return nil
-		case health.StatusError:
-			os.Exit(2)
-		default:
-			// StatusWarning, StatusUnknown, "" — all map to
-			// exit 1 so future Status additions don't silently
-			// regress to a healthy exit code.
-			os.Exit(1)
-		}
-		return nil
+		return robot.ExitResultForCode(exitCode, cause, true)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -543,20 +486,56 @@ func encodeHealthOutput(output HealthOutput) error {
 	return outputHealthJSON(output.SessionHealth, err)
 }
 
-func outputHealthJSON(result *health.SessionHealth, err error) error {
-	type jsonOutput struct {
-		*health.SessionHealth
-		Error string `json:"error,omitempty"`
-	}
+type healthJSONResult struct {
+	Success bool `json:"success"`
+	*health.SessionHealth
+	Error string `json:"error,omitempty"`
+}
 
-	output := jsonOutput{SessionHealth: result}
+func makeHealthJSONResult(output HealthOutput) healthJSONResult {
+	if output.SessionHealth == nil {
+		output.SessionHealth = &health.SessionHealth{}
+	}
+	return healthJSONResult{
+		Success:       output.Error == "",
+		SessionHealth: output.SessionHealth,
+		Error:         output.Error,
+	}
+}
+
+func emitHealthJSONFailure(output HealthOutput, cause error) error {
+	if cause != nil {
+		output.Error = cause.Error()
+	}
+	return emitJSONFailureEnvelopeWithCause(makeHealthJSONResult(output), cause)
+}
+
+func healthOutputExitResult(output HealthOutput) (int, error) {
+	if output.Error != "" {
+		return 1, errors.New(output.Error)
+	}
+	if output.SessionHealth == nil {
+		return 1, errors.New("health response did not include session health")
+	}
+	switch output.OverallStatus {
+	case health.StatusOK:
+		return 0, nil
+	case health.StatusError:
+		return 2, errors.New("session health status is error")
+	default:
+		return 1, fmt.Errorf("session health status is %s", output.OverallStatus)
+	}
+}
+
+func outputHealthJSON(result *health.SessionHealth, err error) error {
+	output := HealthOutput{SessionHealth: result}
 	if err != nil {
 		output.Error = err.Error()
 	}
 
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(output)
+	return encoder.Encode(makeHealthJSONResult(output))
 }
 
 func renderHealthTUI(result *health.SessionHealth) error {
@@ -716,9 +695,9 @@ func renderHealthTUI(result *health.SessionHealth) error {
 	if !healthWatch {
 		switch result.OverallStatus {
 		case health.StatusError:
-			os.Exit(2)
+			return robot.ExitResultForCode(2, errors.New("session health status is error"), false)
 		case health.StatusWarning:
-			os.Exit(1)
+			return robot.ExitResultForCode(1, errors.New("session health status is warning"), false)
 		}
 	}
 

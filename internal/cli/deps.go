@@ -174,18 +174,39 @@ func runDeps(verbose bool) error {
 	result, err := kernel.Run(context.Background(), "core.deps", DepsInput{Verbose: verbose})
 	if err != nil {
 		if IsJSONOutput() {
-			_ = output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			}, err)
 		}
 		return err
 	}
 
 	resp, err := coerceDepsResponse(result)
 	if err != nil {
+		if IsJSONOutput() {
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			}, err)
+		}
 		return err
 	}
 
 	// JSON output mode
 	if IsJSONOutput() {
+		if !resp.AllInstalled {
+			cause := fmt.Errorf("required dependencies are missing")
+			return emitJSONFailureEnvelopeWithCause(struct {
+				Success bool `json:"success"`
+				output.DepsResponse
+				Error string `json:"error"`
+			}{
+				Success:      false,
+				DepsResponse: resp,
+				Error:        cause.Error(),
+			}, cause)
+		}
 		return output.PrintJSON(resp)
 	}
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -387,15 +388,20 @@ func MaybeRunStartupCleanup(enabled bool, maxAgeHours int, verbose bool) {
 
 	stats, err := RunStartupCleanup(maxAgeHours, verbose)
 	if err != nil && verbose {
-		fmt.Fprintf(os.Stderr, "ntm: startup cleanup failed: %v\n", err)
+		fmt.Fprintf(log.Writer(), "ntm: startup cleanup failed: %v\n", err)
 	}
 
 	if stats.DeletedFiles > 0 && verbose {
-		fmt.Fprintf(os.Stderr, "ntm: cleaned up %d stale temp files (%s)\n",
+		fmt.Fprintf(log.Writer(), "ntm: cleaned up %d stale temp files (%s)\n",
 			stats.DeletedFiles, util.FormatBytes(stats.DeletedSize))
 	}
 
-	markCleanupDone()
+	// A failed or partial cleanup must remain eligible for a later retry. A
+	// success marker here would hide an inaccessible temp root or stranded
+	// files for the entire configured interval.
+	if err == nil && stats.Errors == 0 {
+		markCleanupDone()
+	}
 }
 
 // RunStartupCleanup performs a silent cleanup of stale NTM temp files.
@@ -452,13 +458,13 @@ func RunStartupCleanup(maxAgeHours int, verbose bool) (CleanupStats, error) {
 		if removeErr != nil {
 			stats.Errors++
 			if verbose {
-				fmt.Fprintf(os.Stderr, "ntm: cleanup failed for %s: %v\n", fullPath, removeErr)
+				fmt.Fprintf(log.Writer(), "ntm: cleanup failed for %s: %v\n", fullPath, removeErr)
 			}
 		} else {
 			stats.DeletedFiles++
 			stats.DeletedSize += size
 			if verbose {
-				fmt.Fprintf(os.Stderr, "ntm: cleaned up %s (%s)\n", fullPath, util.FormatBytes(size))
+				fmt.Fprintf(log.Writer(), "ntm: cleaned up %s (%s)\n", fullPath, util.FormatBytes(size))
 			}
 		}
 	}

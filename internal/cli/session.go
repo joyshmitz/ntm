@@ -316,11 +316,11 @@ func runAttach(session string) error {
 	if IsJSONOutput() {
 		result, err := kernel.Run(context.Background(), "sessions.attach", SessionAttachInput{Session: session})
 		if err != nil {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		resp, err := coerceSessionResponse(result)
 		if err != nil {
-			return output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return output.PrintJSON(resp)
 	}
@@ -390,13 +390,16 @@ func runList(tags []string, project ...string) error {
 	result, err := kernel.Run(context.Background(), "sessions.list", input)
 	if err != nil {
 		if IsJSONOutput() {
-			_ = output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return err
 	}
 
 	resp, err := coerceSessionListResponse(result)
 	if err != nil {
+		if IsJSONOutput() {
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
+		}
 		return err
 	}
 
@@ -719,13 +722,13 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 	}
 
 	// Estimate context usage per pane (best-effort)
-	contextByIndex := make(map[int]paneContextUsage)
+	contextByPaneID := make(map[string]paneContextUsage)
 	for _, p := range panes {
 		usage, ok := estimatePaneContextUsage(p)
 		if !ok {
 			continue
 		}
-		contextByIndex[p.Index] = usage
+		contextByPaneID[p.ID] = usage
 	}
 
 	// Load assignments if requested (or if filtering/summary requires them)
@@ -770,17 +773,8 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 
 	// Add panes
 	for _, p := range panes {
-		paneResp := output.PaneResponse{
-			Index:   p.Index,
-			Title:   p.Title,
-			Type:    agentTypeToString(p.Type),
-			Variant: p.Variant,
-			Active:  p.Active,
-			Width:   p.Width,
-			Height:  p.Height,
-			Command: p.Command,
-		}
-		if usage, ok := contextByIndex[p.Index]; ok {
+		paneResp := paneResponseFromTMUX(p)
+		if usage, ok := contextByPaneID[p.ID]; ok {
 			paneResp.ContextTokens = usage.Tokens
 			paneResp.ContextLimit = usage.Limit
 			paneResp.ContextPercent = usage.Percent
@@ -953,8 +947,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	// Helper for JSON error output
 	outputError := func(err error) error {
 		if IsJSONOutput() {
-			_ = output.PrintJSON(output.NewError(err.Error()))
-			return err
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return err
 	}
@@ -1075,13 +1068,13 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	otherCount := counts.Other
 
 	// Estimate context usage per pane (best-effort)
-	contextByIndex := make(map[int]paneContextUsage)
+	contextByPaneID := make(map[string]paneContextUsage)
 	for _, p := range panes {
 		usage, ok := estimatePaneContextUsage(p)
 		if !ok {
 			continue
 		}
-		contextByIndex[p.Index] = usage
+		contextByPaneID[p.ID] = usage
 	}
 
 	// Load assignments if requested (or if filtering/summary requires them)
@@ -1281,7 +1274,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 
 	var contextRows []contextRow
 	for _, p := range panes {
-		usage, ok := contextByIndex[p.Index]
+		usage, ok := contextByPaneID[p.ID]
 		if !ok {
 			continue
 		}

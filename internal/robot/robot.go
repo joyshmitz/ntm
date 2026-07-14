@@ -4289,13 +4289,23 @@ func splitLines(s string) []string {
 // fetchAgentMailData retrieves Agent Mail state for the project.
 // Returns the summary, raw agent list, and per-agent stats map.
 func fetchAgentMailData(projectKey string) (*SnapshotAgentMail, []agentmail.Agent, map[string]SnapshotAgentMailStats) {
+	return fetchAgentMailDataContext(context.Background(), projectKey)
+}
+
+func fetchAgentMailDataContext(parent context.Context, projectKey string) (*SnapshotAgentMail, []agentmail.Agent, map[string]SnapshotAgentMailStats) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if parent.Err() != nil {
+		return nil, nil, nil
+	}
 	client := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
 
-	if !client.IsAvailable() {
+	if !client.IsAvailableContext(parent) {
 		return nil, nil, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 
 	// Ensure project exists
@@ -7264,7 +7274,7 @@ func RefreshNormalizedProjection(ctx context.Context, store *state.Store, projec
 		return nil
 	}
 
-	tmuxSnapshot, err := collectNormalizedTmuxProjection(resolvedProjectDir, normalizedProjectionStaleAfter)
+	tmuxSnapshot, err := collectNormalizedTmuxProjectionContext(ctx, resolvedProjectDir, normalizedProjectionStaleAfter)
 	if err != nil {
 		return fmt.Errorf("collect tmux projection: %w", err)
 	}
@@ -7293,15 +7303,31 @@ func resolveNormalizedProjectDir(projectDir string) (string, error) {
 }
 
 func collectNormalizedTmuxProjection(projectDir string, staleAfter time.Duration) (*NormalizedSnapshot, error) {
+	return collectNormalizedTmuxProjectionContext(context.Background(), projectDir, staleAfter)
+}
+
+func collectNormalizedTmuxProjectionContext(ctx context.Context, projectDir string, staleAfter time.Duration) (*NormalizedSnapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	cfg, err := config.LoadMerged(projectDir, config.DefaultPath())
 	if err != nil {
 		cfg = config.Default()
 	}
 
-	_, mailAgents, mailStats := fetchAgentMailData(projectDir)
+	_, mailAgents, mailStats := fetchAgentMailDataContext(ctx, projectDir)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
-	sessions, err := tmux.ListSessions()
+	sessions, err := tmux.ListSessionsContext(ctx)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return &NormalizedSnapshot{
 			Sessions:    []state.RuntimeSession{},
 			Agents:      []state.RuntimeAgent{},
@@ -7310,8 +7336,11 @@ func collectNormalizedTmuxProjection(projectDir string, staleAfter time.Duration
 	}
 
 	// Optimization: Get all panes across all sessions in one tmux call
-	allPanes, err := tmux.GetAllPanes()
+	allPanes, err := tmux.GetAllPanesContext(ctx)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		// Fallback: create empty map if failed
 		allPanes = make(map[string][]tmux.Pane)
 	}
@@ -7326,76 +7355,29 @@ func collectNormalizedTmuxProjection(projectDir string, staleAfter time.Duration
 	agentsBySession := make(map[string][]Agent, len(sessions))
 	outputTailsBySession := make(map[string]map[string]string, len(sessions))
 
-	// Parallel capture worker pool
-	type captureJob struct {
-		paneID    string
-		modelName string
-	}
-	type captureResult struct {
-		paneID  string
-		content string
-	}
-
-	// Pre-calculate job count to size channels correctly
 	totalPaneCount := 0
 	for _, panes := range allPanes {
 		totalPaneCount += len(panes)
 	}
-
-	jobs := make(chan captureJob, totalPaneCount+1)
-	resultsChan := make(chan captureResult, totalPaneCount+1)
-	var wg sync.WaitGroup
-
-	// Start workers (capped at 10 to avoid overwhelming tmux server)
-	workerCount := 10
-	if totalPaneCount < workerCount {
-		workerCount = totalPaneCount
-	}
-	if workerCount < 1 {
-		workerCount = 1
-	}
-
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for job := range jobs {
-				captureFn := tmux.CaptureForStatusDetection
-				if job.modelName != "" {
-					captureFn = tmux.CaptureForFullContext
-				}
-				if captured, err := captureFn(job.paneID); err == nil {
-					resultsChan <- captureResult{job.paneID, captured}
-				} else {
-					resultsChan <- captureResult{job.paneID, ""}
-				}
-			}
-		}()
-	}
-
-	// Dispatch jobs
-	allCapturedContent := make(map[string]string)
+	captureJobs := make([]normalizedTmuxCaptureJob, 0, totalPaneCount)
 	for _, sess := range sessions {
 		panes := allPanes[sess.Name]
 		for _, pane := range panes {
-			jobs <- captureJob{
+			captureJobs = append(captureJobs, normalizedTmuxCaptureJob{
 				paneID:    pane.ID,
 				modelName: modelNameForPane(pane, cfg),
-			}
+			})
 		}
 	}
-	close(jobs)
-
-	// Collect results in background
-	go func() {
-		wg.Wait()
-		close(resultsChan)
-	}()
-
-	for res := range resultsChan {
-		if res.content != "" {
-			allCapturedContent[res.paneID] = res.content
-		}
+	allCapturedContent, err := captureNormalizedTmuxPanes(
+		ctx,
+		captureJobs,
+		10,
+		tmux.CaptureForStatusDetectionContext,
+		tmux.CaptureForFullContextContext,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	for i := range sessions {
@@ -7467,6 +7449,93 @@ func collectNormalizedTmuxProjection(projectDir string, staleAfter time.Duration
 	}
 
 	return snapshot, nil
+}
+
+type normalizedTmuxCaptureJob struct {
+	paneID    string
+	modelName string
+}
+
+type normalizedTmuxCaptureResult struct {
+	paneID  string
+	content string
+}
+
+type normalizedTmuxCaptureFunc func(context.Context, string) (string, error)
+
+func captureNormalizedTmuxPanes(
+	ctx context.Context,
+	captureJobs []normalizedTmuxCaptureJob,
+	workerLimit int,
+	captureStatus normalizedTmuxCaptureFunc,
+	captureFull normalizedTmuxCaptureFunc,
+) (map[string]string, error) {
+	if ctx == nil {
+		return nil, errors.New("normalized tmux capture context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if captureStatus == nil || captureFull == nil {
+		return nil, errors.New("normalized tmux capture functions are required")
+	}
+	if len(captureJobs) == 0 {
+		return map[string]string{}, nil
+	}
+	if workerLimit <= 0 || workerLimit > len(captureJobs) {
+		workerLimit = len(captureJobs)
+	}
+
+	jobs := make(chan normalizedTmuxCaptureJob, len(captureJobs))
+	results := make(chan normalizedTmuxCaptureResult, len(captureJobs))
+	for _, job := range captureJobs {
+		select {
+		case jobs <- job:
+		case <-ctx.Done():
+			close(jobs)
+			return nil, ctx.Err()
+		}
+	}
+	close(jobs)
+
+	var workers sync.WaitGroup
+	workers.Add(workerLimit)
+	for range workerLimit {
+		go func() {
+			defer workers.Done()
+			for job := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				capture := captureStatus
+				if job.modelName != "" {
+					capture = captureFull
+				}
+				content, err := capture(ctx, job.paneID)
+				if err != nil {
+					content = ""
+				}
+				select {
+				case results <- normalizedTmuxCaptureResult{paneID: job.paneID, content: content}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	close(results)
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	captured := make(map[string]string, len(results))
+	for result := range results {
+		if result.content != "" {
+			captured[result.paneID] = result.content
+		}
+	}
+	return captured, nil
 }
 
 func persistNormalizedProjection(store *state.Store, signals *adapters.AggregatedSignals, tmuxSnapshot *NormalizedSnapshot, staleAfter time.Duration) error {

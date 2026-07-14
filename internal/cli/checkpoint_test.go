@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -485,6 +486,9 @@ func TestVerifySingleCheckpoint_JSONReturnsErrorForInvalidCheckpoint(t *testing.
 	if callErr == nil {
 		t.Fatal("verifySingleCheckpoint() error = nil, want verification failure")
 	}
+	if !errors.Is(callErr, errJSONFailure) {
+		t.Fatalf("verifySingleCheckpoint() error = %v, want errJSONFailure", callErr)
+	}
 	if !strings.Contains(callErr.Error(), "verification failed") {
 		t.Fatalf("verifySingleCheckpoint() error = %v, want verification failure context", callErr)
 	}
@@ -500,6 +504,9 @@ func TestVerifySingleCheckpoint_JSONReturnsErrorForInvalidCheckpoint(t *testing.
 	}
 	if decoded["valid"] != false {
 		t.Fatalf("valid = %v, want false", decoded["valid"])
+	}
+	if decoded["success"] != false {
+		t.Fatalf("success = %v, want false", decoded["success"])
 	}
 	if decoded["id"] != checkpointID {
 		t.Fatalf("id = %v, want %s", decoded["id"], checkpointID)
@@ -554,6 +561,9 @@ func TestVerifyAllCheckpoints_JSONReturnsErrorForInvalidCheckpoint(t *testing.T)
 	if callErr == nil {
 		t.Fatal("verifyAllCheckpoints() error = nil, want verification failure")
 	}
+	if !errors.Is(callErr, errJSONFailure) {
+		t.Fatalf("verifyAllCheckpoints() error = %v, want errJSONFailure", callErr)
+	}
 	if !strings.Contains(callErr.Error(), "1 checkpoint(s) failed verification") {
 		t.Fatalf("verifyAllCheckpoints() error = %v, want verification failure count", callErr)
 	}
@@ -569,6 +579,9 @@ func TestVerifyAllCheckpoints_JSONReturnsErrorForInvalidCheckpoint(t *testing.T)
 	}
 	if decoded["valid_count"] != float64(1) {
 		t.Fatalf("valid_count = %v, want 1", decoded["valid_count"])
+	}
+	if decoded["success"] != false {
+		t.Fatalf("success = %v, want false", decoded["success"])
 	}
 	if decoded["total_count"] != float64(2) {
 		t.Fatalf("total_count = %v, want 2", decoded["total_count"])

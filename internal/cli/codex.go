@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -622,13 +621,12 @@ Examples:
 					res.Hint = hint
 				}
 				if emitJSON {
+					if failErr != nil {
+						return emitJSONFailureEnvelopeWithCause(res, failErr)
+					}
 					enc := json.NewEncoder(os.Stdout)
 					enc.SetIndent("", "  ")
-					_ = enc.Encode(res)
-					if failErr != nil {
-						return errors.Join(errJSONFailure, failErr)
-					}
-					return nil
+					return enc.Encode(res)
 				}
 				fmt.Printf("Codex Replace-Goal\n==================\n\n")
 				fmt.Printf("Session: %s  Pane: %d\n", res.Session, res.Pane)
@@ -873,13 +871,12 @@ Examples:
 			}
 
 			if emitJSON {
+				if nonEngaged {
+					return emitJSONFailureEnvelopeWithCause(res, nonEngagedErr)
+				}
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
-				_ = enc.Encode(res)
-				if nonEngaged {
-					return errors.Join(errJSONFailure, nonEngagedErr)
-				}
-				return nil
+				return enc.Encode(res)
 			}
 
 			fmt.Printf("Codex Wait-Goal-Engaged\n=======================\n\n")

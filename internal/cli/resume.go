@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,10 +14,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	sessionpkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+const resumeErrorCodeFailed = "RESUME_FAILED"
 
 // ResumeResult is the JSON output for the resume command.
 type ResumeResult struct {
@@ -25,8 +30,16 @@ type ResumeResult struct {
 	Handoff    *ResumeHandoffInfo `json:"handoff,omitempty"`
 	SpawnInfo  *ResumeSpawnInfo   `json:"spawn_info,omitempty"`
 	InjectInfo *ResumeInjectInfo  `json:"inject_info,omitempty"`
+	ErrorCode  string             `json:"error_code,omitempty"`
 	Error      string             `json:"error,omitempty"`
 }
+
+type resumeJSONEncodeError struct {
+	err error
+}
+
+func (e *resumeJSONEncodeError) Error() string { return "encode resume JSON: " + e.err.Error() }
+func (e *resumeJSONEncodeError) Unwrap() error { return e.err }
 
 // ResumeHandoffInfo contains handoff details for JSON output.
 type ResumeHandoffInfo struct {
@@ -45,9 +58,10 @@ type ResumeHandoffInfo struct {
 
 // ResumeSpawnInfo contains spawn operation details.
 type ResumeSpawnInfo struct {
-	Session   string   `json:"session"`
-	PaneCount int      `json:"pane_count"`
-	PaneIDs   []string `json:"pane_ids,omitempty"`
+	Session     string   `json:"session"`
+	PaneCount   int      `json:"pane_count"`
+	PanesFailed int      `json:"panes_failed"`
+	PaneIDs     []string `json:"pane_ids,omitempty"`
 }
 
 // ResumeInjectInfo contains inject operation details.
@@ -91,8 +105,10 @@ Examples:
 			if len(args) > 0 {
 				sessionName = args[0]
 			}
-			return runResume(cmd, sessionName, fromPath, spawn, inject, dryRun,
-				ccCount, codCount, gmiCount, agyCount, jsonFormat)
+			effectiveJSON := jsonFormat || IsJSONOutput()
+			err := runResume(cmd, sessionName, fromPath, spawn, inject, dryRun,
+				ccCount, codCount, gmiCount, agyCount, effectiveJSON)
+			return outputResumeCommandError(cmd, resumeAction(spawn, inject), effectiveJSON, err)
 		},
 	}
 
@@ -117,13 +133,15 @@ func runResume(cmd *cobra.Command, sessionName, fromPath string, spawn, inject, 
 		jsonFormat = true
 	}
 
-	slog.Debug("resume command",
-		"session", sessionName,
-		"from", fromPath,
-		"spawn", spawn,
-		"inject", inject,
-		"dry_run", dryRun,
-	)
+	if !jsonFormat {
+		slog.Debug("resume command",
+			"session", sessionName,
+			"from", fromPath,
+			"spawn", spawn,
+			"inject", inject,
+			"dry_run", dryRun,
+		)
+	}
 
 	// 1. Find handoff
 	var h *handoff.Handoff
@@ -141,10 +159,12 @@ func runResume(cmd *cobra.Command, sessionName, fromPath string, spawn, inject, 
 		reader := handoff.NewReader("")
 		h, err = reader.Read(fromPath)
 		if err != nil {
-			slog.Error("failed to read handoff file",
-				"path", fromPath,
-				"error", err,
-			)
+			if !jsonFormat {
+				slog.Error("failed to read handoff file",
+					"path", fromPath,
+					"error", err,
+				)
+			}
 			return fmt.Errorf("failed to read handoff: %w", err)
 		}
 		path = fromPath
@@ -179,8 +199,10 @@ func runResume(cmd *cobra.Command, sessionName, fromPath string, spawn, inject, 
 		}
 		if jsonFormat {
 			return outputResumeJSON(cmd, &ResumeResult{
-				Success: false,
-				Error:   msg,
+				Success:   false,
+				Action:    resumeAction(spawn, inject),
+				ErrorCode: resumeErrorCodeFailed,
+				Error:     msg,
 			})
 		}
 		return fmt.Errorf("%s", msg)
@@ -188,29 +210,35 @@ func runResume(cmd *cobra.Command, sessionName, fromPath string, spawn, inject, 
 
 	// Validate handoff (warn but continue)
 	if errs := h.Validate(); len(errs) > 0 {
-		slog.Warn("handoff has validation issues",
-			"path", path,
-			"error_count", len(errs),
-			"first_error", errs[0].Error(),
-		)
+		if !jsonFormat {
+			slog.Warn("handoff has validation issues",
+				"path", path,
+				"error_count", len(errs),
+				"first_error", errs[0].Error(),
+			)
+		}
 	}
 
 	// Calculate age
 	age := time.Since(h.CreatedAt)
 
-	slog.Info("found handoff",
-		"path", path,
-		"session", h.Session,
-		"age", age,
-		"status", h.Status,
-	)
+	if !jsonFormat {
+		slog.Info("found handoff",
+			"path", path,
+			"session", h.Session,
+			"age", age,
+			"status", h.Status,
+		)
+	}
 
 	// Override session name if provided via args (not from handoff)
 	if sessionName != "" && h.Session != sessionName {
-		slog.Debug("overriding session name from handoff",
-			"handoff_session", h.Session,
-			"arg_session", sessionName,
-		)
+		if !jsonFormat {
+			slog.Debug("overriding session name from handoff",
+				"handoff_session", h.Session,
+				"arg_session", sessionName,
+			)
+		}
 		// Use arg session name for operations, but keep handoff data
 	} else if sessionName == "" {
 		sessionName = h.Session
@@ -317,13 +345,15 @@ func displayHandoff(cmd *cobra.Command, h *handoff.Handoff, path string, age tim
 func spawnWithHandoff(cmd *cobra.Command, sessionName string, h *handoff.Handoff, path string,
 	info *ResumeHandoffInfo, ccCount, codCount, gmiCount, agyCount int, projectDir string, jsonFormat bool) error {
 
-	slog.Info("spawning with handoff",
-		"session", sessionName,
-		"cc", ccCount,
-		"cod", codCount,
-		"gmi", gmiCount,
-		"agy", agyCount,
-	)
+	if !jsonFormat {
+		slog.Info("spawning with handoff",
+			"session", sessionName,
+			"cc", ccCount,
+			"cod", codCount,
+			"gmi", gmiCount,
+			"agy", agyCount,
+		)
+	}
 
 	// Validate counts
 	totalAgents := ccCount + codCount + gmiCount + agyCount
@@ -335,7 +365,11 @@ func spawnWithHandoff(cmd *cobra.Command, sessionName string, h *handoff.Handoff
 	contextText := formatHandoffContext(h)
 
 	// Check if session already exists
-	if tmux.SessionExists(sessionName) {
+	exists, err := tmux.SessionExistsContext(cmd.Context(), sessionName)
+	if err != nil {
+		return fmt.Errorf("checking resume session: %w", err)
+	}
+	if exists {
 		return fmt.Errorf("session %q already exists; use --inject to add context to existing session", sessionName)
 	}
 
@@ -350,51 +384,93 @@ func spawnWithHandoff(cmd *cobra.Command, sessionName string, h *handoff.Handoff
 		NoHooks:            true,
 	}
 
-	if err := spawnSessionLogic(opts); err != nil {
-		slog.Error("spawn failed", "session", sessionName, "error", err)
+	spawnFn := resumeSpawnLifecycle(jsonFormat)
+	if err := spawnFn(cmd.Context(), opts); err != nil {
+		if !jsonFormat {
+			slog.Error("spawn failed", "session", sessionName, "error", err)
+		}
 		return fmt.Errorf("spawn failed: %w", err)
 	}
 
 	// Wait briefly for panes to initialize
-	time.Sleep(500 * time.Millisecond)
+	if err := waitContextDelay(cmd.Context(), 500*time.Millisecond); err != nil {
+		return fmt.Errorf("resume spawn canceled while waiting for panes: %w", err)
+	}
 
 	// Get panes and send context
-	panes, err := tmux.GetPanes(sessionName)
+	panes, err := tmux.GetPanesContext(cmd.Context(), sessionName)
 	if err != nil {
-		slog.Warn("could not get panes after spawn", "error", err)
+		if ctxErr := cmd.Context().Err(); ctxErr != nil {
+			return fmt.Errorf("resume spawn canceled while loading panes: %w", ctxErr)
+		}
+		return fmt.Errorf("could not get panes after spawn: %w", err)
 	}
 
 	var paneIDs []string
 	sentCount := 0
-	for _, pane := range panes {
-		if pane.Type != tmux.AgentUser {
-			// Send context to agent panes
-			if err := sendPromptWithDoubleEnter(pane.ID, contextText); err != nil {
-				slog.Warn("failed to send context to pane", "pane", pane.ID, "error", err)
-			} else {
-				sentCount++
-				paneIDs = append(paneIDs, pane.ID)
+	failedCount := 0
+	var dispatchErr error
+	agentPanes := resumeAgentPanes(panes)
+	if len(agentPanes) == 0 {
+		failedCount = totalAgents
+		dispatchErr = errors.New("no agent panes found after spawn; handoff context was not delivered")
+	} else {
+		service, serviceErr := dispatchsvc.NewService(dispatchsvc.Ports{
+			Redactor:  shellFinalMessageRedactor(activeShellDispatchRedactionConfig()),
+			Protocols: shellDispatchProtocolPlanner{},
+			Deliverer: dispatchsvc.TMUXDeliverer{},
+		})
+		if serviceErr != nil {
+			return fmt.Errorf("preparing handoff dispatch: %w", serviceErr)
+		}
+		result, executeErr := service.Execute(cmd.Context(), dispatchsvc.Request{
+			Session:       sessionName,
+			Panes:         agentPanes,
+			Message:       contextText,
+			Submit:        true,
+			StopOnFailure: false,
+		})
+		if ctxErr := cmd.Context().Err(); ctxErr != nil {
+			return fmt.Errorf("resume spawn context dispatch canceled: %w", ctxErr)
+		}
+		sentCount = result.Delivered
+		failedCount = result.Failed + result.Blocked + result.Skipped
+		dispatchErr = resumeDispatchError("sending handoff context after spawn", result, executeErr)
+		for _, receipt := range result.Receipts {
+			if receipt.Status == dispatchsvc.ReceiptDelivered {
+				paneIDs = append(paneIDs, receipt.Target.Ref.ID)
 			}
 		}
 	}
+	if dispatchErr != nil {
+		if !jsonFormat {
+			slog.Warn("failed to send handoff context", "session", sessionName, "error", dispatchErr)
+		}
+	}
 
-	slog.Info("spawn complete with handoff",
-		"session", sessionName,
-		"panes", len(panes),
-		"context_sent", sentCount,
-	)
+	if !jsonFormat {
+		slog.Info("spawn complete with handoff",
+			"session", sessionName,
+			"panes", len(panes),
+			"context_sent", sentCount,
+		)
+	}
 
+	result := &ResumeResult{
+		Action:  "spawn",
+		Handoff: info,
+		SpawnInfo: &ResumeSpawnInfo{
+			Session:     sessionName,
+			PaneCount:   sentCount,
+			PanesFailed: failedCount,
+			PaneIDs:     paneIDs,
+		},
+	}
+	if err := finalizeResumeAction(cmd, result, jsonFormat, dispatchErr); err != nil {
+		return err
+	}
 	if jsonFormat {
-		return outputResumeJSON(cmd, &ResumeResult{
-			Success: true,
-			Action:  "spawn",
-			Handoff: info,
-			SpawnInfo: &ResumeSpawnInfo{
-				Session:   sessionName,
-				PaneCount: sentCount,
-				PaneIDs:   paneIDs,
-			},
-		})
+		return nil
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Spawned session %q with %d agents and handoff context\n", sessionName, sentCount)
@@ -408,10 +484,16 @@ func spawnWithHandoff(cmd *cobra.Command, sessionName string, h *handoff.Handoff
 func injectHandoff(cmd *cobra.Command, sessionName string, h *handoff.Handoff,
 	info *ResumeHandoffInfo, jsonFormat bool) error {
 
-	slog.Info("injecting handoff into session", "session", sessionName)
+	if !jsonFormat {
+		slog.Info("injecting handoff into session", "session", sessionName)
+	}
 
 	// Check session exists
-	if !tmux.SessionExists(sessionName) {
+	exists, err := tmux.SessionExistsContext(cmd.Context(), sessionName)
+	if err != nil {
+		return fmt.Errorf("checking resume session: %w", err)
+	}
+	if !exists {
 		return fmt.Errorf("session %q does not exist; use --spawn to create it", sessionName)
 	}
 
@@ -419,7 +501,7 @@ func injectHandoff(cmd *cobra.Command, sessionName string, h *handoff.Handoff,
 	contextText := formatHandoffContext(h)
 
 	// Get panes
-	panes, err := tmux.GetPanes(sessionName)
+	panes, err := tmux.GetPanesContext(cmd.Context(), sessionName)
 	if err != nil {
 		return fmt.Errorf("failed to get session panes: %w", err)
 	}
@@ -428,41 +510,59 @@ func injectHandoff(cmd *cobra.Command, sessionName string, h *handoff.Handoff,
 		return fmt.Errorf("no panes found in session: %s", sessionName)
 	}
 
-	// Send to each agent pane
-	sent := 0
-	failed := 0
-	for _, pane := range panes {
-		if pane.Type == tmux.AgentUser {
-			continue // Skip user pane
-		}
-		if err := sendPromptWithDoubleEnter(pane.ID, contextText); err != nil {
-			slog.Warn("failed to send to pane",
-				"pane_id", pane.ID,
-				"error", err,
-			)
-			failed++
-		} else {
-			sent++
+	service, err := dispatchsvc.NewService(dispatchsvc.Ports{
+		Redactor:  shellFinalMessageRedactor(activeShellDispatchRedactionConfig()),
+		Protocols: shellDispatchProtocolPlanner{},
+		Deliverer: dispatchsvc.TMUXDeliverer{},
+	})
+	if err != nil {
+		return fmt.Errorf("preparing handoff dispatch: %w", err)
+	}
+	agentPanes := resumeAgentPanes(panes)
+	if len(agentPanes) == 0 {
+		return fmt.Errorf("no agent panes found in session: %s", sessionName)
+	}
+	result, executeErr := service.Execute(cmd.Context(), dispatchsvc.Request{
+		Session:       sessionName,
+		Panes:         agentPanes,
+		Message:       contextText,
+		Submit:        true,
+		StopOnFailure: false,
+	})
+	if ctxErr := cmd.Context().Err(); ctxErr != nil {
+		return fmt.Errorf("handoff injection canceled: %w", ctxErr)
+	}
+	sent := result.Delivered
+	failed := result.Failed + result.Blocked + result.Skipped
+	dispatchErr := resumeDispatchError("injecting handoff context", result, executeErr)
+	if dispatchErr != nil {
+		if !jsonFormat {
+			slog.Warn("handoff dispatch completed with failures", "session", sessionName, "error", dispatchErr)
 		}
 	}
 
-	slog.Info("injected handoff",
-		"session", sessionName,
-		"panes_sent", sent,
-		"panes_failed", failed,
-	)
+	if !jsonFormat {
+		slog.Info("injected handoff",
+			"session", sessionName,
+			"panes_sent", sent,
+			"panes_failed", failed,
+		)
+	}
 
+	resumeResult := &ResumeResult{
+		Action:  "inject",
+		Handoff: info,
+		InjectInfo: &ResumeInjectInfo{
+			Session:     sessionName,
+			PanesSent:   sent,
+			PanesFailed: failed,
+		},
+	}
+	if err := finalizeResumeAction(cmd, resumeResult, jsonFormat, dispatchErr); err != nil {
+		return err
+	}
 	if jsonFormat {
-		return outputResumeJSON(cmd, &ResumeResult{
-			Success: true,
-			Action:  "inject",
-			Handoff: info,
-			InjectInfo: &ResumeInjectInfo{
-				Session:     sessionName,
-				PanesSent:   sent,
-				PanesFailed: failed,
-			},
-		})
+		return nil
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Injected handoff context into %d panes (session: %s)\n", sent, sessionName)
@@ -744,11 +844,91 @@ func humanizeDuration(d time.Duration) string {
 	return fmt.Sprintf("%d days ago", days)
 }
 
+func resumeAgentPanes(panes []tmux.Pane) []tmux.Pane {
+	agents := make([]tmux.Pane, 0, len(panes))
+	for _, pane := range panes {
+		if pane.Type != tmux.AgentUser {
+			agents = append(agents, pane)
+		}
+	}
+	return agents
+}
+
+func resumeSpawnLifecycle(jsonFormat bool) func(context.Context, SpawnOptions) error {
+	if jsonFormat {
+		return spawnSessionLogicComposable
+	}
+	return spawnSessionLogicContext
+}
+
+func resumeDispatchError(action string, result dispatchsvc.Result, err error) error {
+	failed := result.Failed + result.Blocked + result.Skipped
+	if err == nil && failed == 0 {
+		return nil
+	}
+	if err == nil {
+		err = errors.New("dispatch did not deliver to every target")
+	}
+	return fmt.Errorf("%s (%d delivered, %d failed): %w", action, result.Delivered, failed, err)
+}
+
+func finalizeResumeAction(cmd *cobra.Command, result *ResumeResult, jsonFormat bool, cause error) error {
+	if result == nil {
+		return errors.New("resume action result is required")
+	}
+	result.Success = cause == nil
+	if cause != nil {
+		result.ErrorCode = resumeErrorCode(cause)
+		result.Error = cause.Error()
+	}
+	if jsonFormat {
+		return outputResumeJSON(cmd, result)
+	}
+	return cause
+}
+
+func resumeAction(spawn, inject bool) string {
+	if spawn {
+		return "spawn"
+	}
+	if inject {
+		return "inject"
+	}
+	return "display"
+}
+
+func resumeErrorCode(err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return robot.ErrCodeTimeout
+	}
+	return resumeErrorCodeFailed
+}
+
+func outputResumeCommandError(cmd *cobra.Command, action string, jsonFormat bool, err error) error {
+	if err == nil || !jsonFormat || errors.Is(err, errJSONFailure) {
+		return err
+	}
+	var encodeErr *resumeJSONEncodeError
+	if errors.As(err, &encodeErr) {
+		return err
+	}
+	emitErr := outputResumeJSON(cmd, &ResumeResult{
+		Success:   false,
+		Action:    action,
+		ErrorCode: resumeErrorCode(err),
+		Error:     err.Error(),
+	})
+	if !errors.Is(emitErr, errJSONFailure) {
+		return emitErr
+	}
+	return errors.Join(emitErr, err)
+}
+
 func outputResumeJSON(cmd *cobra.Command, result *ResumeResult) error {
 	encoder := json.NewEncoder(cmd.OutOrStdout())
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(result); err != nil {
-		return err
+		return &resumeJSONEncodeError{err: err}
 	}
 	// bd-oqwmf: signal non-zero exit when the resume envelope reports
 	// failure, so `ntm resume --json` automation gating on `$?` no longer

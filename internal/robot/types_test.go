@@ -1394,13 +1394,18 @@ func TestRobotPrintersDoNotReturnRawEnvelopeEncoder(t *testing.T) {
 				resultType, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
 				returnsInt = ok && resultType.Name == "int"
 			}
+			usesLegacyGuard := false
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
 				if returnsInt {
 					if call, ok := node.(*ast.CallExpr); ok {
-						if ident, ok := call.Fun.(*ast.Ident); ok &&
-							(ident.Name == "encodeJSON" || ident.Name == "outputJSON" || ident.Name == "encodeRobotFailureJSON") {
-							position := fset.Position(call.Pos())
-							t.Errorf("integer printer %s calls %s directly at %s; use printLegacyRobotOutput", fn.Name.Name, ident.Name, position)
+						if ident, ok := call.Fun.(*ast.Ident); ok {
+							if ident.Name == "printLegacyRobotOutput" || ident.Name == "printAttentionResponse" {
+								usesLegacyGuard = true
+							}
+							if ident.Name == "encodeJSON" || ident.Name == "outputJSON" || ident.Name == "encodeRobotFailureJSON" {
+								position := fset.Position(call.Pos())
+								t.Errorf("integer printer %s calls %s directly at %s; use printLegacyRobotOutput", fn.Name.Name, ident.Name, position)
+							}
 						}
 					}
 				}
@@ -1431,6 +1436,9 @@ func TestRobotPrintersDoNotReturnRawEnvelopeEncoder(t *testing.T) {
 				}
 				return true
 			})
+			if returnsInt && !usesLegacyGuard {
+				t.Errorf("integer printer %s does not route through the legacy terminal guard", fn.Name.Name)
+			}
 		}
 	}
 }
@@ -1462,6 +1470,14 @@ func TestRobotSourcesReserveLiteralExitTwoForNotImplemented(t *testing.T) {
 				continue
 			}
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				if strings.HasPrefix(fn.Name.Name, "Print") {
+					if stmt, ok := node.(*ast.ReturnStmt); ok && len(stmt.Results) == 1 {
+						if literal, ok := stmt.Results[0].(*ast.BasicLit); ok && literal.Kind == token.INT && literal.Value == "2" {
+							position := fset.Position(stmt.Pos())
+							t.Errorf("%s returns literal exit 2 at %s; derive unavailable status from a NOT_IMPLEMENTED envelope", fn.Name.Name, position)
+						}
+					}
+				}
 				call, ok := node.(*ast.CallExpr)
 				if !ok || len(call.Args) == 0 || fn.Name.Name == "PrintRobotUnavailable" {
 					return true

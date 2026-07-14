@@ -1,19 +1,96 @@
 package robot
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // =============================================================================
 // Task Type Inference Tests
 // =============================================================================
+
+func TestAssignAgentsFromObservationFailsClosedOnCaptureFailureAndStalePane(t *testing.T) {
+	now := time.Now().UTC()
+	observation := statuspkg.SessionObservation{
+		Session: "proj", ObservedAt: now, Complete: false,
+		Panes: []statuspkg.PaneObservation{
+			{
+				Pane: tmux.PaneRef{ID: "%41", WindowIndex: 0, PaneIndex: 1}, PaneName: "Codex One", AgentType: "codex",
+				Current: statuspkg.StateObservation{
+					Status: statuspkg.AgentStatus{State: statuspkg.StateIdle}, ObservedAt: now,
+					Freshness: statuspkg.FreshnessFresh, Confidence: 0.95,
+				},
+			},
+			{
+				Pane: tmux.PaneRef{ID: "%42", WindowIndex: 1, PaneIndex: 1}, PaneName: "Codex Two", AgentType: "codex",
+				Current: statuspkg.StateObservation{
+					Status: statuspkg.AgentStatus{State: statuspkg.StateUnknown}, ObservedAt: now,
+					Freshness: statuspkg.FreshnessUnavailable, Error: "capture failed",
+				},
+				LastKnown: &statuspkg.StateObservation{
+					Status: statuspkg.AgentStatus{State: statuspkg.StateIdle}, ObservedAt: now.Add(-time.Minute),
+					Freshness: statuspkg.FreshnessStale, Confidence: 0.95,
+				},
+			},
+			{
+				Pane: tmux.PaneRef{ID: "%43", WindowIndex: 2, PaneIndex: 1}, PaneName: "Codex Three", AgentType: "codex",
+				Current: statuspkg.StateObservation{
+					Status: statuspkg.AgentStatus{State: statuspkg.StateIdle}, ObservedAt: now.Add(-statuspkg.DispatchObservationMaxAge - time.Second),
+					Freshness: statuspkg.FreshnessFresh, Confidence: 0.95,
+				},
+			},
+		},
+	}
+
+	agents, idle, err := assignAgentsFromObservation(observation, now)
+	if err != nil {
+		t.Fatalf("assignAgentsFromObservation: %v", err)
+	}
+	if len(agents) != 3 || !reflect.DeepEqual(idle, []string{"%41"}) {
+		t.Fatalf("agents=%+v idle=%v, want only fresh pane idle", agents, idle)
+	}
+	if agents[1].state != string(statuspkg.StateUnknown) {
+		t.Fatalf("capture-failed pane state=%q, want unknown", agents[1].state)
+	}
+}
+
+func TestAssignAgentsFromObservationRejectsStaleSessionSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	observation := statuspkg.SessionObservation{
+		Session: "proj", ObservedAt: now.Add(-statuspkg.DispatchObservationMaxAge - time.Second),
+	}
+	agents, idle, err := assignAgentsFromObservation(observation, now)
+	if err == nil || !strings.Contains(err.Error(), "stale") || agents != nil || idle != nil {
+		t.Fatalf("stale observation agents=%+v idle=%v error=%v", agents, idle, err)
+	}
+}
+
+func TestFilterDurablyOccupiedAssignAgentsUsesPaneIDAcrossDuplicateLocalIndexes(t *testing.T) {
+	idle := []string{"%41", "%42", "%43"}
+	active := []*assignmentstore.Assignment{{
+		BeadID: "ntm-window-one", Pane: 1, OccupancyKey: "%42", DispatchTarget: "%42",
+	}}
+	available, err := filterDurablyOccupiedAssignAgents(idle, active)
+	if err != nil || !reflect.DeepEqual(available, []string{"%41", "%43"}) {
+		t.Fatalf("available=%v error=%v, want exact occupied pane removed", available, err)
+	}
+
+	available, err = filterDurablyOccupiedAssignAgents(idle, []*assignmentstore.Assignment{{BeadID: "legacy", Pane: 1}})
+	if !errors.Is(err, assignmentstore.ErrPaneIdentityMigrationRequired) || available != nil {
+		t.Fatalf("legacy available=%v error=%v, want typed migration error", available, err)
+	}
+}
 
 func TestInferTaskType_BugKeywords(t *testing.T) {
 	tests := []struct {
@@ -372,10 +449,10 @@ func TestGenerateAssignHints_NoIdleAgents(t *testing.T) {
 
 func TestGenerateAssignHints_WithRecommendations(t *testing.T) {
 	recs := []AssignRecommend{
-		{Agent: "2", AssignBead: "bd-abc", AgentType: "claude"},
-		{Agent: "3", AssignBead: "bd-def", AgentType: "codex"},
+		{PaneID: "%12", PaneTarget: "0.2", AssignBead: "bd-abc", AgentType: "claude"},
+		{PaneID: "%23", PaneTarget: "1.3", AssignBead: "bd-def", AgentType: "codex"},
 	}
-	idleAgents := []string{"2", "3"}
+	idleAgents := []string{"%12", "%23"}
 	beads := []bv.BeadPreview{
 		{ID: "bd-abc", Title: "Task A"},
 		{ID: "bd-def", Title: "Task B"},
@@ -392,8 +469,8 @@ func TestGenerateAssignHints_WithRecommendations(t *testing.T) {
 }
 
 func TestGenerateAssignHints_MoreBeadsThanAgents(t *testing.T) {
-	recs := []AssignRecommend{{Agent: "2", AssignBead: "bd-abc"}}
-	idleAgents := []string{"2"}
+	recs := []AssignRecommend{{PaneID: "%12", PaneTarget: "0.2", AssignBead: "bd-abc"}}
+	idleAgents := []string{"%12"}
 	beads := []bv.BeadPreview{
 		{ID: "bd-abc", Title: "A"},
 		{ID: "bd-def", Title: "B"},
@@ -443,14 +520,14 @@ func TestGenerateAssignHints_StaleInProgress(t *testing.T) {
 
 func TestGenerateAssignments_BasicFlow(t *testing.T) {
 	agents := []assignAgentInfo{
-		{paneIdx: 2, agentType: "claude", model: "opus", state: "idle"},
-		{paneIdx: 3, agentType: "codex", model: "gpt4", state: "idle"},
+		{paneID: "%12", paneTarget: "0.2", agentType: "claude", model: "opus", state: "idle"},
+		{paneID: "%22", paneTarget: "1.2", agentType: "codex", model: "gpt4", state: "idle"},
 	}
 	beads := []bv.BeadPreview{
 		{ID: "bd-abc", Title: "Fix bug", Priority: "P1"},
 		{ID: "bd-def", Title: "Add feature", Priority: "P2"},
 	}
-	idleAgents := []string{"2", "3"}
+	idleAgents := []string{"%12", "%22"}
 
 	recs := generateAssignments(agents, beads, "balanced", idleAgents)
 
@@ -461,24 +538,27 @@ func TestGenerateAssignments_BasicFlow(t *testing.T) {
 	if recs[0].AssignBead != "bd-abc" {
 		t.Errorf("first recommendation bead = %q, want %q", recs[0].AssignBead, "bd-abc")
 	}
-	if recs[0].Agent != "2" {
-		t.Errorf("first recommendation agent = %q, want %q", recs[0].Agent, "2")
+	if recs[0].PaneID != "%12" || recs[0].PaneTarget != "0.2" {
+		t.Errorf("first recommendation pane = %s (%s), want 0.2 (%%12)", recs[0].PaneTarget, recs[0].PaneID)
 	}
 	if recs[1].AssignBead != "bd-def" {
 		t.Errorf("second recommendation bead = %q, want %q", recs[1].AssignBead, "bd-def")
+	}
+	if recs[1].PaneID != "%22" || recs[1].PaneTarget != "1.2" {
+		t.Errorf("second recommendation pane = %s (%s), want 1.2 (%%22)", recs[1].PaneTarget, recs[1].PaneID)
 	}
 }
 
 func TestGenerateAssignments_MoreAgentsThanBeads(t *testing.T) {
 	agents := []assignAgentInfo{
-		{paneIdx: 2, agentType: "claude", state: "idle"},
-		{paneIdx: 3, agentType: "codex", state: "idle"},
-		{paneIdx: 4, agentType: "gemini", state: "idle"},
+		{paneID: "%12", paneTarget: "0.2", agentType: "claude", state: "idle"},
+		{paneID: "%13", paneTarget: "0.3", agentType: "codex", state: "idle"},
+		{paneID: "%14", paneTarget: "0.4", agentType: "gemini", state: "idle"},
 	}
 	beads := []bv.BeadPreview{
 		{ID: "bd-abc", Title: "Fix bug", Priority: "P1"},
 	}
-	idleAgents := []string{"2", "3", "4"}
+	idleAgents := []string{"%12", "%13", "%14"}
 
 	recs := generateAssignments(agents, beads, "balanced", idleAgents)
 
@@ -489,14 +569,14 @@ func TestGenerateAssignments_MoreAgentsThanBeads(t *testing.T) {
 
 func TestGenerateAssignments_MoreBeadsThanAgents(t *testing.T) {
 	agents := []assignAgentInfo{
-		{paneIdx: 2, agentType: "claude", state: "idle"},
+		{paneID: "%12", paneTarget: "0.2", agentType: "claude", state: "idle"},
 	}
 	beads := []bv.BeadPreview{
 		{ID: "bd-abc", Title: "Task A", Priority: "P1"},
 		{ID: "bd-def", Title: "Task B", Priority: "P2"},
 		{ID: "bd-ghi", Title: "Task C", Priority: "P3"},
 	}
-	idleAgents := []string{"2"}
+	idleAgents := []string{"%12"}
 
 	recs := generateAssignments(agents, beads, "balanced", idleAgents)
 
@@ -510,7 +590,7 @@ func TestGenerateAssignments_MoreBeadsThanAgents(t *testing.T) {
 
 func TestGenerateAssignments_NoIdleAgents(t *testing.T) {
 	agents := []assignAgentInfo{
-		{paneIdx: 2, agentType: "claude", state: "working"},
+		{paneID: "%12", paneTarget: "0.2", agentType: "claude", state: "working"},
 	}
 	beads := []bv.BeadPreview{
 		{ID: "bd-abc", Title: "Task A", Priority: "P1"},
@@ -526,9 +606,9 @@ func TestGenerateAssignments_NoIdleAgents(t *testing.T) {
 
 func TestGenerateAssignments_NoBeads(t *testing.T) {
 	agents := []assignAgentInfo{
-		{paneIdx: 2, agentType: "claude", state: "idle"},
+		{paneID: "%12", paneTarget: "0.2", agentType: "claude", state: "idle"},
 	}
-	idleAgents := []string{"2"}
+	idleAgents := []string{"%12"}
 
 	recs := generateAssignments(agents, nil, "balanced", idleAgents)
 
@@ -539,12 +619,12 @@ func TestGenerateAssignments_NoBeads(t *testing.T) {
 
 func TestGenerateAssignments_RecommendationFields(t *testing.T) {
 	agents := []assignAgentInfo{
-		{paneIdx: 5, agentType: "claude", model: "opus-4.5", state: "idle"},
+		{paneID: "%25", paneTarget: "1.5", agentType: "claude", model: "opus-4.5", state: "idle"},
 	}
 	beads := []bv.BeadPreview{
 		{ID: "bd-xyz", Title: "Fix critical bug", Priority: "P0"},
 	}
-	idleAgents := []string{"5"}
+	idleAgents := []string{"%25"}
 
 	recs := generateAssignments(agents, beads, "quality", idleAgents)
 
@@ -553,8 +633,8 @@ func TestGenerateAssignments_RecommendationFields(t *testing.T) {
 	}
 
 	rec := recs[0]
-	if rec.Agent != "5" {
-		t.Errorf("Agent = %q, want %q", rec.Agent, "5")
+	if rec.PaneID != "%25" || rec.PaneTarget != "1.5" {
+		t.Errorf("pane = %s (%s), want 1.5 (%%25)", rec.PaneTarget, rec.PaneID)
 	}
 	if rec.AgentType != "claude" {
 		t.Errorf("AgentType = %q, want %q", rec.AgentType, "claude")
@@ -610,12 +690,12 @@ func TestAssignOutput_JSONStructure(t *testing.T) {
 		Strategy:      "balanced",
 		GeneratedAt:   time.Now().UTC(),
 		Recommendations: []AssignRecommend{
-			{Agent: "2", AgentType: "claude", AssignBead: "bd-abc", BeadTitle: "Fix bug", Priority: "P1", Confidence: 0.85, Reasoning: "test"},
+			{PaneID: "%12", PaneTarget: "0.2", AgentType: "claude", AssignBead: "bd-abc", BeadTitle: "Fix bug", Priority: "P1", Confidence: 0.85, Reasoning: "test"},
 		},
 		BlockedBeads: []BlockedBead{
 			{ID: "bd-xyz", Title: "Blocked task", BlockedBy: []string{"bd-dep1"}},
 		},
-		IdleAgents: []string{"2", "3"},
+		IdleAgents: []string{"%12", "%13"},
 		Summary: AssignSummary{
 			TotalAgents:     4,
 			IdleAgents:      2,
@@ -681,7 +761,8 @@ func TestAssignOutput_OmitEmpty(t *testing.T) {
 
 func TestAssignRecommend_JSONFields(t *testing.T) {
 	rec := AssignRecommend{
-		Agent:      "2",
+		PaneID:     "%12",
+		PaneTarget: "0.2",
 		AgentType:  "claude",
 		Model:      "opus-4.5",
 		AssignBead: "bd-abc",
@@ -701,8 +782,11 @@ func TestAssignRecommend_JSONFields(t *testing.T) {
 		t.Fatalf("json.Unmarshal failed: %v", err)
 	}
 
-	if parsed["agent"] != "2" {
-		t.Errorf("agent = %v, want %q", parsed["agent"], "2")
+	if parsed["pane_id"] != "%12" || parsed["pane_target"] != "0.2" {
+		t.Errorf("pane identity = %v at %v, want %%12 at 0.2", parsed["pane_id"], parsed["pane_target"])
+	}
+	if _, ok := parsed["agent"]; ok {
+		t.Error("legacy agent field must not be serialized")
 	}
 	if parsed["confidence"].(float64) != 0.85 {
 		t.Errorf("confidence = %v, want 0.85", parsed["confidence"])
@@ -728,7 +812,7 @@ func TestPrintAssignFailureForcesJSONAndNonzeroExitUnderTOON(t *testing.T) {
 	t.Cleanup(func() { SetOutputFormat(originalFormat) })
 
 	stdout, err := captureStdout(t, func() error {
-		return PrintAssign(AssignOptions{})
+		return PrintAssign(t.Context(), AssignOptions{})
 	})
 	var exitErr *ProcessExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
@@ -744,13 +828,46 @@ func TestPrintAssignFailureForcesJSONAndNonzeroExitUnderTOON(t *testing.T) {
 	}
 }
 
+func TestGetAssignCanceledContextReturnsStructuredFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	output, err := GetAssign(ctx, AssignOptions{Session: "unused"})
+	if err != nil {
+		t.Fatalf("GetAssign returned transport error: %v", err)
+	}
+	if output == nil || output.Success || output.ErrorCode != ErrCodeTimeout || !strings.Contains(output.Error, "canceled") {
+		t.Fatalf("canceled assignment output = %+v", output)
+	}
+}
+
+func TestSetAssignErrorClassifiesWrappedCancellationAsTimeout(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		output := &AssignOutput{RobotResponse: NewRobotResponse(true)}
+		setAssignError(output, fmt.Errorf("observe candidates: %w", cause), "internal hint")
+		if output.Success || output.ErrorCode != ErrCodeTimeout || output.Hint != "Retry the command after cancellation" {
+			t.Fatalf("setAssignError(%v) = %+v, want TIMEOUT failure", cause, output.RobotResponse)
+		}
+	}
+}
+
+func TestBlockedBeadRequiredDependencyArrayIsNeverNull(t *testing.T) {
+	data, err := json.Marshal(BlockedBead{ID: "ntm-blocked", Title: "Blocked", BlockedBy: []string{}})
+	if err != nil {
+		t.Fatalf("marshal blocked bead: %v", err)
+	}
+	if strings.Contains(string(data), `"blocked_by":null`) || !strings.Contains(string(data), `"blocked_by":[]`) {
+		t.Fatalf("blocked bead JSON = %s, want required empty array", data)
+	}
+}
+
 func TestDistributeRecommendation_JSONFields(t *testing.T) {
 	rec := DistributeRecommendation{
-		BeadID:    "bd-abc",
-		Title:     "Fix bug",
-		PaneIndex: 2,
-		AgentType: "claude",
-		Reason:    "high priority",
+		BeadID:     "bd-abc",
+		Title:      "Fix bug",
+		PaneID:     "%12",
+		PaneTarget: "0.2",
+		AgentType:  "claude",
+		Reason:     "high priority",
 	}
 
 	data, err := json.Marshal(rec)
@@ -766,7 +883,10 @@ func TestDistributeRecommendation_JSONFields(t *testing.T) {
 	if parsed["bead_id"] != "bd-abc" {
 		t.Errorf("bead_id = %v, want %q", parsed["bead_id"], "bd-abc")
 	}
-	if parsed["pane_index"].(float64) != 2 {
-		t.Errorf("pane_index = %v, want 2", parsed["pane_index"])
+	if parsed["pane_id"] != "%12" || parsed["pane_target"] != "0.2" {
+		t.Errorf("pane identity = %v at %v, want %%12 at 0.2", parsed["pane_id"], parsed["pane_target"])
+	}
+	if _, ok := parsed["pane_index"]; ok {
+		t.Error("legacy pane_index field must not be serialized")
 	}
 }

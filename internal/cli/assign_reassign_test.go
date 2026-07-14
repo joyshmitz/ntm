@@ -19,6 +19,32 @@ import (
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
+func TestAssignmentEntryPointsRejectCanceledContextBeforeSideEffects(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	for name, run := range map[string]func() error{
+		"retry":    func() error { return runRetryAssignments(ctx, "unused") },
+		"reassign": func() error { return runReassignment(ctx, "unused") },
+		"direct": func() error {
+			return runDirectPaneAssignment(ctx, &AssignCommandOptions{Session: "unused", BeadIDs: []string{"bd-cancel"}, PaneSelector: "%1"})
+		},
+		"plan": func() error {
+			_, err := getAssignOutputEnhanced(ctx, &AssignCommandOptions{Session: "unused"})
+			return err
+		},
+		"execute": func() error {
+			return executeAssignmentsEnhanced(ctx, "unused", &AssignOutputEnhanced{}, &AssignCommandOptions{})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := run(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
 type assignGlobalsSnapshot struct {
 	cfg                *config.Config
 	jsonOutput         bool
@@ -97,7 +123,7 @@ func setupReassignSession(t *testing.T, tmpDir string) (string, tmux.Pane, tmux.
 		CodCount: 1,
 		UserPane: true,
 	}
-	if err := spawnSessionLogic(opts); err != nil {
+	if err := spawnSessionLogicContext(t.Context(), opts); err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
 
@@ -162,16 +188,43 @@ func waitForAgentPanes(sessionName string, timeout time.Duration) (tmux.Pane, tm
 	return tmux.Pane{}, tmux.Pane{}, fmt.Errorf("timed out waiting for claude+codex panes in %s", sessionName)
 }
 
+func persistCanonicalAssignmentFixture(t *testing.T, store *assignment.AssignmentStore, beadID string, pane tmux.Pane, claimActor string) {
+	t.Helper()
+	record := store.Assignments[beadID]
+	if record == nil {
+		t.Fatalf("assignment fixture %s is missing", beadID)
+	}
+	record.DispatchTarget = pane.ID
+	record.OccupancyKey = pane.ID
+	record.IdempotencyKey = "fixture-" + beadID
+	record.ClaimActor = claimActor
+	record.ClaimState = assignment.ClaimClaimed
+	record.DispatchState = assignment.DispatchSent
+	if err := store.Save(); err != nil {
+		t.Fatalf("persist canonical assignment fixture %s: %v", beadID, err)
+	}
+}
+
 func TestRunReassignment_ToPane_Success(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
 	snapshot := captureAssignGlobals()
 	defer snapshot.restore()
 	previousClaim := claimBeadForAssignment
+	previousStatus := getBeadStatusForAssignment
+	previousDetails := getBeadAssignmentDetailsForAssignment
 	claimBeadForAssignment = func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
 	}
-	t.Cleanup(func() { claimBeadForAssignment = previousClaim })
+	getBeadStatusForAssignment = func(_ context.Context, _ string, _ string) (string, error) { return "in_progress", nil }
+	getBeadAssignmentDetailsForAssignment = func(_ context.Context, _ string, beadID string) (*bv.BeadAssignmentDetails, error) {
+		return &bv.BeadAssignmentDetails{ID: beadID, Status: "in_progress", Assignee: "LegacyClaude"}, nil
+	}
+	t.Cleanup(func() {
+		claimBeadForAssignment = previousClaim
+		getBeadStatusForAssignment = previousStatus
+		getBeadAssignmentDetailsForAssignment = previousDetails
+	})
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
@@ -189,6 +242,7 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 	if _, err := store.Assign("bd-123", "Test bead", claudePane.Index, "claude", "LegacyClaude", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-123", claudePane, "LegacyClaude")
 	if err := store.MarkWorking("bd-123"); err != nil {
 		t.Fatalf("MarkWorking failed: %v", err)
 	}
@@ -204,7 +258,7 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 	assignVerbose = false
 	assignReserveFiles = false
 
-	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runReassignment failed: %v", err)
 	}
@@ -214,7 +268,7 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
 	}
 	if !envelope.Success || envelope.Data == nil {
-		t.Fatalf("expected success envelope, got: %+v", envelope)
+		t.Fatalf("expected success envelope, got: %+v\nraw: %s", envelope, output)
 	}
 	if envelope.Data.Pane != codexPane.Index {
 		t.Fatalf("expected pane %d, got %d", codexPane.Index, envelope.Data.Pane)
@@ -267,7 +321,7 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 	claimBeadForAssignment = func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
 	}
-	getBeadStatusForAssignment = func(_ string, _ string) (string, error) { return "open", nil }
+	getBeadStatusForAssignment = func(_ context.Context, _ string, _ string) (string, error) { return "open", nil }
 	t.Cleanup(func() {
 		claimBeadForAssignment = previousClaim
 		getBeadStatusForAssignment = previousStatus
@@ -285,14 +339,15 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 
 	sessionName, claudePane, codexPane := setupReassignSession(t, tmpDir)
 	previousObserver := newAssignSessionObserver
+	observedAt := time.Now().UTC()
 	newAssignSessionObserver = func() assignSessionObserver {
 		return fixedAssignSessionObserver{observation: statuspkg.SessionObservation{
-			Session: sessionName,
+			Session: sessionName, ObservedAt: observedAt, Complete: true,
 			Panes: []statuspkg.PaneObservation{{
 				Pane: tmux.PaneRef{ID: codexPane.ID, WindowIndex: codexPane.WindowIndex, PaneIndex: codexPane.Index},
 				Current: statuspkg.StateObservation{
 					Status:     statuspkg.AgentStatus{State: statuspkg.StateIdle},
-					ObservedAt: time.Now().UTC(),
+					ObservedAt: observedAt,
 					Freshness:  statuspkg.FreshnessFresh,
 					Confidence: 0.99,
 				},
@@ -305,6 +360,7 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 	if _, err := store.Assign("bd-131", "Test bead 131", claudePane.Index, "claude", "", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-131", claudePane, "RetryClaude")
 	if err := store.MarkWorking("bd-131"); err != nil {
 		t.Fatalf("MarkWorking failed: %v", err)
 	}
@@ -322,8 +378,8 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 	assignQuiet = true
 	assignVerbose = false
 
-	output, err := captureStdout(t, func() error { return runRetryAssignments(nil, sessionName) })
-	if err != nil {
+	output, err := captureStdout(t, func() error { return runRetryAssignments(t.Context(), sessionName) })
+	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runRetryAssignments failed: %v", err)
 	}
 
@@ -332,7 +388,7 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
 	}
 	if !envelope.Success || envelope.Data == nil {
-		t.Fatalf("expected success envelope, got: %+v", envelope)
+		t.Fatalf("expected success envelope (run error %v), got: %+v\nraw: %s", err, envelope, output)
 	}
 	if len(envelope.Data.Retried) != 1 {
 		t.Fatalf("expected exactly 1 retried item, got %d", len(envelope.Data.Retried))
@@ -413,7 +469,7 @@ func TestRunRetryAssignments_TargetedPendingMissingPhysicalPaneFailsAndPreserves
 	assignQuiet = true
 	assignVerbose = false
 
-	output, err := captureStdout(t, func() error { return runRetryAssignments(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runRetryAssignments(t.Context(), sessionName) })
 	if !errors.Is(err, errJSONFailure) {
 		t.Fatalf("targeted retry error = %v, want JSON failure exit", err)
 	}
@@ -460,6 +516,7 @@ func TestRunReassignment_AlreadyAssigned(t *testing.T) {
 	if _, err := store.Assign("bd-124", "Test bead 124", claudePane.Index, "claude", "", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-124", claudePane, "ExistingClaude")
 	if err := store.MarkWorking("bd-124"); err != nil {
 		t.Fatalf("MarkWorking failed: %v", err)
 	}
@@ -470,7 +527,7 @@ func TestRunReassignment_AlreadyAssigned(t *testing.T) {
 	assignForce = true
 	assignPrompt = "noop"
 
-	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runReassignment failed: %v", err)
 	}
@@ -508,6 +565,7 @@ func TestRunReassignment_NoIdleAgentForType(t *testing.T) {
 	if _, err := store.Assign("bd-125", "Test bead 125", claudePane.Index, "claude", "", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-125", claudePane, "BusyClaude")
 	if err := store.MarkWorking("bd-125"); err != nil {
 		t.Fatalf("MarkWorking failed: %v", err)
 	}
@@ -517,7 +575,7 @@ func TestRunReassignment_NoIdleAgentForType(t *testing.T) {
 	assignToType = "gemini"
 	assignForce = true
 
-	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runReassignment failed: %v", err)
 	}
@@ -555,6 +613,7 @@ func TestRunReassignment_TargetBusyWithoutForce(t *testing.T) {
 	if _, err := store.Assign("bd-126", "Test bead 126", claudePane.Index, "claude", "", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-126", claudePane, "BusyTargetClaude")
 	if err := store.MarkWorking("bd-126"); err != nil {
 		t.Fatalf("MarkWorking failed: %v", err)
 	}
@@ -569,7 +628,7 @@ func TestRunReassignment_TargetBusyWithoutForce(t *testing.T) {
 	assignToType = ""
 	assignForce = false
 
-	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runReassignment failed: %v", err)
 	}
@@ -608,7 +667,7 @@ func TestRunReassignment_NotAssigned(t *testing.T) {
 	assignToType = ""
 	assignForce = true
 
-	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runReassignment failed: %v", err)
 	}
@@ -646,6 +705,7 @@ func TestRunReassignment_ToPaneNotFound(t *testing.T) {
 	if _, err := store.Assign("bd-127", "Test bead 127", claudePane.Index, "claude", "", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-127", claudePane, "MissingTargetClaude")
 	if err := store.MarkWorking("bd-127"); err != nil {
 		t.Fatalf("MarkWorking failed: %v", err)
 	}
@@ -657,7 +717,7 @@ func TestRunReassignment_ToPaneNotFound(t *testing.T) {
 	assignToType = ""
 	assignForce = true
 
-	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runReassignment failed: %v", err)
 	}
@@ -699,6 +759,7 @@ func TestRunReassignment_CompletedBead(t *testing.T) {
 	if _, err := store.Assign("bd-128", "Test bead 128", claudePane.Index, "claude", "", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-128", claudePane, "CompletedClaude")
 	if err := store.MarkWorking("bd-128"); err != nil {
 		t.Fatalf("MarkWorking failed: %v", err)
 	}
@@ -713,7 +774,7 @@ func TestRunReassignment_CompletedBead(t *testing.T) {
 	assignToType = ""
 	assignForce = true
 
-	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runReassignment failed: %v", err)
 	}
@@ -763,6 +824,7 @@ func TestRunReassignment_FailedBead(t *testing.T) {
 	if _, err := store.Assign("bd-129", "Test bead 129", claudePane.Index, "claude", "", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-129", claudePane, "FailedClaude")
 	if err := store.MarkWorking("bd-129"); err != nil {
 		t.Fatalf("MarkWorking failed: %v", err)
 	}
@@ -777,7 +839,7 @@ func TestRunReassignment_FailedBead(t *testing.T) {
 	assignToType = ""
 	assignForce = true
 
-	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runReassignment failed: %v", err)
 	}
@@ -827,6 +889,7 @@ func TestRunReassignment_ReservationRequiredFailsClosedWhenAgentMailUnavailable(
 	if _, err := store.Assign("bd-130", "Test bead with file reservations", claudePane.Index, "claude", "", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-130", claudePane, "ReservedClaude")
 	if err := store.MarkWorking("bd-130"); err != nil {
 		t.Fatalf("MarkWorking failed: %v", err)
 	}
@@ -840,7 +903,7 @@ func TestRunReassignment_ReservationRequiredFailsClosedWhenAgentMailUnavailable(
 	assignPrompt = "Continue work on bd-130"
 	assignQuiet = true
 
-	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, err := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
 		t.Fatalf("runReassignment failed: %v", err)
 	}
@@ -883,6 +946,7 @@ func TestRunReassignment_ForceDoesNotBypassDurableTargetOccupancy(t *testing.T) 
 	if _, err := store.Assign("bd-moving", "Moving bead", claudePane.Index, "claude", "LegacyClaude", "old prompt"); err != nil {
 		t.Fatalf("assign moving bead: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-moving", claudePane, "LegacyClaude")
 	if err := store.MarkWorking("bd-moving"); err != nil {
 		t.Fatalf("mark moving bead working: %v", err)
 	}
@@ -890,19 +954,14 @@ func TestRunReassignment_ForceDoesNotBypassDurableTargetOccupancy(t *testing.T) 
 	if err != nil {
 		t.Fatalf("assign occupied bead: %v", err)
 	}
-	occupied.DispatchTarget = codexPane.ID
-	occupied.OccupancyKey = codexPane.ID
-	store.Assignments[occupied.BeadID] = occupied
-	if err := store.Save(); err != nil {
-		t.Fatalf("save occupied target: %v", err)
-	}
+	persistCanonicalAssignmentFixture(t, store, occupied.BeadID, codexPane, "ExistingCodex")
 
 	assignReassign = "bd-moving"
 	assignToPane = codexPane.ID
 	assignToType = ""
 	assignForce = true
 	assignReserveFiles = false
-	output, runErr := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, runErr := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if !errors.Is(runErr, errJSONFailure) {
 		t.Fatalf("runReassignment error = %v, want JSON failure", runErr)
 	}
@@ -942,8 +1001,13 @@ func TestRunReassignment_RedactionBlockLeavesRecoverableHandoffBarrier(t *testin
 	if _, err := store.Assign("bd-redaction", "Redaction bead", claudePane.Index, "claude", "LegacyClaude", "old prompt"); err != nil {
 		t.Fatalf("assign redaction bead: %v", err)
 	}
+	persistCanonicalAssignmentFixture(t, store, "bd-redaction", claudePane, "LegacyClaude")
 	if err := store.MarkWorking("bd-redaction"); err != nil {
 		t.Fatalf("mark redaction bead working: %v", err)
+	}
+	before := store.Get("bd-redaction")
+	if before == nil {
+		t.Fatal("redaction assignment fixture is missing")
 	}
 
 	assignReassign = "bd-redaction"
@@ -952,7 +1016,7 @@ func TestRunReassignment_RedactionBlockLeavesRecoverableHandoffBarrier(t *testin
 	assignForce = true
 	assignReserveFiles = false
 	assignPrompt = "password=hunter2hunter2"
-	output, runErr := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	output, runErr := captureStdout(t, func() error { return runReassignment(t.Context(), sessionName) })
 	if !errors.Is(runErr, errJSONFailure) {
 		t.Fatalf("runReassignment error = %v, want JSON failure", runErr)
 	}
@@ -968,8 +1032,21 @@ func TestRunReassignment_RedactionBlockLeavesRecoverableHandoffBarrier(t *testin
 		t.Fatalf("reload assignment store: %v", err)
 	}
 	durable := reloaded.Get("bd-redaction")
-	if durable == nil || durable.Status != assignment.StatusWorking || durable.ClearState != assignment.ClearStateLeasesReleased || durable.Pane != claudePane.Index || durable.IdempotencyKey != "" {
-		t.Fatalf("redaction failure did not retain the recoverable handoff barrier: %+v", durable)
+	if durable == nil ||
+		durable.Status != before.Status ||
+		durable.ClearState != before.ClearState ||
+		durable.Pane != before.Pane ||
+		durable.AgentType != before.AgentType ||
+		durable.AgentName != before.AgentName ||
+		durable.IdempotencyKey != before.IdempotencyKey ||
+		durable.ClaimActor != before.ClaimActor ||
+		durable.ClaimState != before.ClaimState ||
+		durable.DispatchState != before.DispatchState ||
+		durable.DispatchTarget != before.DispatchTarget ||
+		durable.OccupancyKey != before.OccupancyKey ||
+		durable.PromptSent != before.PromptSent ||
+		durable.PendingPrompt != before.PendingPrompt {
+		t.Fatalf("redaction failure changed the source before preflight completed: %+v", durable)
 	}
 	outputPane, err := tmux.CapturePaneOutput(codexPane.ID, 20)
 	if err != nil {

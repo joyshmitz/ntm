@@ -98,7 +98,7 @@ func uniqueEnsembleSessionName(base string) string {
 func ensembleSpawnUnavailable() error {
 	err := fmt.Errorf("ensemble spawn is experimental; rebuild with -tags ensemble_experimental")
 	if IsJSONOutput() {
-		_ = output.PrintJSON(output.NewError(err.Error()))
+		return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 	}
 	return err
 }

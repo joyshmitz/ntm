@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -102,7 +103,14 @@ The prefix shows agent type and pane index.`,
 				if aggregate {
 					result, err := robot.GetAggregatedLogs(opts)
 					if err != nil {
-						return output.PrintJSON(output.NewError(err.Error()))
+						return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
+					}
+					if !result.Success {
+						cause := errors.New(result.Error)
+						if result.Error == "" {
+							cause = errors.New("aggregated log inspection failed")
+						}
+						return emitJSONFailureEnvelopeWithCause(result, cause)
 					}
 					return output.PrintJSON(result)
 				}
@@ -289,7 +297,9 @@ func runLogsFollow(opts robot.LogsOptions) error {
 							"line":       line,
 							"timestamp":  entry.Timestamp.Format(time.RFC3339),
 						}
-						_ = json.NewEncoder(os.Stdout).Encode(jsonEntry)
+						if err := json.NewEncoder(os.Stdout).Encode(jsonEntry); err != nil {
+							return fmt.Errorf("encode followed log entry: %w", err)
+						}
 					} else {
 						// Human-readable output
 						prefix := aggregatedLogPrefix(entry.AgentType, entry.Pane, th)

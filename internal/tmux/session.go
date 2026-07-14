@@ -605,8 +605,39 @@ func InTmux() bool {
 
 // SessionExists checks if a session exists
 func (c *Client) SessionExists(name string) bool {
-	err := c.RunSilent("has-session", "-t", name)
-	return err == nil
+	exists, _ := c.SessionExistsContext(context.Background(), name)
+	return exists
+}
+
+// SessionExistsContext checks whether a session exists with caller cancellation.
+func (c *Client) SessionExistsContext(ctx context.Context, name string) (bool, error) {
+	return classifySessionExistsResult(c.RunSilentContext(ctx, "has-session", "-t", name))
+}
+
+func classifySessionExistsResult(err error) (bool, error) {
+	if err == nil {
+		return true, nil
+	}
+	if exitCode, ok := commandExitCode(err); ok && exitCode == 1 && isExpectedSessionAbsence(err) {
+		// has-session uses exit status 1 both for a missing target and when the
+		// first session has not created a server socket yet. Accept only those
+		// recognized stderr shapes; permission, stale-socket, and command failures
+		// must remain observable to callers.
+		return false, nil
+	}
+	return false, err
+}
+
+func isExpectedSessionAbsence(err error) bool {
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "can't find session") ||
+		strings.Contains(message, "no such session") ||
+		strings.Contains(message, "session not found") ||
+		strings.Contains(message, "no server running") {
+		return true
+	}
+	return strings.Contains(message, "error connecting to") &&
+		(strings.Contains(message, "no such file or directory") || strings.Contains(message, "does not exist"))
 }
 
 // SessionExists checks if a session exists (default client)
@@ -614,11 +645,21 @@ func SessionExists(name string) bool {
 	return DefaultClient.SessionExists(name)
 }
 
+// SessionExistsContext checks whether a session exists with caller cancellation (default client).
+func SessionExistsContext(ctx context.Context, name string) (bool, error) {
+	return DefaultClient.SessionExistsContext(ctx, name)
+}
+
 // ListSessions returns all tmux sessions
 func (c *Client) ListSessions() ([]Session, error) {
+	return c.ListSessionsContext(context.Background())
+}
+
+// ListSessionsContext returns all tmux sessions with caller cancellation.
+func (c *Client) ListSessionsContext(ctx context.Context) ([]Session, error) {
 	sep := FieldSeparator
 	format := fmt.Sprintf("#{session_name}%[1]s#{session_windows}%[1]s#{session_attached}%[1]s#{session_created_string}", sep)
-	output, err := c.Run("list-sessions", "-F", format)
+	output, err := c.RunContext(ctx, "list-sessions", "-F", format)
 	if err != nil {
 		// No sessions is not an error - handle various tmux error messages
 		errMsg := err.Error()
@@ -659,6 +700,11 @@ func (c *Client) ListSessions() ([]Session, error) {
 // ListSessions returns all tmux sessions (default client)
 func ListSessions() ([]Session, error) {
 	return DefaultClient.ListSessions()
+}
+
+// ListSessionsContext returns all tmux sessions with caller cancellation (default client).
+func ListSessionsContext(ctx context.Context) ([]Session, error) {
+	return DefaultClient.ListSessionsContext(ctx)
 }
 
 // GetSession returns detailed info about a session
@@ -719,23 +765,45 @@ const DefaultHistoryLimit = 50000
 // The history-limit is set to DefaultHistoryLimit (50000 lines) to ensure pane
 // scrollback is accessible. Use CreateSessionWithHistoryLimit for a custom value.
 func (c *Client) CreateSession(name, directory string) error {
-	return c.CreateSessionWithHistoryLimit(name, directory, DefaultHistoryLimit)
+	return c.CreateSessionContext(context.Background(), name, directory)
+}
+
+// CreateSessionContext creates a new tmux session with cancellation support.
+func (c *Client) CreateSessionContext(ctx context.Context, name, directory string) error {
+	return c.CreateSessionWithHistoryLimitContext(ctx, name, directory, DefaultHistoryLimit)
 }
 
 // CreateSessionWithHistoryLimit creates a new tmux session and sets the
 // history-limit (scrollback buffer size) for the session. A value of 0 skips
 // setting history-limit, leaving tmux's default (2000 lines).
 func (c *Client) CreateSessionWithHistoryLimit(name, directory string, historyLimit int) error {
+	return c.CreateSessionWithHistoryLimitContext(context.Background(), name, directory, historyLimit)
+}
+
+// CreateSessionWithHistoryLimitContext creates a new tmux session with a
+// custom scrollback limit and cancellation support.
+func (c *Client) CreateSessionWithHistoryLimitContext(ctx context.Context, name, directory string, historyLimit int) error {
+	if ctx == nil {
+		return errors.New("tmux session creation context is required")
+	}
 	if err := ValidateSessionName(name); err != nil {
 		return fmt.Errorf("invalid session name: %w", err)
 	}
-	if err := c.RunSilent("new-session", "-d", "-s", name, "-c", directory); err != nil {
+	if err := c.RunSilentContext(ctx, "new-session", "-d", "-s", name, "-c", directory); err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("tmux session %q was created before cancellation: %w", name, err)
 	}
 	if historyLimit > 0 {
 		// Set history-limit on the session so all panes (including those created
 		// later via split-window) inherit the larger scrollback buffer.
-		_ = c.RunSilent("set-option", "-t", name, "history-limit", fmt.Sprintf("%d", historyLimit))
+		if err := c.RunSilentContext(ctx, "set-option", "-t", name, "history-limit", fmt.Sprintf("%d", historyLimit)); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("tmux session %q was created before cancellation: %w", name, ctxErr)
+			}
+			return fmt.Errorf("tmux session %q was created but setting history limit failed: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -745,10 +813,22 @@ func CreateSession(name, directory string) error {
 	return DefaultClient.CreateSession(name, directory)
 }
 
+// CreateSessionContext creates a new tmux session with cancellation support
+// using the default client.
+func CreateSessionContext(ctx context.Context, name, directory string) error {
+	return DefaultClient.CreateSessionContext(ctx, name, directory)
+}
+
 // CreateSessionWithHistoryLimit creates a new tmux session with a custom
 // history-limit (default client).
 func CreateSessionWithHistoryLimit(name, directory string, historyLimit int) error {
 	return DefaultClient.CreateSessionWithHistoryLimit(name, directory, historyLimit)
+}
+
+// CreateSessionWithHistoryLimitContext creates a new tmux session with a
+// custom scrollback limit and cancellation support using the default client.
+func CreateSessionWithHistoryLimitContext(ctx context.Context, name, directory string, historyLimit int) error {
+	return DefaultClient.CreateSessionWithHistoryLimitContext(ctx, name, directory, historyLimit)
 }
 
 // GetPanes returns all panes in a session
@@ -841,9 +921,21 @@ func GetAllPanes() (map[string][]Pane, error) {
 	return DefaultClient.GetAllPanesContext(context.Background())
 }
 
+// GetAllPanesContext returns all panes from all sessions while honoring caller
+// cancellation (default client).
+func GetAllPanesContext(ctx context.Context) (map[string][]Pane, error) {
+	return DefaultClient.GetAllPanesContext(ctx)
+}
+
 // GetFirstWindow returns the first window index for a session
 func (c *Client) GetFirstWindow(session string) (int, error) {
-	output, err := c.Run("list-windows", "-t", session, "-F", "#{window_index}")
+	return c.GetFirstWindowContext(context.Background(), session)
+}
+
+// GetFirstWindowContext returns the first window index for a session with
+// cancellation support.
+func (c *Client) GetFirstWindowContext(ctx context.Context, session string) (int, error) {
+	output, err := c.RunContext(ctx, "list-windows", "-t", session, "-F", "#{window_index}")
 	if err != nil {
 		return 0, err
 	}
@@ -859,6 +951,12 @@ func (c *Client) GetFirstWindow(session string) (int, error) {
 // GetFirstWindow returns the first window index for a session (default client)
 func GetFirstWindow(session string) (int, error) {
 	return DefaultClient.GetFirstWindow(session)
+}
+
+// GetFirstWindowContext returns the first window index for a session with
+// cancellation support using the default client.
+func GetFirstWindowContext(ctx context.Context, session string) (int, error) {
+	return DefaultClient.GetFirstWindowContext(ctx, session)
 }
 
 // GetDefaultPaneIndex returns the default pane index (respects pane-base-index)
@@ -888,7 +986,16 @@ func GetDefaultPaneIndex(session string) (int, error) {
 
 // SplitWindow creates a new pane in the session
 func (c *Client) SplitWindow(session string, directory string) (string, error) {
-	firstWin, err := c.GetFirstWindow(session)
+	return c.SplitWindowContext(context.Background(), session, directory)
+}
+
+// SplitWindowContext creates a new pane in the session with cancellation
+// support across window discovery, pane creation, and layout selection.
+func (c *Client) SplitWindowContext(ctx context.Context, session string, directory string) (string, error) {
+	if ctx == nil {
+		return "", errors.New("tmux split window context is required")
+	}
+	firstWin, err := c.GetFirstWindowContext(ctx, session)
 	if err != nil {
 		return "", err
 	}
@@ -896,13 +1003,21 @@ func (c *Client) SplitWindow(session string, directory string) (string, error) {
 	target := fmt.Sprintf("%s:%d", session, firstWin)
 
 	// Split and get the new pane ID
-	paneID, err := c.Run("split-window", "-t", target, "-c", directory, "-P", "-F", "#{pane_id}")
+	paneID, err := c.RunContext(ctx, "split-window", "-t", target, "-c", directory, "-P", "-F", "#{pane_id}")
 	if err != nil {
 		return "", err
 	}
+	if err := ctx.Err(); err != nil {
+		return paneID, fmt.Errorf("tmux pane %q was created before cancellation: %w", paneID, err)
+	}
 
 	// Apply tiled layout
-	_ = c.RunSilent("select-layout", "-t", target, "tiled")
+	if err := c.RunSilentContext(ctx, "select-layout", "-t", target, "tiled"); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return paneID, fmt.Errorf("tmux pane %q was created before cancellation: %w", paneID, ctxErr)
+		}
+		return paneID, fmt.Errorf("tmux pane %q was created but applying tiled layout failed: %w", paneID, err)
+	}
 
 	return paneID, nil
 }
@@ -912,17 +1027,34 @@ func SplitWindow(session string, directory string) (string, error) {
 	return DefaultClient.SplitWindow(session, directory)
 }
 
+// SplitWindowContext creates a new pane with cancellation support using the
+// default client.
+func SplitWindowContext(ctx context.Context, session string, directory string) (string, error) {
+	return DefaultClient.SplitWindowContext(ctx, session, directory)
+}
+
 // SetPaneTitle sets the title of a pane and disables title changes by programs
 // to prevent shells/processes from overwriting NTM's pane naming convention.
 func (c *Client) SetPaneTitle(paneID, title string) error {
-	selectErr := c.RunSilent("select-pane", "-t", paneID, "-T", title)
+	return c.SetPaneTitleContext(context.Background(), paneID, title)
+}
+
+// SetPaneTitleContext sets a pane title with cancellation covering the title
+// mutation, transient retries, and the best-effort allow-set-title mutation.
+func (c *Client) SetPaneTitleContext(ctx context.Context, paneID, title string) error {
+	if ctx == nil {
+		return errors.New("tmux pane title context is required")
+	}
+	selectErr := c.RunSilentContext(ctx, "select-pane", "-t", paneID, "-T", title)
 	if selectErr != nil && ClassifyCommandError(selectErr).Kind == CommandErrorPaneNotFound {
 		// On busy tmux servers, newly-created panes can transiently fail to resolve by ID.
 		// Retry briefly to reduce flakiness (especially under `go test`).
 		const attempts = 5
 		for i := 0; i < attempts && selectErr != nil; i++ {
-			time.Sleep(50 * time.Millisecond)
-			selectErr = c.RunSilent("select-pane", "-t", paneID, "-T", title)
+			if err := waitForSendDelay(ctx, 50*time.Millisecond); err != nil {
+				return err
+			}
+			selectErr = c.RunSilentContext(ctx, "select-pane", "-t", paneID, "-T", title)
 			if selectErr != nil && ClassifyCommandError(selectErr).Kind != CommandErrorPaneNotFound {
 				break
 			}
@@ -936,13 +1068,24 @@ func (c *Client) SetPaneTitle(paneID, title string) error {
 	// This is a per-pane option (requires tmux 3.0+).
 	// Errors are non-fatal - the title is already set, and older tmux versions
 	// may not support this option.
-	_ = c.RunSilent("set-option", "-p", "-t", paneID, "allow-set-title", "off")
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_ = c.RunSilentContext(ctx, "set-option", "-p", "-t", paneID, "allow-set-title", "off")
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return nil
 }
 
 // SetPaneTitle sets the title of a pane (default client)
 func SetPaneTitle(paneID, title string) error {
 	return DefaultClient.SetPaneTitle(paneID, title)
+}
+
+// SetPaneTitleContext sets a pane title with caller cancellation (default client).
+func SetPaneTitleContext(ctx context.Context, paneID, title string) error {
+	return DefaultClient.SetPaneTitleContext(ctx, paneID, title)
 }
 
 // GetPaneTitle returns the title of a pane
@@ -1149,19 +1292,36 @@ const (
 	ShellEnterDelay = 150 * time.Millisecond
 )
 
-// SendKeys sends keys to a pane with the default Enter delay (50ms for agent TUIs)
+// SendKeys sends keys to a pane with the default Enter delay.
 func (c *Client) SendKeys(target, keys string, enter bool) error {
-	return c.SendKeysWithDelay(target, keys, enter, DefaultEnterDelay)
+	return c.SendKeysContext(context.Background(), target, keys, enter)
+}
+
+// SendKeysContext sends keys to a pane with caller cancellation.
+func (c *Client) SendKeysContext(ctx context.Context, target, keys string, enter bool) error {
+	return c.SendKeysWithDelayContext(ctx, target, keys, enter, DefaultEnterDelay)
 }
 
 // SendKeysWithDelay sends keys to a pane with a configurable delay before Enter.
 // Use ShellEnterDelay for shell panes (bash, zsh) or DefaultEnterDelay for agent TUIs.
 func (c *Client) SendKeysWithDelay(target, keys string, enter bool, enterDelay time.Duration) error {
+	return c.SendKeysWithDelayContext(context.Background(), target, keys, enter, enterDelay)
+}
+
+// SendKeysWithDelayContext sends keys with caller cancellation covering every
+// tmux subprocess and the delay before Enter.
+func (c *Client) SendKeysWithDelayContext(ctx context.Context, target, keys string, enter bool, enterDelay time.Duration) error {
+	if ctx == nil {
+		return errors.New("tmux send context is required")
+	}
+	if enterDelay < 0 {
+		return errors.New("tmux Enter delay cannot be negative")
+	}
 	// Send large payloads in chunks to avoid ARG_MAX limits or tmux buffer issues
 	const chunkSize = 4096
 
 	if len(keys) <= chunkSize {
-		if err := c.RunSilent("send-keys", "-t", target, "-l", "--", keys); err != nil {
+		if err := c.RunSilentContext(ctx, "send-keys", "-t", target, "-l", "--", keys); err != nil {
 			return err
 		}
 	} else {
@@ -1182,7 +1342,7 @@ func (c *Client) SendKeysWithDelay(target, keys string, enter bool, enterDelay t
 			}
 
 			chunk := keys[start:end]
-			if err := c.RunSilent("send-keys", "-t", target, "-l", "--", chunk); err != nil {
+			if err := c.RunSilentContext(ctx, "send-keys", "-t", target, "-l", "--", chunk); err != nil {
 				return err
 			}
 			start = end
@@ -1193,12 +1353,31 @@ func (c *Client) SendKeysWithDelay(target, keys string, enter bool, enterDelay t
 		// Delay before Enter to ensure the target has time to process the pasted text.
 		// Without this, Enter can be lost due to input buffering.
 		// Agent TUIs (Codex, Gemini) need ~50ms; shells may need 150ms or more.
-		time.Sleep(enterDelay)
+		if err := waitForSendDelay(ctx, enterDelay); err != nil {
+			return err
+		}
 		// Use "Enter" instead of "C-m" (Ctrl+M) because some TUIs (e.g., Codex)
 		// distinguish between the Enter key and the carriage return control character.
-		return c.RunSilent("send-keys", "-t", target, "Enter")
+		return c.RunSilentContext(ctx, "send-keys", "-t", target, "Enter")
 	}
 	return nil
+}
+
+func waitForSendDelay(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if delay == 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // FormatPaneName formats a pane title according to NTM convention
@@ -1220,20 +1399,40 @@ func SendKeys(target, keys string, enter bool) error {
 	return DefaultClient.SendKeys(target, keys, enter)
 }
 
+// SendKeysContext sends keys with caller cancellation (default client).
+func SendKeysContext(ctx context.Context, target, keys string, enter bool) error {
+	return DefaultClient.SendKeysContext(ctx, target, keys, enter)
+}
+
 // SendKeysWithDelay sends keys to a pane with a configurable Enter delay (default client)
 func SendKeysWithDelay(target, keys string, enter bool, enterDelay time.Duration) error {
 	return DefaultClient.SendKeysWithDelay(target, keys, enter, enterDelay)
 }
 
+// SendKeysWithDelayContext sends keys with a cancellable Enter delay (default client).
+func SendKeysWithDelayContext(ctx context.Context, target, keys string, enter bool, enterDelay time.Duration) error {
+	return DefaultClient.SendKeysWithDelayContext(ctx, target, keys, enter, enterDelay)
+}
+
 // PasteKeys pastes content to a pane using tmux's paste mechanism.
 // This is an alias for SendKeys for now, but may be optimized for large content later.
 func (c *Client) PasteKeys(target, content string, enter bool) error {
-	return c.SendKeys(target, content, enter)
+	return c.PasteKeysContext(context.Background(), target, content, enter)
+}
+
+// PasteKeysContext pastes content with caller cancellation.
+func (c *Client) PasteKeysContext(ctx context.Context, target, content string, enter bool) error {
+	return c.SendKeysContext(ctx, target, content, enter)
 }
 
 // PasteKeysWithDelay pastes content to a pane with a configurable delay before Enter.
 func (c *Client) PasteKeysWithDelay(target, content string, enter bool, enterDelay time.Duration) error {
-	return c.SendKeysWithDelay(target, content, enter, enterDelay)
+	return c.PasteKeysWithDelayContext(context.Background(), target, content, enter, enterDelay)
+}
+
+// PasteKeysWithDelayContext pastes content with a cancellable Enter delay.
+func (c *Client) PasteKeysWithDelayContext(ctx context.Context, target, content string, enter bool, enterDelay time.Duration) error {
+	return c.SendKeysWithDelayContext(ctx, target, content, enter, enterDelay)
 }
 
 // PasteKeys pastes content to a pane (default client)
@@ -1241,9 +1440,19 @@ func PasteKeys(target, content string, enter bool) error {
 	return DefaultClient.PasteKeys(target, content, enter)
 }
 
+// PasteKeysContext pastes content with caller cancellation (default client).
+func PasteKeysContext(ctx context.Context, target, content string, enter bool) error {
+	return DefaultClient.PasteKeysContext(ctx, target, content, enter)
+}
+
 // PasteKeysWithDelay pastes content to a pane with a configurable delay (default client)
 func PasteKeysWithDelay(target, content string, enter bool, enterDelay time.Duration) error {
 	return DefaultClient.PasteKeysWithDelay(target, content, enter, enterDelay)
+}
+
+// PasteKeysWithDelayContext pastes content with a cancellable delay (default client).
+func PasteKeysWithDelayContext(ctx context.Context, target, content string, enter bool, enterDelay time.Duration) error {
+	return DefaultClient.PasteKeysWithDelayContext(ctx, target, content, enter, enterDelay)
 }
 
 // SendBuffer sends content to a pane using tmux's load-buffer + paste-buffer mechanism.
@@ -1258,11 +1467,28 @@ func PasteKeysWithDelay(target, content string, enter bool, enterDelay time.Dura
 // This preserves newlines as data rather than as key presses, which is essential for
 // multi-line prompts in Gemini's TUI.
 func (c *Client) SendBuffer(target, content string, enter bool) error {
-	return c.SendBufferWithDelay(target, content, enter, DefaultEnterDelay)
+	return c.SendBufferContext(context.Background(), target, content, enter)
+}
+
+// SendBufferContext sends buffer content with caller cancellation.
+func (c *Client) SendBufferContext(ctx context.Context, target, content string, enter bool) error {
+	return c.SendBufferWithDelayContext(ctx, target, content, enter, DefaultEnterDelay)
 }
 
 // SendBufferWithDelay sends content using the buffer mechanism with a configurable Enter delay.
 func (c *Client) SendBufferWithDelay(target, content string, enter bool, enterDelay time.Duration) error {
+	return c.SendBufferWithDelayContext(context.Background(), target, content, enter, enterDelay)
+}
+
+// SendBufferWithDelayContext sends content using the buffer mechanism with
+// cancellation covering load, paste, delay, and Enter.
+func (c *Client) SendBufferWithDelayContext(ctx context.Context, target, content string, enter bool, enterDelay time.Duration) error {
+	if ctx == nil {
+		return errors.New("tmux buffer send context is required")
+	}
+	if enterDelay < 0 {
+		return errors.New("tmux Enter delay cannot be negative")
+	}
 	// Use a unique buffer name to avoid conflicts with concurrent operations.
 	// Combine timestamp with an atomic counter to prevent collisions when
 	// multiple goroutines call this within the same nanosecond.
@@ -1272,35 +1498,46 @@ func (c *Client) SendBufferWithDelay(target, content string, enter bool, enterDe
 	// We use 'load-buffer' with stdin to handle arbitrary content including special characters
 	if c.Remote == "" {
 		// Local: use load-buffer with a pipe
-		if err := c.loadBufferLocal(bufferName, content); err != nil {
+		if err := c.loadBufferLocalContext(ctx, bufferName, content); err != nil {
+			c.cleanupBuffer(bufferName)
 			return fmt.Errorf("load buffer: %w", err)
 		}
 	} else {
 		// Remote: need to escape content for ssh
-		if err := c.loadBufferRemote(bufferName, content); err != nil {
+		if err := c.loadBufferRemoteContext(ctx, bufferName, content); err != nil {
+			c.cleanupBuffer(bufferName)
 			return fmt.Errorf("load buffer (remote): %w", err)
 		}
 	}
 
 	// Paste the buffer into the target pane
 	// -p = paste from buffer, -d = delete buffer after pasting, -b = buffer name
-	if err := c.RunSilent("paste-buffer", "-p", "-d", "-b", bufferName, "-t", target); err != nil {
-		// Clean up buffer on error
-		_ = c.RunSilent("delete-buffer", "-b", bufferName)
+	if err := c.RunSilentContext(ctx, "paste-buffer", "-p", "-d", "-b", bufferName, "-t", target); err != nil {
+		// Cleanup uses its own short context because the delivery context may be
+		// canceled. It can only delete the private buffer; it never submits Enter.
+		c.cleanupBuffer(bufferName)
 		return fmt.Errorf("paste buffer: %w", err)
 	}
 
 	if enter {
-		time.Sleep(enterDelay)
-		return c.RunSilent("send-keys", "-t", target, "Enter")
+		if err := waitForSendDelay(ctx, enterDelay); err != nil {
+			return err
+		}
+		return c.RunSilentContext(ctx, "send-keys", "-t", target, "Enter")
 	}
 	return nil
 }
 
-// loadBufferLocal loads content into a tmux buffer using stdin (for local operations).
-func (c *Client) loadBufferLocal(bufferName, content string) error {
+func (c *Client) cleanupBuffer(bufferName string) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = c.RunSilentContext(cleanupCtx, "delete-buffer", "-b", bufferName)
+}
+
+// loadBufferLocalContext loads content into a tmux buffer using stdin.
+func (c *Client) loadBufferLocalContext(ctx context.Context, bufferName, content string) error {
 	binary := BinaryPath()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "load-buffer", "-b", bufferName, "-")
 	cmd.Stdin = strings.NewReader(content)
@@ -1309,19 +1546,22 @@ func (c *Client) loadBufferLocal(bufferName, content string) error {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("%s load-buffer: %w: %s", binary, err, stderr.String())
 	}
 	return nil
 }
 
-// loadBufferRemote loads content into a tmux buffer for remote operations.
-func (c *Client) loadBufferRemote(bufferName, content string) error {
+// loadBufferRemoteContext loads content into a remote tmux buffer.
+func (c *Client) loadBufferRemoteContext(ctx context.Context, bufferName, content string) error {
 	// For remote, we need to pipe the content through ssh's stdin
 	// instead of passing it on the command line to avoid ARG_MAX limits.
 	remoteCmd := fmt.Sprintf("tmux load-buffer -b %s -", ShellQuote(bufferName))
 	sshArgs := []string{"--", c.Remote, "/bin/sh", "-c", ShellQuote(remoteCmd)}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
 	cmd.Stdin = strings.NewReader(content)
@@ -1330,6 +1570,9 @@ func (c *Client) loadBufferRemote(bufferName, content string) error {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("ssh load-buffer: %w: %s", err, stderr.String())
 	}
 	return nil
@@ -1340,9 +1583,19 @@ func SendBuffer(target, content string, enter bool) error {
 	return DefaultClient.SendBuffer(target, content, enter)
 }
 
+// SendBufferContext sends buffer content with caller cancellation (default client).
+func SendBufferContext(ctx context.Context, target, content string, enter bool) error {
+	return DefaultClient.SendBufferContext(ctx, target, content, enter)
+}
+
 // SendBufferWithDelay sends content using the buffer mechanism with delay (default client)
 func SendBufferWithDelay(target, content string, enter bool, enterDelay time.Duration) error {
 	return DefaultClient.SendBufferWithDelay(target, content, enter, enterDelay)
+}
+
+// SendBufferWithDelayContext sends buffer content with a cancellable delay (default client).
+func SendBufferWithDelayContext(ctx context.Context, target, content string, enter bool, enterDelay time.Duration) error {
+	return DefaultClient.SendBufferWithDelayContext(ctx, target, content, enter, enterDelay)
 }
 
 // SendKeysForAgent sends keys to a pane using the appropriate method for the agent type.
@@ -1350,17 +1603,29 @@ func SendBufferWithDelay(target, content string, enter bool, enterDelay time.Dur
 // send-keys (for example multiline Claude/Gemini prompts or large/multiline Codex prompts).
 // Other combinations use the standard send-keys path.
 func (c *Client) SendKeysForAgent(target, keys string, enter bool, agentType AgentType) error {
-	return c.SendKeysForAgentWithDelay(target, keys, enter, DefaultEnterDelay, agentType)
+	return c.SendKeysForAgentContext(context.Background(), target, keys, enter, agentType)
+}
+
+// SendKeysForAgentContext sends keys using the agent-appropriate mechanism
+// with caller cancellation.
+func (c *Client) SendKeysForAgentContext(ctx context.Context, target, keys string, enter bool, agentType AgentType) error {
+	return c.SendKeysForAgentWithDelayContext(ctx, target, keys, enter, DefaultEnterDelay, agentType)
 }
 
 // SendKeysForAgentWithDelay sends keys using the appropriate method with a configurable delay.
 func (c *Client) SendKeysForAgentWithDelay(target, keys string, enter bool, enterDelay time.Duration, agentType AgentType) error {
+	return c.SendKeysForAgentWithDelayContext(context.Background(), target, keys, enter, enterDelay, agentType)
+}
+
+// SendKeysForAgentWithDelayContext sends keys using the appropriate mechanism
+// with cancellation covering all subprocesses and delays.
+func (c *Client) SendKeysForAgentWithDelayContext(ctx context.Context, target, keys string, enter bool, enterDelay time.Duration, agentType AgentType) error {
 	// Use buffer-based paste when the agent/content combination needs it.
 	// This avoids newline interpretation issues and large-paste truncation quirks.
 	if needsBufferSend(agentType, keys) {
-		return c.SendBufferWithDelay(target, keys, enter, enterDelay)
+		return c.SendBufferWithDelayContext(ctx, target, keys, enter, enterDelay)
 	}
-	return c.SendKeysWithDelay(target, keys, enter, enterDelay)
+	return c.SendKeysWithDelayContext(ctx, target, keys, enter, enterDelay)
 }
 
 // canonicalAgentType folds user-facing aliases into the canonical short codes used
@@ -1431,9 +1696,19 @@ func SendKeysForAgent(target, keys string, enter bool, agentType AgentType) erro
 	return DefaultClient.SendKeysForAgent(target, keys, enter, agentType)
 }
 
+// SendKeysForAgentContext sends keys with caller cancellation (default client).
+func SendKeysForAgentContext(ctx context.Context, target, keys string, enter bool, agentType AgentType) error {
+	return DefaultClient.SendKeysForAgentContext(ctx, target, keys, enter, agentType)
+}
+
 // SendKeysForAgentWithDelay sends keys using the appropriate method with delay (default client)
 func SendKeysForAgentWithDelay(target, keys string, enter bool, enterDelay time.Duration, agentType AgentType) error {
 	return DefaultClient.SendKeysForAgentWithDelay(target, keys, enter, enterDelay, agentType)
+}
+
+// SendKeysForAgentWithDelayContext sends keys with a cancellable delay (default client).
+func SendKeysForAgentWithDelayContext(ctx context.Context, target, keys string, enter bool, enterDelay time.Duration, agentType AgentType) error {
+	return DefaultClient.SendKeysForAgentWithDelayContext(ctx, target, keys, enter, enterDelay, agentType)
 }
 
 const (
@@ -1448,18 +1723,34 @@ const (
 // This is the reliable way to submit prompts to CLI agents (Claude, Codex, Gemini)
 // that need the double-Enter to confirm submission.
 func SendKeysForAgentDoubleEnter(target, keys string, agentType AgentType) error {
+	return SendKeysForAgentDoubleEnterContext(context.Background(), target, keys, agentType)
+}
+
+// SendKeysForAgentDoubleEnterContext runs the double-Enter submission protocol
+// with cancellation checks between staging and both Enter presses.
+func SendKeysForAgentDoubleEnterContext(ctx context.Context, target, keys string, agentType AgentType) error {
+	return DefaultClient.SendKeysForAgentDoubleEnterContext(ctx, target, keys, agentType)
+}
+
+// SendKeysForAgentDoubleEnterContext runs the double-Enter submission protocol
+// on this client with caller cancellation.
+func (c *Client) SendKeysForAgentDoubleEnterContext(ctx context.Context, target, keys string, agentType AgentType) error {
 	// Send the text without pressing Enter
-	if err := SendKeysForAgent(target, keys, false, agentType); err != nil {
+	if err := c.SendKeysForAgentWithDelayContext(ctx, target, keys, false, 0, agentType); err != nil {
 		return err
 	}
-	time.Sleep(DoubleEnterFirstDelay)
+	if err := waitForSendDelay(ctx, DoubleEnterFirstDelay); err != nil {
+		return err
+	}
 	// First Enter
-	if err := SendKeys(target, "", true); err != nil {
+	if err := c.RunSilentContext(ctx, "send-keys", "-t", target, "Enter"); err != nil {
 		return err
 	}
-	time.Sleep(DoubleEnterSecondDelay)
+	if err := waitForSendDelay(ctx, DoubleEnterSecondDelay); err != nil {
+		return err
+	}
 	// Second Enter
-	if err := SendKeys(target, "", true); err != nil {
+	if err := c.RunSilentContext(ctx, "send-keys", "-t", target, "Enter"); err != nil {
 		return err
 	}
 	return nil
@@ -1579,7 +1870,15 @@ func KillSession(session string) error {
 
 // KillPane kills a tmux pane
 func (c *Client) KillPane(paneID string) error {
-	return c.RunSilent("kill-pane", "-t", paneID)
+	return c.KillPaneContext(context.Background(), paneID)
+}
+
+// KillPaneContext kills a tmux pane with caller cancellation.
+func (c *Client) KillPaneContext(ctx context.Context, paneID string) error {
+	if ctx == nil {
+		return errors.New("tmux kill pane context is required")
+	}
+	return c.RunSilentContext(ctx, "kill-pane", "-t", paneID)
 }
 
 // KillPane kills a tmux pane (default client)
@@ -1587,9 +1886,23 @@ func KillPane(paneID string) error {
 	return DefaultClient.KillPane(paneID)
 }
 
+// KillPaneContext kills a tmux pane with caller cancellation (default client).
+func KillPaneContext(ctx context.Context, paneID string) error {
+	return DefaultClient.KillPaneContext(ctx, paneID)
+}
+
 // ApplyTiledLayout applies tiled layout to all windows
 func (c *Client) ApplyTiledLayout(session string) error {
-	output, err := c.Run("list-windows", "-t", session, "-F", "#{window_index}")
+	return c.ApplyTiledLayoutContext(context.Background(), session)
+}
+
+// ApplyTiledLayoutContext applies tiled layout to all windows with
+// cancellation support across discovery and each window mutation.
+func (c *Client) ApplyTiledLayoutContext(ctx context.Context, session string) error {
+	if ctx == nil {
+		return errors.New("tmux layout context is required")
+	}
+	output, err := c.RunContext(ctx, "list-windows", "-t", session, "-F", "#{window_index}")
 	if err != nil {
 		return err
 	}
@@ -1602,13 +1915,20 @@ func (c *Client) ApplyTiledLayout(session string) error {
 		target := fmt.Sprintf("%s:%s", session, winIdx)
 
 		// Unzoom if zoomed
-		zoomed, _ := c.Run("display-message", "-t", target, "-p", "#{window_zoomed_flag}")
+		zoomed, displayErr := c.RunContext(ctx, "display-message", "-t", target, "-p", "#{window_zoomed_flag}")
+		if displayErr != nil {
+			return fmt.Errorf("inspect window %s zoom state: %w", target, displayErr)
+		}
 		if zoomed == "1" {
-			_ = c.RunSilent("resize-pane", "-t", target, "-Z")
+			if err := c.RunSilentContext(ctx, "resize-pane", "-t", target, "-Z"); err != nil {
+				return fmt.Errorf("unzoom window %s: %w", target, err)
+			}
 		}
 
 		// Apply tiled layout
-		_ = c.RunSilent("select-layout", "-t", target, "tiled")
+		if err := c.RunSilentContext(ctx, "select-layout", "-t", target, "tiled"); err != nil {
+			return fmt.Errorf("apply tiled layout to window %s: %w", target, err)
+		}
 	}
 
 	return nil
@@ -1617,6 +1937,12 @@ func (c *Client) ApplyTiledLayout(session string) error {
 // ApplyTiledLayout applies tiled layout to all windows (default client)
 func ApplyTiledLayout(session string) error {
 	return DefaultClient.ApplyTiledLayout(session)
+}
+
+// ApplyTiledLayoutContext applies tiled layout with cancellation support using
+// the default client.
+func ApplyTiledLayoutContext(ctx context.Context, session string) error {
+	return DefaultClient.ApplyTiledLayoutContext(ctx, session)
 }
 
 // ZoomPane zooms a specific pane
@@ -1669,12 +1995,23 @@ func CapturePaneOutput(target string, lines int) (string, error) {
 func (c *Client) CapturePaneVisible(target string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultCommandTimeout)
 	defer cancel()
+	return c.CapturePaneVisibleContext(ctx, target)
+}
+
+// CapturePaneVisibleContext captures only the visible screen while honoring
+// caller cancellation.
+func (c *Client) CapturePaneVisibleContext(ctx context.Context, target string) (string, error) {
 	return c.RunContext(ctx, "capture-pane", "-t", target, "-p", "-S", "0")
 }
 
 // CapturePaneVisible captures only the visible screen of a pane (default client).
 func CapturePaneVisible(target string) (string, error) {
 	return DefaultClient.CapturePaneVisible(target)
+}
+
+// CapturePaneVisibleContext captures only the visible screen with caller cancellation.
+func CapturePaneVisibleContext(ctx context.Context, target string) (string, error) {
+	return DefaultClient.CapturePaneVisibleContext(ctx, target)
 }
 
 // CapturePaneOutputContext captures the output of a pane with cancellation support (default client).
@@ -1684,33 +2021,53 @@ func CapturePaneOutputContext(ctx context.Context, target string, lines int) (st
 
 // GetCurrentSession returns the current session name (if in tmux)
 func (c *Client) GetCurrentSession() string {
+	current, _ := c.GetCurrentSessionContext(context.Background())
+	return current
+}
+
+// GetCurrentSessionContext returns the current session name with caller
+// cancellation. Ordinary lookup failures are returned so context-aware
+// callers can distinguish an absent tmux environment from a failed lookup.
+func (c *Client) GetCurrentSessionContext(ctx context.Context) (string, error) {
+	if ctx == nil {
+		return "", errors.New("tmux current session context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if c.Remote == "" {
 		if !InTmux() {
-			return ""
+			return "", nil
 		}
 	} else {
 		// Remote check logic might differ or be unsupported
 		// For now, assume unsupported or return empty
-		return ""
+		return "", nil
 	}
-	output, err := c.Run("display-message", "-p", "#{session_name}")
+	output, err := c.RunContext(ctx, "display-message", "-p", "#{session_name}")
 	if err == nil {
-		return output
+		return output, nil
 	}
 	paneTarget := strings.TrimSpace(os.Getenv("TMUX_PANE"))
 	if paneTarget == "" {
-		return ""
+		return "", err
 	}
-	output, err = c.Run("display-message", "-p", "-t", paneTarget, "#{session_name}")
+	output, err = c.RunContext(ctx, "display-message", "-p", "-t", paneTarget, "#{session_name}")
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return output
+	return output, nil
 }
 
 // GetCurrentSession returns the current session name (default client)
 func GetCurrentSession() string {
 	return DefaultClient.GetCurrentSession()
+}
+
+// GetCurrentSessionContext returns the current session name with caller
+// cancellation (default client).
+func GetCurrentSessionContext(ctx context.Context) (string, error) {
+	return DefaultClient.GetCurrentSessionContext(ctx)
 }
 
 // ValidateSessionName checks if a session name is valid.

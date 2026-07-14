@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 )
@@ -21,6 +23,53 @@ type testError struct {
 
 func (e *testError) Error() string {
 	return e.msg
+}
+
+type ensembleFailureWriter struct {
+	err error
+}
+
+func (w ensembleFailureWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestRenderCheckpointResumeFailureOutputPreservesCause(t *testing.T) {
+	cause := errors.New("checkpoint metadata unavailable")
+	payload := checkpointResumeOutput{
+		GeneratedAt: time.Now().UTC(),
+		RunID:       "run-1",
+		Success:     false,
+		Error:       cause.Error(),
+	}
+	var buf bytes.Buffer
+	err := renderCheckpointResumeFailureOutput(&buf, payload, "json", false, cause)
+	if !errors.Is(err, errJSONFailure) || !errors.Is(err, cause) {
+		t.Fatalf("render error = %v, want terminal sentinel and original cause", err)
+	}
+
+	var decoded checkpointResumeOutput
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode exactly one checkpoint failure document: %v; output=%q", err, buf.String())
+	}
+	if decoded.Success || decoded.Error != cause.Error() {
+		t.Fatalf("checkpoint failure payload = %+v", decoded)
+	}
+}
+
+func TestRenderCheckpointResumeFailureOutputSurfacesEncoderError(t *testing.T) {
+	writeErr := errors.New("writer closed")
+	cause := errors.New("checkpoint failed")
+	err := renderCheckpointResumeFailureOutput(ensembleFailureWriter{err: writeErr}, checkpointResumeOutput{
+		RunID:   "run-1",
+		Success: false,
+		Error:   cause.Error(),
+	}, "json", false, cause)
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("render error = %v, want encoder error", err)
+	}
+	if errors.Is(err, errJSONFailure) {
+		t.Fatalf("render error = %v, must not claim an emitted failure document", err)
+	}
 }
 
 func TestNewEnsembleCompareCmd(t *testing.T) {
@@ -103,6 +152,9 @@ func TestWriteCompareResult_JSON(t *testing.T) {
 	}
 	if parsed.Result.ModeDiff.AddedCount != 1 {
 		t.Errorf("expected AddedCount=1, got %d", parsed.Result.ModeDiff.AddedCount)
+	}
+	if !parsed.Success {
+		t.Error("expected successful compare output to set success=true")
 	}
 
 	t.Log("TEST: TestWriteCompareResult_JSON - assertion: JSON output is valid")
@@ -1845,9 +1897,8 @@ func TestWriteCompareError_JSON(t *testing.T) {
 	var buf bytes.Buffer
 	err := writeCompareError(&buf, "missing-a", "missing-b", testErr, "json")
 
-	// Should return the original error
-	if err == nil {
-		t.Error("expected error to be returned")
+	if !errors.Is(err, errJSONFailure) || !errors.Is(err, testErr) {
+		t.Fatalf("writeCompareError error = %v, want terminal sentinel and original cause", err)
 	}
 
 	output := buf.String()
@@ -1865,8 +1916,48 @@ func TestWriteCompareError_JSON(t *testing.T) {
 	if parsed.Error != "session not found" {
 		t.Errorf("expected Error='session not found', got %q", parsed.Error)
 	}
+	if parsed.Success {
+		t.Error("expected failure compare output to set success=false")
+	}
 
 	t.Log("TEST: TestWriteCompareError_JSON - assertion: error JSON output is valid")
+}
+
+func TestWriteCompareError_JSONSurfacesEncoderError(t *testing.T) {
+	writeErr := errors.New("compare writer closed")
+	cause := errors.New("compare failed")
+	err := writeCompareError(ensembleFailureWriter{err: writeErr}, "run-a", "run-b", cause, "json")
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("writeCompareError error = %v, want encoder error", err)
+	}
+	if errors.Is(err, errJSONFailure) {
+		t.Fatalf("writeCompareError error = %v, must not claim a written JSON result", err)
+	}
+}
+
+func TestWriteCompareError_YAMLPreservesCauseAndEncoderError(t *testing.T) {
+	writeErr := errors.New("compare yaml writer closed")
+	cause := errors.New("compare failed")
+	err := writeCompareError(ensembleFailureWriter{err: writeErr}, "run-a", "run-b", cause, "yaml")
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), writeErr.Error()) {
+		t.Fatalf("writeCompareError error = %v, want YAML encoder error and original cause", err)
+	}
+}
+
+func TestWriteCompareError_YAMLReturnsOriginalCauseAfterEncoding(t *testing.T) {
+	cause := errors.New("compare failed")
+	var buf bytes.Buffer
+	err := writeCompareError(&buf, "run-a", "run-b", cause, "yaml")
+	if err != cause {
+		t.Fatalf("writeCompareError error = %v, want original cause", err)
+	}
+	var parsed compareOutput
+	if err := yaml.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("decode YAML compare failure: %v; output=%q", err, buf.String())
+	}
+	if parsed.Success || parsed.Error != cause.Error() {
+		t.Fatalf("YAML compare failure = %+v", parsed)
+	}
 }
 
 func TestCompareOutput_Struct(t *testing.T) {

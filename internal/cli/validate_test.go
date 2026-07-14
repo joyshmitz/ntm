@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,78 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 )
+
+func TestValidationJSONInvalidConfigReturnsTerminalFailure(t *testing.T) {
+	originalJSON := jsonOutput
+	originalConfigFile := cfgFile
+	jsonOutput = true
+	t.Cleanup(func() {
+		jsonOutput = originalJSON
+		cfgFile = originalConfigFile
+	})
+
+	projectDir := t.TempDir()
+	chdirForTerminalJSONTest(t, projectDir)
+	configPath := filepath.Join(projectDir, "invalid-config.toml")
+	if err := os.WriteFile(configPath, []byte("[agents\n"), 0644); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+	cfgFile = configPath
+
+	stdout, runErr := captureStdout(t, func() error { return runValidation(false, false) })
+	if !errors.Is(runErr, errJSONFailure) {
+		t.Fatalf("runValidation() error = %v, want errJSONFailure", runErr)
+	}
+	if !strings.Contains(runErr.Error(), "validation failed") {
+		t.Fatalf("runValidation() error = %v, want preserved validation failure", runErr)
+	}
+
+	document := decodeSingleTerminalJSONMap(t, stdout)
+	if success, ok := document["success"].(bool); !ok || success {
+		t.Fatalf("success = %#v, want false", document["success"])
+	}
+	if valid, ok := document["valid"].(bool); !ok || valid {
+		t.Fatalf("valid = %#v, want false", document["valid"])
+	}
+	topLevelError, ok := document["error"].(string)
+	if !ok || !strings.Contains(topLevelError, "validation failed") {
+		t.Fatalf("error = %#v, want top-level validation failure", document["error"])
+	}
+	summary, ok := document["summary"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("summary = %#v, want at least one error", document["summary"])
+	}
+	errorCount, ok := summary["error_count"].(float64)
+	if !ok || errorCount < 1 {
+		t.Fatalf("summary = %#v, want at least one error", document["summary"])
+	}
+}
+
+func TestValidationJSONValidReportIncludesTerminalSuccess(t *testing.T) {
+	originalJSON := jsonOutput
+	originalConfigFile := cfgFile
+	jsonOutput = true
+	t.Cleanup(func() {
+		jsonOutput = originalJSON
+		cfgFile = originalConfigFile
+	})
+
+	projectDir := t.TempDir()
+	chdirForTerminalJSONTest(t, projectDir)
+	cfgFile = filepath.Join(projectDir, "config-does-not-exist.toml")
+
+	stdout, runErr := captureStdout(t, func() error { return runValidation(false, false) })
+	if runErr != nil {
+		t.Fatalf("runValidation() error = %v, want nil", runErr)
+	}
+	document := decodeSingleTerminalJSONMap(t, stdout)
+	if success, ok := document["success"].(bool); !ok || !success {
+		t.Fatalf("success = %#v, want true", document["success"])
+	}
+	if valid, ok := document["valid"].(bool); !ok || !valid {
+		t.Fatalf("valid = %#v, want true", document["valid"])
+	}
+}
 
 func TestDiscoverConfigs(t *testing.T) {
 	// Test that discoverConfigs returns at least the main config

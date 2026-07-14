@@ -75,14 +75,14 @@ func TestScheduler_CancelSession(t *testing.T) {
 	t.Parallel()
 	s := newTestScheduler(t)
 
-	// Pause so jobs stay in queue
-	s.Pause()
-
 	err := s.Start()
 	if err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 	defer s.Stop()
+
+	// Pause so jobs stay in queue.
+	s.Pause()
 
 	// Submit jobs for two sessions
 	for i := 0; i < 3; i++ {
@@ -117,14 +117,14 @@ func TestScheduler_CancelBatch(t *testing.T) {
 	t.Parallel()
 	s := newTestScheduler(t)
 
-	// Pause so jobs stay in queue
-	s.Pause()
-
 	err := s.Start()
 	if err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 	defer s.Stop()
+
+	// Pause so jobs stay in queue.
+	s.Pause()
 
 	// Submit a batch
 	jobs := []*SpawnJob{
@@ -159,14 +159,14 @@ func TestScheduler_GetJob_FromQueue(t *testing.T) {
 	t.Parallel()
 	s := newTestScheduler(t)
 
-	// Pause so jobs stay in queue
-	s.Pause()
-
 	err := s.Start()
 	if err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 	defer s.Stop()
+
+	// Pause so jobs stay in queue.
+	s.Pause()
 
 	job := NewSpawnJob("", JobTypeSession, "test-session")
 	if err := s.Submit(job); err != nil {

@@ -212,6 +212,14 @@ var (
 		"deleting ", // File deletion
 	}
 
+	// Codex keeps its input chevron and context footer rendered while a turn is
+	// active, so those idle-looking elements cannot outrank a live spinner. Keep
+	// these structural markers separate from codWorkingPatterns: substring-based
+	// parser hints are useful for recent output, while these markers are strong
+	// enough to override the persistent prompt chrome.
+	codexActiveWorkLineRe = regexp.MustCompile(`(?im)^\s*[•·◐◑◒◓⬤]\s*(?:Working|Waiting\s+for\s+background|Thinking)\b`)
+	codexInterruptHintRe  = regexp.MustCompile(`(?i)esc\s+to\s+i(?:nterrupt\b|\S*…|\S*\.\.\.)`)
+
 	// codIdlePatterns indicates waiting for input.
 	codIdlePatterns = []*regexp.Regexp{
 		regexp.MustCompile(`>\s*$`),                // Standard prompt
@@ -232,6 +240,8 @@ var (
 	// codHeaderPattern confirms output is from Codex CLI.
 	codHeaderPattern = regexp.MustCompile(`(?i)\b(codex|openai|gpt-\d)\b`)
 )
+
+const codexLiveTailLines = 15
 
 // Gemini CLI (gmi) patterns for state detection.
 var (
@@ -504,6 +514,17 @@ func DetectClaudeTurnState(output string) ClaudeTurnState {
 // live spinner rather than completion or a terminal tool-result error.
 func ClaudeActivelyWorking(output string) bool {
 	return DetectClaudeTurnState(output) == ClaudeTurnWorking
+}
+
+// CodexActivelyWorking reports whether Codex's trailing live window contains a
+// structural in-flight marker. Codex leaves old spinner lines in scrollback and
+// keeps its input chrome visible during work, so the bounded tail is required:
+// matching the full capture would make completed turns appear busy forever,
+// while treating the persistent chevron as idle would make active panes unsafe
+// for dispatch.
+func CodexActivelyWorking(output string) bool {
+	tail := util.GetLastNLines(stripANSICodes(output), codexLiveTailLines)
+	return codexActiveWorkLineRe.MatchString(tail) || codexInterruptHintRe.MatchString(tail)
 }
 
 // claudeIsActiveSpinnerLine reports whether a single line is a live Claude

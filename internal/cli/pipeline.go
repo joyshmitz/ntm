@@ -150,9 +150,7 @@ func runPipelineLint(workflowFile string, out io.Writer, errOut io.Writer) error
 		}
 
 		if jsonOutput {
-			if encodeErr := json.NewEncoder(out).Encode(lintResult); encodeErr != nil {
-				return encodeErr
-			}
+			return emitJSONFailureEnvelopeToWithCause(out, lintResult, err)
 		} else {
 			fmt.Fprintf(errOut, "Pipeline lint failed: %s\n", workflowPath)
 			printPipelineLintErrors(errOut, lintResult.Errors)
@@ -183,13 +181,11 @@ func runPipelineLint(workflowFile string, out io.Writer, errOut io.Writer) error
 	}
 
 	if jsonOutput {
-		if err := json.NewEncoder(out).Encode(lintResult); err != nil {
-			return err
-		}
 		if !result.Valid {
-			return fmt.Errorf("workflow validation failed")
+			cause := errors.New("workflow validation failed")
+			return emitJSONFailureEnvelopeToWithCause(out, lintResult, cause)
 		}
-		return nil
+		return json.NewEncoder(out).Encode(lintResult)
 	}
 
 	fmt.Fprintf(out, "Pipeline lint: %s\n", workflowPath)
@@ -669,7 +665,7 @@ Examples:
 						"error_code": "STATE_NOT_FOUND",
 						"run_id":     runID,
 					}
-					return json.NewEncoder(os.Stdout).Encode(result)
+					return emitJSONFailureEnvelopeWithCause(result, err)
 				}
 				return fmt.Errorf("failed to load pipeline state: %w", err)
 			}
@@ -720,13 +716,14 @@ Examples:
 
 			if !result.Valid {
 				if jsonOutput {
+					cause := errors.New("workflow validation failed")
 					result := map[string]interface{}{
 						"success":    false,
 						"error":      "workflow validation failed",
 						"error_code": "INVALID_WORKFLOW",
 						"run_id":     runID,
 					}
-					return json.NewEncoder(os.Stdout).Encode(result)
+					return emitJSONFailureEnvelopeWithCause(result, cause)
 				}
 				fmt.Fprintln(os.Stderr, "Validation failed:")
 				for _, e := range result.Errors {
@@ -768,7 +765,7 @@ Examples:
 						"workflow": workflow.Name,
 						"session":  session,
 					}
-					return json.NewEncoder(os.Stdout).Encode(result)
+					return emitJSONFailureEnvelopeWithCause(result, err)
 				}
 
 				result := map[string]interface{}{
@@ -916,7 +913,7 @@ Examples:
 						"error":      err.Error(),
 						"error_code": "CLEANUP_FAILED",
 					}
-					return json.NewEncoder(os.Stdout).Encode(result)
+					return emitJSONFailureEnvelopeWithCause(result, err)
 				}
 				return fmt.Errorf("cleanup failed: %w", err)
 			}

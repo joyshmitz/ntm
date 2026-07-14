@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -487,7 +489,7 @@ Examples:
 				Force:        force,
 				SkipGitCheck: skipGitCheck,
 			}
-			return runSessionsRestore(args[0], opts, attach, launchAgents, prompt, themeName)
+			return runSessionsRestore(cmd.Context(), args[0], opts, attach, launchAgents, prompt, themeName)
 		},
 	}
 
@@ -548,7 +550,10 @@ func (r *SessionsRestoreResult) JSON() interface{} {
 	return r
 }
 
-func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, launchAgents bool, prompt, themeName string) error {
+func runSessionsRestore(ctx context.Context, savedName string, opts session.RestoreOptions, attach, launchAgents bool, prompt, themeName string) error {
+	if ctx == nil {
+		return fmt.Errorf("session restore requires a command context")
+	}
 	applyResumeTheme(themeName)
 
 	// bd-oqwmf: emitRestoreFailure writes the success:false envelope and
@@ -609,6 +614,7 @@ func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, l
 
 	// Optionally launch agents
 	var launchErr error
+	var promptErr error
 	agentCount := 0
 	promptSent, promptFailed := 0, 0
 	if launchAgents {
@@ -624,14 +630,14 @@ func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, l
 			launchErr = session.RestoreAgents(restoredName, state, cmds)
 			// Optionally inject an initial prompt into the launched panes.
 			if launchErr == nil && strings.TrimSpace(prompt) != "" {
-				promptSent, promptFailed = sendResumePrompt(restoredName, prompt)
+				promptSent, promptFailed, promptErr = sendResumePrompt(ctx, restoredName, prompt)
 			}
 		}
 		agentCount = state.Agents.Total()
 	}
 
 	result := &SessionsRestoreResult{
-		Success:      true,
+		Success:      promptErr == nil,
 		SavedName:    savedName,
 		RestoredAs:   restoredName,
 		State:        state,
@@ -644,9 +650,18 @@ func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, l
 	if launchErr != nil {
 		result.Error = fmt.Sprintf("restored session but failed to launch agents: %v", launchErr)
 	}
+	if promptErr != nil {
+		result.Error = fmt.Sprintf("restored session but prompt dispatch was canceled: %v", promptErr)
+	}
 
 	if err := output.New(output.WithJSON(jsonOutput)).Output(result); err != nil {
 		return err
+	}
+	if promptErr != nil {
+		if jsonOutput {
+			return jsonFailureExit()
+		}
+		return promptErr
 	}
 
 	// Attach if requested
@@ -688,7 +703,7 @@ Examples:
   ntm sessions resume myproject --theme dracula  # Render output with a theme`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionsResume(args[0], name, force, attach, !nativeFlag, prompt, themeName)
+			return runSessionsResume(cmd.Context(), args[0], name, force, attach, !nativeFlag, prompt, themeName)
 		},
 	}
 
@@ -889,30 +904,52 @@ func applyResumeTheme(name string) {
 // resume/restore relaunch (ntm-boi0 --prompt passthrough). Best-effort: the
 // agents may still be starting, so this mirrors `ntm resume --inject` and a
 // short settle delay precedes delivery. User panes are skipped.
-func sendResumePrompt(sessionName, prompt string) (sent, failed int) {
-	if prompt = strings.TrimSpace(prompt); prompt == "" {
-		return 0, 0
+func sendResumePrompt(ctx context.Context, sessionName, prompt string) (sent, failed int, canceled error) {
+	if ctx == nil {
+		return 0, 0, fmt.Errorf("session prompt dispatch requires a command context")
 	}
-	panes, err := tmux.GetPanes(sessionName)
+	if prompt = strings.TrimSpace(prompt); prompt == "" {
+		return 0, 0, nil
+	}
+	panes, err := tmux.GetPanesContext(ctx, sessionName)
 	if err != nil {
-		return 0, 0
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, 0, ctxErr
+		}
+		return 0, 0, nil
 	}
 	// Give freshly-relaunched agents a moment to accept input before delivery.
-	time.Sleep(750 * time.Millisecond)
-	for _, p := range panes {
-		if p.Type == tmux.AgentUser {
-			continue
-		}
-		if err := sendPromptWithDoubleEnter(p.ID, prompt); err != nil {
-			failed++
-			continue
-		}
-		sent++
+	if err := waitContextDelay(ctx, 750*time.Millisecond); err != nil {
+		return 0, 0, err
 	}
-	return sent, failed
+	service, err := dispatchsvc.NewService(dispatchsvc.Ports{
+		Redactor:  shellFinalMessageRedactor(activeShellDispatchRedactionConfig()),
+		Protocols: shellDispatchProtocolPlanner{},
+		Deliverer: dispatchsvc.TMUXDeliverer{},
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	result, dispatchErr := service.Execute(ctx, dispatchsvc.Request{
+		Session:       sessionName,
+		Panes:         panes,
+		Message:       prompt,
+		Submit:        true,
+		StopOnFailure: false,
+	})
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return result.Delivered, len(result.Targets) - result.Delivered, ctxErr
+	}
+	// Resume/restore prompt injection remains best-effort for ordinary delivery
+	// failures; cancellation is the only error that aborts the parent command.
+	_ = dispatchErr
+	return result.Delivered, len(result.Targets) - result.Delivered, nil
 }
 
-func runSessionsResume(savedName, name string, force, attach, preferCASR bool, prompt, themeName string) error {
+func runSessionsResume(ctx context.Context, savedName, name string, force, attach, preferCASR bool, prompt, themeName string) error {
+	if ctx == nil {
+		return fmt.Errorf("session resume requires a command context")
+	}
 	emitFailure := func(result *SessionsResumeResult) error {
 		if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
 			return encErr
@@ -962,12 +999,23 @@ func runSessionsResume(savedName, name string, force, attach, preferCASR bool, p
 	}
 
 	// Optionally inject an initial prompt into the relaunched agent panes.
+	var promptErr error
 	if strings.TrimSpace(prompt) != "" {
-		result.PromptSent, result.PromptFailed = sendResumePrompt(res.Session, prompt)
+		result.PromptSent, result.PromptFailed, promptErr = sendResumePrompt(ctx, res.Session, prompt)
+		if promptErr != nil {
+			result.Success = false
+			result.Error = fmt.Sprintf("resumed session but prompt dispatch was canceled: %v", promptErr)
+		}
 	}
 
 	if err := output.New(output.WithJSON(jsonOutput)).Output(result); err != nil {
 		return err
+	}
+	if promptErr != nil {
+		if jsonOutput {
+			return jsonFailureExit()
+		}
+		return promptErr
 	}
 
 	if attach {

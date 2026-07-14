@@ -1,8 +1,11 @@
 package robot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -343,7 +346,11 @@ func TestLogChannel(t *testing.T) {
 		t.Error("expected log channel to be available")
 	}
 
-	// Just verify it doesn't panic/error
+	originalWriter := log.Writer()
+	t.Cleanup(func() { log.SetOutput(originalWriter) })
+	var output bytes.Buffer
+	log.SetOutput(&output)
+
 	err := channel.Send(context.Background(), &Alert{
 		Timestamp: time.Now(),
 		Type:      AlertUnhealthy,
@@ -351,6 +358,18 @@ func TestLogChannel(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+	if !strings.Contains(output.String(), `"message":"Test log alert"`) {
+		t.Fatalf("log writer did not receive alert JSON: %q", output.String())
+	}
+
+	output.Reset()
+	log.SetOutput(io.Discard)
+	if err := channel.Send(context.Background(), &Alert{Type: AlertDegraded}); err != nil {
+		t.Fatalf("discarded alert: %v", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("discarded log writer leaked alert output: %q", output.String())
 	}
 }
 

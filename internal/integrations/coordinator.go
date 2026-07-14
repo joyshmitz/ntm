@@ -13,7 +13,9 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
-var coordinatorLogger = slog.Default().With("component", "integrations.coordinator")
+func coordinatorLogger() *slog.Logger {
+	return slog.Default().With("component", "integrations.coordinator")
+}
 
 // Coordinator manages interactions between caut and CAAM integrations.
 // It monitors caut alerts for high usage and proactively triggers
@@ -139,7 +141,7 @@ func (c *Coordinator) Start() error {
 
 	// Verify both integrations are available
 	if !c.config.CAAMEnabled || !c.config.CautEnabled {
-		coordinatorLogger.Info("coordinator not starting: integrations not enabled",
+		coordinatorLogger().Info("coordinator not starting: integrations not enabled",
 			"caam_enabled", c.config.CAAMEnabled,
 			"caut_enabled", c.config.CautEnabled,
 		)
@@ -151,12 +153,12 @@ func (c *Coordinator) Start() error {
 	defer cancel()
 
 	if !c.caamAdapter.IsAvailable(ctx) {
-		coordinatorLogger.Info("coordinator not starting: CAAM not available")
+		coordinatorLogger().Info("coordinator not starting: CAAM not available")
 		return nil
 	}
 
 	if !c.caamAdapter.HasMultipleAccounts(ctx) {
-		coordinatorLogger.Info("coordinator not starting: CAAM has only one account (no rotation possible)")
+		coordinatorLogger().Info("coordinator not starting: CAAM has only one account (no rotation possible)")
 		return nil
 	}
 
@@ -166,7 +168,7 @@ func (c *Coordinator) Start() error {
 
 	go c.monitorLoop()
 
-	coordinatorLogger.Info("caut-CAAM coordinator started",
+	coordinatorLogger().Info("caut-CAAM coordinator started",
 		"proactive_threshold", c.config.ProactiveThreshold,
 		"auto_rotate", c.config.AutoRotate,
 	)
@@ -192,7 +194,7 @@ func (c *Coordinator) Stop() {
 	close(stopCh)
 	<-doneCh
 
-	coordinatorLogger.Info("caut-CAAM coordinator stopped")
+	coordinatorLogger().Info("caut-CAAM coordinator stopped")
 }
 
 // IsRunning returns true if the coordinator is active.
@@ -211,7 +213,7 @@ func (c *Coordinator) OnCautAlert(provider string, usagePercent float64) {
 	c.mu.RUnlock()
 
 	if !autoRotate {
-		coordinatorLogger.Debug("auto-rotate disabled, skipping proactive switch",
+		coordinatorLogger().Debug("auto-rotate disabled, skipping proactive switch",
 			"provider", provider,
 			"usage_percent", usagePercent,
 		)
@@ -224,7 +226,7 @@ func (c *Coordinator) OnCautAlert(provider string, usagePercent float64) {
 
 	// Check cooldown
 	if c.inCooldown(provider) {
-		coordinatorLogger.Debug("provider in cooldown, skipping switch",
+		coordinatorLogger().Debug("provider in cooldown, skipping switch",
 			"provider", provider,
 			"usage_percent", usagePercent,
 		)
@@ -247,7 +249,7 @@ func (c *Coordinator) triggerSwitch(provider string, usagePercent float64, reaso
 		Timestamp:    time.Now(),
 	}
 
-	coordinatorLogger.Info("triggering proactive account switch",
+	coordinatorLogger().Info("triggering proactive account switch",
 		"provider", provider,
 		"usage_percent", usagePercent,
 		"reason", reason,
@@ -258,7 +260,7 @@ func (c *Coordinator) triggerSwitch(provider string, usagePercent float64, reaso
 	if err != nil {
 		event.Success = false
 		event.Error = err.Error()
-		coordinatorLogger.Warn("proactive account switch failed",
+		coordinatorLogger().Warn("proactive account switch failed",
 			"provider", provider,
 			"error", err,
 		)
@@ -285,7 +287,7 @@ func (c *Coordinator) triggerSwitch(provider string, usagePercent float64, reaso
 		// Record switch time for cooldown tracking
 		c.recordSwitch(provider)
 
-		coordinatorLogger.Info("proactive account switch successful",
+		coordinatorLogger().Info("proactive account switch successful",
 			"provider", provider,
 			"previous_account", result.PreviousAccount,
 			"new_account", result.NewAccount,

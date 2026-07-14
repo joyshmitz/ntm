@@ -1,16 +1,53 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	hookspkg "github.com/Dicklesworthstone/ntm/internal/hooks"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
+
+func decodeSingleTerminalJSONMap(t *testing.T, raw string) map[string]interface{} {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	document := make(map[string]interface{})
+	if err := decoder.Decode(&document); err != nil {
+		t.Fatalf("decode terminal JSON: %v; output=%q", err, raw)
+	}
+	var extra interface{}
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		t.Fatalf("stdout is not exactly one JSON document: %v; output=%q", err, raw)
+	}
+	return document
+}
+
+func chdirForTerminalJSONTest(t *testing.T, dir string) {
+	t.Helper()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("change working directory to %s: %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restore working directory to %s: %v", originalDir, err)
+		}
+	})
+}
 
 // =============================================================================
 // activity.go: detectAgentTypeFromPane
@@ -151,12 +188,12 @@ func TestPaneTitleTypeAndIndex(t *testing.T) {
 	}
 }
 
-func TestGenerateRecommendationsUsesParsedPaneType(t *testing.T) {
+func TestGenerateRecommendationsUsesCanonicalPaneIdentityAcrossWindows(t *testing.T) {
 
 	panes := []tmux.Pane{
-		{ID: "%1", Index: 1, Type: tmux.AgentClaude, Title: "notes"},
-		{ID: "%2", Index: 2, Type: tmux.AgentUser, Title: "project__cc_2"},
-		{ID: "%3", Index: 3, Type: tmux.AgentType("openai-codex"), Title: "custom"},
+		{ID: "%11", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude, Title: "notes"},
+		{ID: "%12", WindowIndex: 0, Index: 2, Type: tmux.AgentUser, Title: "project__cc_2"},
+		{ID: "%21", WindowIndex: 1, Index: 1, Type: tmux.AgentType("openai-codex"), Title: "custom"},
 	}
 
 	beads := []struct {
@@ -174,17 +211,17 @@ func TestGenerateRecommendationsUsesParsedPaneType(t *testing.T) {
 			{ID: beads[1].id, Title: beads[1].title},
 		},
 		"balanced",
-		[]string{"1", "3"},
+		[]string{"%11", "%21"},
 	)
 
 	if len(recs) != 2 {
 		t.Fatalf("generateRecommendations() returned %d recs, want 2", len(recs))
 	}
-	if recs[0].AgentType != "claude" || recs[0].Agent != "1" {
-		t.Fatalf("first recommendation = %+v, want pane 1 claude", recs[0])
+	if recs[0].AgentType != "claude" || recs[0].PaneID != "%11" || recs[0].PaneTarget != "0.1" {
+		t.Fatalf("first recommendation = %+v, want pane %%11 at 0.1 claude", recs[0])
 	}
-	if recs[1].AgentType != "codex" || recs[1].Agent != "3" {
-		t.Fatalf("second recommendation = %+v, want pane 3 codex", recs[1])
+	if recs[1].AgentType != "codex" || recs[1].PaneID != "%21" || recs[1].PaneTarget != "1.1" {
+		t.Fatalf("second recommendation = %+v, want pane %%21 at 1.1 codex", recs[1])
 	}
 }
 
@@ -608,5 +645,183 @@ func TestFormatSpawnCountSummaryAndRecipeLabels_CanonicalizeAliases(t *testing.T
 	}
 	if label := formatAgentTypeSimple("ws"); label != "Windsurf" {
 		t.Fatalf("formatAgentTypeSimple(ws) = %q, want Windsurf", label)
+	}
+}
+
+func TestDepsJSONMissingRequiredReturnsTerminalFailure(t *testing.T) {
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+	t.Setenv("PATH", t.TempDir())
+
+	stdout, runErr := captureStdout(t, func() error { return runDeps(false) })
+	assertTerminalJSONFailureContains(t, stdout, runErr, "required dependencies are missing")
+	document := decodeSingleTerminalJSONMap(t, stdout)
+	if installed, ok := document["all_installed"].(bool); !ok || installed {
+		t.Fatalf("all_installed = %#v, want false", document["all_installed"])
+	}
+	if dependencies, ok := document["dependencies"].([]interface{}); !ok || len(dependencies) == 0 {
+		t.Fatalf("dependencies = %#v, want non-empty array", document["dependencies"])
+	}
+}
+
+func TestRecipesJSONFailuresAreTerminal(t *testing.T) {
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	t.Run("loader error", func(t *testing.T) {
+		configHome := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", configHome)
+		chdirForTerminalJSONTest(t, t.TempDir())
+		configDir := filepath.Join(configHome, "ntm")
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			t.Fatalf("create recipe config directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "recipes.toml"), []byte("[[recipes]\n"), 0644); err != nil {
+			t.Fatalf("write invalid recipes file: %v", err)
+		}
+
+		stdout, runErr := captureStdout(t, runRecipesList)
+		assertTerminalJSONFailureContains(t, stdout, runErr, "parsing ")
+	})
+
+	t.Run("missing name", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		chdirForTerminalJSONTest(t, t.TempDir())
+
+		stdout, runErr := captureStdout(t, func() error {
+			return runRecipesShow("definitely-missing-recipe")
+		})
+		assertTerminalJSONFailureContains(t, stdout, runErr, "recipe not found")
+	})
+}
+
+func TestHooksStatusJSONFailureIsTerminal(t *testing.T) {
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	t.Run("manager error", func(t *testing.T) {
+		chdirForTerminalJSONTest(t, t.TempDir())
+		stdout, runErr := captureStdout(t, runHooksStatus)
+		assertTerminalJSONFailureContains(t, stdout, runErr, "not a git repository")
+	})
+
+	t.Run("status read error", func(t *testing.T) {
+		gitPath, err := exec.LookPath("git")
+		if err != nil {
+			t.Skip("git is required for hook status fixture")
+		}
+		repoDir := t.TempDir()
+		if output, err := exec.CommandContext(t.Context(), gitPath, "init", "-q", repoDir).CombinedOutput(); err != nil {
+			t.Fatalf("initialize git repository: %v: %s", err, output)
+		}
+		chdirForTerminalJSONTest(t, repoDir)
+		if err := os.Mkdir(filepath.Join(repoDir, ".git", "hooks", "pre-commit"), 0755); err != nil {
+			t.Fatalf("create unreadable hook fixture: %v", err)
+		}
+
+		stdout, runErr := captureStdout(t, runHooksStatus)
+		assertTerminalJSONFailureContains(t, stdout, runErr, "reading hook")
+	})
+}
+
+func TestPreCommitHookJSONBlockedResultIsTerminal(t *testing.T) {
+	result := &hookspkg.PreCommitResult{
+		Passed:      false,
+		StagedFiles: []string{"internal/cli/hooks.go"},
+		BlockReason: "critical issues exceeded threshold",
+	}
+
+	stdout, runErr := captureStdout(t, func() error { return outputPreCommitHookJSON(result) })
+	assertTerminalJSONFailureContains(t, stdout, runErr, result.BlockReason)
+	document := decodeSingleTerminalJSONMap(t, stdout)
+	if passed, ok := document["passed"].(bool); !ok || passed {
+		t.Fatalf("passed = %#v, want false", document["passed"])
+	}
+}
+
+func TestPreCommitHookJSONPassedResultIsSuccess(t *testing.T) {
+	result := &hookspkg.PreCommitResult{
+		Passed:       true,
+		StagedFiles:  []string{},
+		UBSAvailable: true,
+	}
+
+	stdout, runErr := captureStdout(t, func() error { return outputPreCommitHookJSON(result) })
+	if runErr != nil {
+		t.Fatalf("outputPreCommitHookJSON() error = %v, want nil", runErr)
+	}
+	document := decodeSingleTerminalJSONMap(t, stdout)
+	if success, ok := document["success"].(bool); !ok || !success {
+		t.Fatalf("success = %#v, want true", document["success"])
+	}
+	if passed, ok := document["passed"].(bool); !ok || !passed {
+		t.Fatalf("passed = %#v, want true", document["passed"])
+	}
+}
+
+func TestBugsJSONUnavailableStatesAreTerminal(t *testing.T) {
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+	t.Setenv("PATH", t.TempDir())
+	projectDir := t.TempDir()
+
+	tests := []struct {
+		name string
+		run  func() error
+		want string
+	}{
+		{
+			name: "list without UBS",
+			run: func() error {
+				cmd := newBugsListCmd()
+				return cmd.RunE(cmd, []string{projectDir})
+			},
+			want: "ubs is not installed",
+		},
+		{
+			name: "notify without UBS",
+			run: func() error {
+				cmd := newBugsNotifyCmd()
+				return cmd.RunE(cmd, []string{projectDir})
+			},
+			want: "ubs is not installed",
+		},
+		{
+			name: "summary without cache",
+			run: func() error {
+				cmd := newBugsSummaryCmd()
+				return cmd.RunE(cmd, []string{projectDir})
+			},
+			want: "scan_cache.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, runErr := captureStdout(t, tt.run)
+			assertTerminalJSONFailureContains(t, stdout, runErr, tt.want)
+			document := decodeSingleTerminalJSONMap(t, stdout)
+			if available, ok := document["available"].(bool); !ok || available {
+				t.Fatalf("available = %#v, want false", document["available"])
+			}
+		})
+	}
+}
+
+func assertTerminalJSONFailureContains(t *testing.T, stdout string, runErr error, want string) {
+	t.Helper()
+	if !errors.Is(runErr, errJSONFailure) {
+		t.Fatalf("error = %v, want errJSONFailure", runErr)
+	}
+	if !strings.Contains(runErr.Error(), want) {
+		t.Fatalf("error = %v, want %q", runErr, want)
+	}
+	document := decodeSingleTerminalJSONMap(t, stdout)
+	if success, ok := document["success"].(bool); !ok || success {
+		t.Fatalf("success = %#v, want false", document["success"])
 	}
 }

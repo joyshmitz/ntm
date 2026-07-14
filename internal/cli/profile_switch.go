@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -72,7 +74,7 @@ Examples:
   ntm profiles switch cc_1 reviewer --dry-run    # Preview without applying`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runProfileSwitch(args[0], args[1], session, transitionPrompt, noPrompt, dryRun)
+			return runProfileSwitch(cmd.Context(), args[0], args[1], session, transitionPrompt, noPrompt, dryRun)
 		},
 	}
 
@@ -85,7 +87,14 @@ Examples:
 	return cmd
 }
 
-func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string, noPrompt, dryRun bool) error {
+func runProfileSwitch(ctx context.Context, agentID, newProfileName, sessionName, customPrompt string, noPrompt, dryRun bool) error {
+	if ctx == nil {
+		return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("profile switch requires a command context"))
+	}
+	if err := ctx.Err(); err != nil {
+		return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("profile switch canceled: %w", err))
+	}
+
 	// Parse agent ID
 	agentType, agentIndex, err := parseAgentID(agentID)
 	if err != nil {
@@ -97,7 +106,7 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 	}
 
 	// Resolve session name
-	res, err := ResolveSessionWithOptions(sessionName, os.Stdout, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+	res, err := ResolveSessionWithOptionsContext(ctx, sessionName, os.Stdout, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
 	if err != nil {
 		return outputProfileSwitchError(agentID, "", newProfileName, err)
 	}
@@ -107,7 +116,7 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 	res.ExplainIfInferred(os.Stderr)
 	sessionName = res.Session
 
-	projectDir, err := resolveProfileSwitchProjectDir(sessionName)
+	projectDir, err := resolveProfileSwitchProjectDirContext(ctx, sessionName)
 	if err != nil {
 		return outputProfileSwitchError(agentID, "", newProfileName, err)
 	}
@@ -125,7 +134,7 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 	}
 
 	// Get session panes
-	panes, err := tmux.GetPanes(sessionName)
+	panes, err := tmux.GetPanesContext(ctx, sessionName)
 	if err != nil {
 		return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("getting panes for session %s: %w", sessionName, err))
 	}
@@ -158,14 +167,39 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 
 	// Send transition prompt to agent
 	if transitionText != "" && !noPrompt {
-		if err := sendPromptWithDoubleEnter(targetPane.ID, transitionText); err != nil {
+		service, err := dispatchsvc.NewService(dispatchsvc.Ports{
+			Redactor:  shellFinalMessageRedactor(activeShellDispatchRedactionConfig()),
+			Protocols: shellDispatchProtocolPlanner{},
+			Deliverer: dispatchsvc.TMUXDeliverer{},
+		})
+		if err != nil {
+			return outputProfileSwitchError(agentID, targetPane.ID, newProfileName, fmt.Errorf("preparing transition prompt dispatch: %w", err))
+		}
+		result, err := service.Execute(ctx, dispatchsvc.Request{
+			Session:               sessionName,
+			Panes:                 panes,
+			Selectors:             []string{targetPane.ID},
+			RequireSingleSelector: true,
+			IncludeUser:           true,
+			Message:               transitionText,
+			Submit:                true,
+			StopOnFailure:         true,
+		})
+		if err != nil {
 			return outputProfileSwitchError(agentID, targetPane.ID, newProfileName, fmt.Errorf("sending transition prompt: %w", err))
 		}
+		if result.Delivered != 1 {
+			return outputProfileSwitchError(agentID, targetPane.ID, newProfileName, fmt.Errorf("sending transition prompt: expected one delivery, got %d", result.Delivered))
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return outputProfileSwitchError(agentID, targetPane.ID, newProfileName, fmt.Errorf("profile switch canceled: %w", err))
 	}
 
 	// Update pane title while preserving any existing pane tags.
 	newTitle := formatProfileSwitchPaneTitle(sessionName, agentType, agentIndex, newProfile.Name, targetPane.Tags)
-	if err := tmux.SetPaneTitle(targetPane.ID, newTitle); err != nil {
+	if err := tmux.SetPaneTitleContext(ctx, targetPane.ID, newTitle); err != nil {
 		return outputProfileSwitchError(agentID, targetPane.ID, newProfileName, fmt.Errorf("updating pane title: %w", err))
 	}
 
@@ -173,9 +207,19 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 }
 
 func resolveProfileSwitchProjectDir(sessionName string) (string, error) {
+	return resolveProfileSwitchProjectDirContext(context.Background(), sessionName)
+}
+
+func resolveProfileSwitchProjectDirContext(ctx context.Context, sessionName string) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("profile switch project resolution requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName != "" {
-		res, err := ResolveSessionWithOptions(sessionName, nil, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+		res, err := ResolveSessionWithOptionsContext(ctx, sessionName, nil, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
 		if err != nil {
 			return "", err
 		}
@@ -185,7 +229,7 @@ func resolveProfileSwitchProjectDir(sessionName string) (string, error) {
 		sessionName = res.Session
 	}
 
-	return resolveExplicitProjectDirForSession(sessionName)
+	return resolveExplicitProjectDirForSessionContext(ctx, sessionName)
 }
 
 // parseAgentID parses an agent ID like "cc_1" into canonical type and index.
@@ -346,7 +390,7 @@ func outputProfileSwitchError(agentID, paneID, newProfile string, err error) err
 			NewProfile: newProfile,
 			Error:      err.Error(),
 		}
-		_ = json.NewEncoder(os.Stdout).Encode(result)
+		return emitJSONFailureEnvelopeWithCause(result, err)
 	}
 	return err
 }

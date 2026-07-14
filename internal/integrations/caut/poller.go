@@ -12,7 +12,9 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
-var pollerLogger = slog.Default().With("component", "caut.poller")
+func pollerLogger() *slog.Logger {
+	return slog.Default().With("component", "caut.poller")
+}
 
 // UsagePoller manages background polling of caut for usage data.
 type UsagePoller struct {
@@ -81,7 +83,7 @@ func (p *UsagePoller) Start() error {
 		p.pollLoop(runCtx, doneCh)
 	}()
 
-	pollerLogger.Info("caut usage poller started", "interval", p.interval)
+	pollerLogger().Info("caut usage poller started", "interval", p.interval)
 	return nil
 }
 
@@ -110,7 +112,7 @@ func (p *UsagePoller) Stop() {
 		<-doneCh
 	}
 
-	pollerLogger.Info("caut usage poller stopped")
+	pollerLogger().Info("caut usage poller stopped")
 }
 
 // IsRunning returns true if the poller is currently running.
@@ -134,7 +136,7 @@ func (p *UsagePoller) SetInterval(interval time.Duration) {
 		interval = 10 * time.Second
 	}
 	p.interval = interval
-	pollerLogger.Info("polling interval updated", "interval", interval)
+	pollerLogger().Info("polling interval updated", "interval", interval)
 }
 
 // PollNow triggers an immediate poll, bypassing the interval timer.
@@ -150,7 +152,7 @@ func (p *UsagePoller) pollLoop(ctx context.Context, doneCh chan struct{}) {
 	// Initial poll immediately.
 	if err := p.pollWithTimeout(ctx); err != nil {
 		if ctx.Err() == nil {
-			pollerLogger.Warn("initial caut poll failed", "error", err)
+			pollerLogger().Warn("initial caut poll failed", "error", err)
 		}
 	}
 
@@ -169,7 +171,7 @@ func (p *UsagePoller) pollLoop(ctx context.Context, doneCh chan struct{}) {
 				if ctx.Err() != nil {
 					return
 				}
-				pollerLogger.Warn("caut poll failed", "error", err)
+				pollerLogger().Warn("caut poll failed", "error", err)
 				p.cache.SetError(err)
 			} else {
 				p.cache.ClearError()
@@ -192,7 +194,7 @@ func (p *UsagePoller) pollWithTimeout(parent context.Context) error {
 
 // poll fetches current usage data and updates the cache.
 func (p *UsagePoller) poll(ctx context.Context) error {
-	pollerLogger.Debug("polling caut for usage data")
+	pollerLogger().Debug("polling caut for usage data")
 
 	// Fetch status
 	status, err := p.adapter.GetStatus(ctx)
@@ -205,7 +207,7 @@ func (p *UsagePoller) poll(ctx context.Context) error {
 	// Fetch all usage data
 	usages, err := p.adapter.GetAllUsage(ctx, "day")
 	if err != nil {
-		pollerLogger.Warn("failed to get usage data", "error", err)
+		pollerLogger().Warn("failed to get usage data", "error", err)
 		// Don't fail the whole poll if usage fetch fails
 	} else {
 		p.cache.UpdateAllUsage(usages)
@@ -214,7 +216,7 @@ func (p *UsagePoller) poll(ctx context.Context) error {
 	// Check for alerts
 	p.checkAlerts(status)
 
-	pollerLogger.Debug("caut poll complete",
+	pollerLogger().Debug("caut poll complete",
 		"providers", status.ProviderCount,
 		"quota_percent", status.QuotaPercent,
 		"total_spend", status.TotalSpend,
@@ -248,7 +250,7 @@ func (p *UsagePoller) checkAlerts(status *tools.CautStatus) {
 			},
 		}
 		p.alerter.AddAlert(alert)
-		pollerLogger.Warn("quota critical alert triggered", "quota_percent", status.QuotaPercent)
+		pollerLogger().Warn("quota critical alert triggered", "quota_percent", status.QuotaPercent)
 	} else if status.QuotaPercent >= threshold {
 		alert := alerts.Alert{
 			ID:       "caut-quota-warning-overall",
@@ -264,7 +266,7 @@ func (p *UsagePoller) checkAlerts(status *tools.CautStatus) {
 			},
 		}
 		p.alerter.AddAlert(alert)
-		pollerLogger.Info("quota warning alert triggered", "quota_percent", status.QuotaPercent)
+		pollerLogger().Info("quota warning alert triggered", "quota_percent", status.QuotaPercent)
 	}
 
 	// Check per-provider quotas

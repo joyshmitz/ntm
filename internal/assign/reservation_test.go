@@ -5,10 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 )
 
 func TestRecordGrantedReservationTracksEarliestLeaseExpiry(t *testing.T) {
@@ -458,6 +460,19 @@ func newReservationReconcileManager(t *testing.T, reservations []agentmail.FileR
 	return NewFileReservationManager(agentmail.NewClient(agentmail.WithBaseURL(server.URL+"/")), "/test/project")
 }
 
+func TestReservationManagerRequiresExactProjectHumanKey(t *testing.T) {
+	server := newAssignMCPServer(t, map[string]assignToolHandler{
+		"ensure_project": func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.Project{ID: 7, HumanKey: ""}, nil
+		},
+	})
+	defer server.Close()
+	manager := NewFileReservationManager(agentmail.NewClient(agentmail.WithBaseURL(server.URL+"/")), "/test/project")
+	if _, err := manager.ReconcileForBead(t.Context(), "bd-project", "AgentOne", []string{"internal/a.go"}); err == nil || !strings.Contains(err.Error(), "binding mismatch") {
+		t.Fatalf("blank project binding error=%v", err)
+	}
+}
+
 func reconcileReservation(id int, agentName, path, reason string) agentmail.FileReservation {
 	return agentmail.FileReservation{
 		ID:          id,
@@ -467,6 +482,178 @@ func reconcileReservation(id int, agentName, path, reason string) agentmail.File
 		Exclusive:   true,
 		Reason:      reason,
 		ExpiresTS:   agentmail.FlexTime{Time: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+}
+
+func exactReleaseBarrier(beadID, agentName string) *assignmentstore.Assignment {
+	return &assignmentstore.Assignment{
+		BeadID: beadID, AgentName: agentName, ClearState: assignmentstore.ClearStateReservationReleasing,
+	}
+}
+
+func TestReleaseExactForBeadPathOnlyRequiresUniqueActiveLeasePerPath(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		reservations []agentmail.FileReservation
+		wantReleased []string
+		wantErr      string
+		wantReleases int
+	}{
+		{name: "absent is idempotent", wantReleased: []string{}},
+		{
+			name: "one exact lease",
+			reservations: []agentmail.FileReservation{
+				reconcileReservation(61, "AgentOne", "internal/shared.go", "bead assignment: bd-release"),
+			},
+			wantReleased: []string{"internal/shared.go"}, wantReleases: 1,
+		},
+		{
+			name: "duplicate exact leases are ambiguous",
+			reservations: []agentmail.FileReservation{
+				reconcileReservation(62, "AgentOne", "internal/shared.go", "bead assignment: bd-release"),
+				reconcileReservation(63, "AgentOne", "internal/shared.go", "bead assignment: bd-release"),
+				reconcileReservation(64, "AgentOne", "internal/unique.go", "bead assignment: bd-release"),
+			},
+			wantErr: "ambiguous",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			listCalls := 0
+			releaseCalls := 0
+			server := newAssignMCPServer(t, map[string]assignToolHandler{
+				"list_file_reservations": func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+					listCalls++
+					if releaseCalls > 0 {
+						return []agentmail.FileReservation{}, nil
+					}
+					return test.reservations, nil
+				},
+				"release_file_reservations": func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+					releaseCalls++
+					return agentmail.ReleaseReservationsResult{Released: 1}, nil
+				},
+			})
+			defer server.Close()
+			manager := NewFileReservationManager(agentmail.NewClient(agentmail.WithBaseURL(server.URL+"/")), "/test/project")
+			paths := []string{"internal/shared.go"}
+			if test.name == "duplicate exact leases are ambiguous" {
+				paths = append(paths, "internal/unique.go")
+			}
+			released, err := manager.ReleaseExactForBead(t.Context(), exactReleaseBarrier("bd-release", "AgentOne"), nil, paths)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("ReleaseExactForBead() released=%v error=%v, want %q", released, err, test.wantErr)
+				}
+			} else if err != nil || !reflect.DeepEqual(released, test.wantReleased) {
+				t.Fatalf("ReleaseExactForBead() released=%v error=%v, want %v", released, err, test.wantReleased)
+			}
+			if releaseCalls != test.wantReleases {
+				t.Fatalf("release calls=%d, want %d", releaseCalls, test.wantReleases)
+			}
+			if test.wantErr != "" && listCalls != 1 {
+				t.Fatalf("ambiguous cleanup list calls=%d, want one pre-release read", listCalls)
+			}
+		})
+	}
+}
+
+func TestReleaseExactForBeadRecoversUniqueIDDriftAndRejectsAmbiguity(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		list         func(listCall, releaseCalls int) []agentmail.FileReservation
+		wantCalls    int
+		wantErr      string
+		wantReleased []string
+	}{
+		{
+			name: "unique drift exists before release",
+			list: func(_ int, releaseCalls int) []agentmail.FileReservation {
+				if releaseCalls > 0 {
+					return nil
+				}
+				return []agentmail.FileReservation{
+					reconcileReservation(72, "AgentOne", "internal/shared.go", "bead assignment: bd-release"),
+				}
+			},
+			wantCalls: 1, wantReleased: []string{"internal/shared.go"},
+		},
+		{
+			name: "unique drift appears during verification",
+			list: func(_ int, releaseCalls int) []agentmail.FileReservation {
+				switch releaseCalls {
+				case 0:
+					return []agentmail.FileReservation{reconcileReservation(71, "AgentOne", "internal/shared.go", "bead assignment: bd-release")}
+				case 1:
+					return []agentmail.FileReservation{reconcileReservation(72, "AgentOne", "internal/shared.go", "bead assignment: bd-release")}
+				default:
+					return nil
+				}
+			},
+			wantCalls: 2, wantReleased: []string{"internal/shared.go"},
+		},
+		{
+			name: "ambiguous drift before release",
+			list: func(int, int) []agentmail.FileReservation {
+				return []agentmail.FileReservation{
+					reconcileReservation(72, "AgentOne", "internal/shared.go", "bead assignment: bd-release"),
+					reconcileReservation(73, "AgentOne", "internal/shared.go", "bead assignment: bd-release"),
+				}
+			},
+			wantErr: "ambiguous",
+		},
+		{
+			name: "ambiguous drift during verification",
+			list: func(_ int, releaseCalls int) []agentmail.FileReservation {
+				if releaseCalls == 0 {
+					return []agentmail.FileReservation{reconcileReservation(71, "AgentOne", "internal/shared.go", "bead assignment: bd-release")}
+				}
+				return []agentmail.FileReservation{
+					reconcileReservation(72, "AgentOne", "internal/shared.go", "bead assignment: bd-release"),
+					reconcileReservation(73, "AgentOne", "internal/shared.go", "bead assignment: bd-release"),
+				}
+			},
+			wantCalls: 1, wantErr: "ambiguous",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			listCalls := 0
+			releaseCalls := 0
+			server := newAssignMCPServer(t, map[string]assignToolHandler{
+				"list_file_reservations": func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+					listCalls++
+					return test.list(listCalls, releaseCalls), nil
+				},
+				"release_file_reservations": func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+					releaseCalls++
+					return agentmail.ReleaseReservationsResult{Released: 1}, nil
+				},
+			})
+			defer server.Close()
+			manager := NewFileReservationManager(agentmail.NewClient(agentmail.WithBaseURL(server.URL+"/")), "/test/project")
+			released, err := manager.ReleaseExactForBead(
+				t.Context(), exactReleaseBarrier("bd-release", "AgentOne"), []int{71}, []string{"internal/shared.go"},
+			)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("ReleaseExactForBead() released=%v error=%v, want %q", released, err, test.wantErr)
+				}
+			} else if err != nil || !reflect.DeepEqual(released, test.wantReleased) {
+				t.Fatalf("ReleaseExactForBead() released=%v error=%v, want %v", released, err, test.wantReleased)
+			}
+			if releaseCalls != test.wantCalls {
+				t.Fatalf("release calls=%d, want %d", releaseCalls, test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestReleaseExactForBeadRequiresDurableBarrier(t *testing.T) {
+	manager := newReservationReconcileManager(t, nil)
+	_, err := manager.ReleaseExactForBead(t.Context(), &assignmentstore.Assignment{
+		BeadID: "bd-release", AgentName: "AgentOne",
+	}, []int{71}, []string{"internal/shared.go"})
+	if err == nil || !strings.Contains(err.Error(), "no durable release barrier") {
+		t.Fatalf("missing barrier error=%v", err)
 	}
 }
 

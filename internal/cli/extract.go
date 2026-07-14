@@ -74,28 +74,36 @@ Examples:
 func runExtract(sessionName, paneIndex, language string, lastPane bool, lines int, copyFlag, applyFlag bool, selectBlock int) error {
 	sessionName = strings.TrimSpace(sessionName)
 	if err := tmux.ValidateSessionName(sessionName); err != nil {
+		cause := fmt.Errorf("invalid session name: %w", err)
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(fmt.Sprintf("invalid session name: %v", err)))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(cause.Error()), cause)
 		}
-		return fmt.Errorf("invalid session name: %w", err)
+		return cause
 	}
 
 	// Check session exists
 	if !tmux.SessionExists(sessionName) {
+		cause := fmt.Errorf("session '%s' does not exist", sessionName)
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewErrorWithCode("SESSION_NOT_FOUND",
-				fmt.Sprintf("session '%s' does not exist", sessionName)))
+			return emitJSONFailureEnvelopeWithCause(
+				output.NewErrorWithCode("SESSION_NOT_FOUND", cause.Error()),
+				cause,
+			)
 		}
-		return fmt.Errorf("session '%s' does not exist", sessionName)
+		return cause
 	}
 
 	// Get panes
 	panes, err := tmux.GetPanes(sessionName)
 	if err != nil {
+		cause := fmt.Errorf("failed to get panes: %w", err)
 		if IsJSONOutput() {
-			return output.PrintJSON(output.NewErrorWithDetails("failed to get panes", err.Error()))
+			return emitJSONFailureEnvelopeWithCause(
+				output.NewErrorWithDetails("failed to get panes", err.Error()),
+				cause,
+			)
 		}
-		return fmt.Errorf("failed to get panes: %w", err)
+		return cause
 	}
 
 	// Filter panes
@@ -121,11 +129,14 @@ func runExtract(sessionName, paneIndex, language string, lastPane bool, lines in
 			}
 		}
 		if len(targetPanes) == 0 {
+			cause := fmt.Errorf("pane '%s' not found in session '%s'", paneIndex, sessionName)
 			if IsJSONOutput() {
-				return output.PrintJSON(output.NewErrorWithCode("PANE_NOT_FOUND",
-					fmt.Sprintf("pane '%s' not found", paneIndex)))
+				return emitJSONFailureEnvelopeWithCause(
+					output.NewErrorWithCode("PANE_NOT_FOUND", fmt.Sprintf("pane '%s' not found", paneIndex)),
+					cause,
+				)
 			}
-			return fmt.Errorf("pane '%s' not found in session '%s'", paneIndex, sessionName)
+			return cause
 		}
 	} else {
 		// All panes
@@ -166,11 +177,14 @@ func runExtract(sessionName, paneIndex, language string, lastPane bool, lines in
 	// Filter by selection if specified
 	if selectBlock > 0 {
 		if selectBlock > len(allBlocks) {
+			cause := fmt.Errorf("block %d does not exist (found %d blocks)", selectBlock, len(allBlocks))
 			if IsJSONOutput() {
-				return output.PrintJSON(output.NewErrorWithCode("INVALID_SELECTION",
-					fmt.Sprintf("block %d does not exist (found %d blocks)", selectBlock, len(allBlocks))))
+				return emitJSONFailureEnvelopeWithCause(
+					output.NewErrorWithCode("INVALID_SELECTION", cause.Error()),
+					cause,
+				)
 			}
-			return fmt.Errorf("block %d does not exist (found %d blocks)", selectBlock, len(allBlocks))
+			return cause
 		}
 		allBlocks = []codeblock.CodeBlock{allBlocks[selectBlock-1]}
 	}

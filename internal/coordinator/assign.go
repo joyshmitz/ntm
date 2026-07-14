@@ -11,6 +11,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	assignpkg "github.com/Dicklesworthstone/ntm/internal/assign"
 	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
@@ -137,11 +138,11 @@ func (c *SessionCoordinator) AssignWork(ctx context.Context) ([]AssignmentResult
 	}
 
 	// Get triage recommendations
-	getTriage := bv.GetTriage
+	getTriage := bv.GetTriageContext
 	if c.triageFn != nil {
 		getTriage = c.triageFn
 	}
-	triage, err := getTriage(c.projectKey)
+	triage, err := getTriage(ctx, c.projectKey)
 	if err != nil {
 		return nil, fmt.Errorf("getting triage: %w", err)
 	}
@@ -154,7 +155,10 @@ func (c *SessionCoordinator) AssignWork(ctx context.Context) ([]AssignmentResult
 	for _, active := range activeAssignments {
 		activeBeads[active.BeadID] = struct{}{}
 	}
-	assignmentCandidates = filterOccupiedAgents(assignmentCandidates, activeAssignments)
+	assignmentCandidates, err = filterOccupiedAgents(assignmentCandidates, activeAssignments)
+	if err != nil {
+		return results, fmt.Errorf("validate occupied assignment identities: %w", err)
+	}
 	if len(assignmentCandidates) == 0 {
 		return results, nil
 	}
@@ -199,12 +203,7 @@ func (c *SessionCoordinator) AssignWork(ctx context.Context) ([]AssignmentResult
 				Type:      EventWorkAssigned,
 				Timestamp: time.Now(),
 				AgentID:   agent.PaneID,
-				Details: map[string]any{
-					"bead_id":    assignment.BeadID,
-					"bead_title": assignment.BeadTitle,
-					"agent_type": agent.AgentType,
-					"score":      assignment.Score,
-				},
+				Details:   coordinatorWorkAssignedEventDetails(result, assignment, agent),
 			}:
 			default:
 			}
@@ -214,29 +213,70 @@ func (c *SessionCoordinator) AssignWork(ctx context.Context) ([]AssignmentResult
 	return results, nil
 }
 
-func (c *SessionCoordinator) filterActionableRecommendations(ctx context.Context, recommendations []bv.TriageRecommendation, activeBeads map[string]struct{}) ([]bv.TriageRecommendation, bool, error) {
-	lookup := c.workItemStatusFn
-	if lookup == nil {
-		lookup = func(_ context.Context, beadID string) (string, error) {
-			return bv.GetBeadStatus(c.projectKey, beadID)
-		}
+func coordinatorWorkAssignedEventDetails(result AssignmentResult, planned *WorkAssignment, agent *AgentState) map[string]any {
+	details := map[string]any{
+		"bead_id":    "",
+		"bead_title": "",
+		"agent_type": "",
+		"score":      0.0,
 	}
+	if planned != nil {
+		details["bead_id"] = planned.BeadID
+		details["score"] = planned.Score
+	}
+	if agent != nil {
+		details["agent_type"] = agent.AgentType
+	}
+	if result.Assignment != nil {
+		details["bead_id"] = result.Assignment.BeadID
+		details["bead_title"] = result.Assignment.BeadTitle
+	}
+	return details
+}
+
+func (c *SessionCoordinator) filterActionableRecommendations(ctx context.Context, recommendations []bv.TriageRecommendation, activeBeads map[string]struct{}) ([]bv.TriageRecommendation, bool, error) {
 	filtered := make([]bv.TriageRecommendation, 0, len(recommendations))
 	terminalRecommendation := false
 	for _, recommendation := range recommendations {
 		if _, alreadyAssigned := activeBeads[recommendation.ID]; alreadyAssigned {
 			continue
 		}
-		if !recommendationPassesSemanticGates(recommendation) {
-			continue
+		live := recommendation
+		var trackerStatus string
+		var err error
+		switch {
+		case c.workItemDetailsFn != nil:
+			var details *bv.BeadAssignmentDetails
+			details, err = c.workItemDetailsFn(ctx, recommendation.ID)
+			if details != nil {
+				trackerStatus = details.Status
+				live.Title = details.Title
+				live.Status = details.Status
+				live.Labels = append([]string(nil), details.Labels...)
+				live.BlockedBy = append([]string(nil), details.BlockedBy...)
+			}
+		case c.workItemStatusFn != nil:
+			trackerStatus, err = c.workItemStatusFn(ctx, recommendation.ID)
+			live.Status = trackerStatus
+		default:
+			var details *bv.BeadAssignmentDetails
+			details, err = bv.GetBeadAssignmentDetailsContext(ctx, c.projectKey, recommendation.ID)
+			if details != nil {
+				trackerStatus = details.Status
+				live.Title = details.Title
+				live.Status = details.Status
+				live.Labels = append([]string(nil), details.Labels...)
+				live.BlockedBy = append([]string(nil), details.BlockedBy...)
+			}
 		}
-		trackerStatus, err := lookup(ctx, recommendation.ID)
 		if err != nil {
 			return nil, terminalRecommendation, fmt.Errorf("read recommendation %s status: %w", recommendation.ID, err)
 		}
 		switch strings.ToLower(strings.TrimSpace(trackerStatus)) {
 		case "open":
-			filtered = append(filtered, recommendation)
+			if recommendationPassesSemanticGates(live) {
+				filtered = append(filtered, live)
+			}
 		case "closed", "tombstone":
 			terminalRecommendation = true
 		}
@@ -244,23 +284,16 @@ func (c *SessionCoordinator) filterActionableRecommendations(ctx context.Context
 	return filtered, terminalRecommendation, nil
 }
 
-var operatorGatedLabels = map[string]struct{}{
-	"operator-gated":      {},
-	"operator-action":     {},
-	"needs-operator":      {},
-	"human-gated":         {},
-	"human-input":         {},
-	"business-input":      {},
-	"blocked-on-operator": {},
-	"blocked-on-ivan":     {},
-}
-
 func recommendationPassesSemanticGates(recommendation bv.TriageRecommendation) bool {
-	if strings.EqualFold(strings.TrimSpace(recommendation.Status), "blocked") || len(recommendation.BlockedBy) > 0 {
+	status := strings.ToLower(strings.TrimSpace(recommendation.Status))
+	if status != "open" && status != "ready" {
+		return false
+	}
+	if len(recommendation.BlockedBy) > 0 {
 		return false
 	}
 	for _, rawLabel := range recommendation.Labels {
-		if _, gated := operatorGatedLabels[strings.ToLower(strings.TrimSpace(rawLabel))]; gated {
+		if bv.IsOperatorGatedLabel(rawLabel) {
 			return false
 		}
 	}
@@ -406,8 +439,8 @@ func (c *SessionCoordinator) reconcileTerminalAssignments(ctx context.Context, s
 	}
 	lookup := c.workItemStatusFn
 	if lookup == nil {
-		lookup = func(_ context.Context, beadID string) (string, error) {
-			return bv.GetBeadStatus(c.projectKey, beadID)
+		lookup = func(statusCtx context.Context, beadID string) (string, error) {
+			return bv.GetBeadStatusContext(statusCtx, c.projectKey, beadID)
 		}
 	}
 
@@ -416,31 +449,36 @@ func (c *SessionCoordinator) reconcileTerminalAssignments(ctx context.Context, s
 		if active == nil {
 			continue
 		}
-		trackerStatus, err := lookup(ctx, active.BeadID)
-		if err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("read %s status: %w", active.BeadID, err))
-			continue
-		}
-		var terminalStatus assignmentstore.AssignmentStatus
-		var terminalReason string
-		switch strings.ToLower(strings.TrimSpace(trackerStatus)) {
-		case "closed":
-			if active.Status == assignmentstore.StatusAssigned || active.Status == assignmentstore.StatusWorking {
-				terminalStatus = assignmentstore.StatusCompleted
-			} else {
-				terminalStatus = assignmentstore.StatusFailed
-				terminalReason = "tracker closed before assignment delivery completed"
+		terminalStatus := active.PendingTerminalStatus
+		terminalReason := active.PendingTerminalReason
+		if terminalStatus != assignmentstore.StatusCompleted && terminalStatus != assignmentstore.StatusFailed {
+			trackerStatus, err := lookup(ctx, active.BeadID)
+			if err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("read %s status: %w", active.BeadID, err))
+				continue
 			}
-		case "tombstone":
-			terminalStatus = assignmentstore.StatusFailed
-			terminalReason = "tracker work item was tombstoned"
-		default:
-			continue
+			switch strings.ToLower(strings.TrimSpace(trackerStatus)) {
+			case "closed":
+				if active.Status == assignmentstore.StatusAssigned || active.Status == assignmentstore.StatusWorking {
+					terminalStatus = assignmentstore.StatusCompleted
+				} else {
+					terminalStatus = assignmentstore.StatusFailed
+					terminalReason = "tracker closed before assignment delivery completed"
+				}
+			case "tombstone":
+				terminalStatus = assignmentstore.StatusFailed
+				terminalReason = "tracker work item was tombstoned"
+			default:
+				continue
+			}
 		}
 
-		barrier, err := store.BeginClearIfStatus(ctx, active.BeadID, time.Now().UTC(), active.Status)
+		barrier, applied, err := store.BeginTerminalReconciliationIfCurrent(ctx, active, terminalStatus, terminalReason)
 		if err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("begin terminal reconciliation for %s: %w", active.BeadID, err))
+			continue
+		}
+		if !applied {
 			continue
 		}
 		if err := c.releaseTerminalAssignmentReservations(ctx, barrier); err != nil {
@@ -455,21 +493,29 @@ func (c *SessionCoordinator) reconcileTerminalAssignments(ctx context.Context, s
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("record terminal assignment %s lease release: %w", active.BeadID, err))
 			continue
 		}
-		claimActor := strings.TrimSpace(leasesReleased.ClaimActor)
-		if claimActor != "" {
-			releaseClaim := c.releaseWorkItemClaimFn
-			if releaseClaim == nil {
-				releaseClaim = bv.ReleaseBeadClaim
-			}
-			if _, err := releaseClaim(ctx, c.projectKey, active.BeadID, claimActor); err != nil {
-				if persistErr := store.RecordClearReleaseFailed(ctx, active.BeadID, err); persistErr != nil {
-					err = errors.Join(err, persistErr)
+		claimReleased := leasesReleased
+		if !leasesReleased.TerminalClaimReleased {
+			claimActor := strings.TrimSpace(leasesReleased.ClaimActor)
+			if claimActor != "" {
+				releaseClaim := c.releaseWorkItemClaimFn
+				if releaseClaim == nil {
+					releaseClaim = bv.ReleaseBeadClaim
 				}
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("release terminal assignment %s Beads claim: %w", active.BeadID, err))
+				if _, err := releaseClaim(ctx, c.projectKey, active.BeadID, claimActor); err != nil {
+					if persistErr := store.RecordClearReleaseFailed(ctx, active.BeadID, err); persistErr != nil {
+						err = errors.Join(err, persistErr)
+					}
+					reconcileErrors = append(reconcileErrors, fmt.Errorf("release terminal assignment %s Beads claim: %w", active.BeadID, err))
+					continue
+				}
+			}
+			claimReleased, err = store.RecordTerminalClaimReleased(ctx, active.BeadID)
+			if err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("record terminal assignment %s claim release: %w", active.BeadID, err))
 				continue
 			}
 		}
-		if err := store.CompleteTerminalReconciliation(ctx, active.BeadID, terminalStatus, terminalReason); err != nil {
+		if err := store.CompleteTerminalReconciliation(ctx, active.BeadID, claimReleased.PendingTerminalStatus, claimReleased.PendingTerminalReason); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("complete terminal reconciliation for %s: %w", active.BeadID, err))
 			continue
 		}
@@ -504,7 +550,7 @@ func (c *SessionCoordinator) releaseTerminalAssignmentReservations(ctx context.C
 
 	if !assignmentstore.ReservationOutcomeNeedsReconciliation(current) {
 		if len(lease.ReservationIDs) > 0 || len(lease.Granted) > 0 {
-			return c.releaseCoordinatorLease(ctx, current.BeadID, lease)
+			return c.releaseCoordinatorLease(ctx, current, lease)
 		}
 		if current.ReservationState == assignmentstore.ReservationReserved {
 			return fmt.Errorf("reservation for %s is marked reserved without durable release handles", current.BeadID)
@@ -532,7 +578,7 @@ func (c *SessionCoordinator) releaseTerminalAssignmentReservations(ctx context.C
 		if len(reconciled.Lease.ReservationIDs) == 0 && len(reconciled.Lease.Granted) == 0 {
 			return fmt.Errorf("reconcile reservation for %s returned reserved without handles", current.BeadID)
 		}
-		return c.releaseCoordinatorLease(ctx, current.BeadID, reconciled.Lease)
+		return c.releaseCoordinatorLease(ctx, current, reconciled.Lease)
 	case assignmentstore.ReservationReconciliationUnknown, "":
 		return fmt.Errorf("reservation outcome remains unknown for %s", current.BeadID)
 	default:
@@ -561,84 +607,26 @@ func coordinatorLeaseFromAssignment(current *assignmentstore.Assignment) assignm
 	}
 }
 
-func (c *SessionCoordinator) releaseCoordinatorLease(ctx context.Context, beadID string, lease assignmentstore.LeaseReceipt) error {
+func (c *SessionCoordinator) releaseCoordinatorLease(ctx context.Context, current *assignmentstore.Assignment, lease assignmentstore.LeaseReceipt) error {
 	if c.reservationClient == nil {
 		return errors.New("agent mail reservation client is not configured")
 	}
-	ids := append([]int(nil), lease.ReservationIDs...)
-	paths := []string(nil)
-	expected := len(ids)
-	if expected == 0 {
-		paths = append([]string(nil), lease.Granted...)
-		expected = len(paths)
-	}
-	if expected == 0 {
-		return nil
-	}
-	released, releaseErr := c.reservationClient.ReleaseReservations(ctx, c.projectKey, lease.AgentName, paths, ids)
-	if releaseErr == nil && released != nil && released.Released >= expected {
-		return nil
-	}
-	if releaseErr == nil {
-		if released == nil {
-			releaseErr = errors.New("agent mail returned no release result")
-		} else {
-			releaseErr = fmt.Errorf("agent mail released %d of %d reservations", released.Released, expected)
-		}
-	}
-
-	active, reconcileErr := c.reservationClient.ListReservations(ctx, c.projectKey, lease.AgentName, false)
-	if reconcileErr != nil {
-		return errors.Join(
-			fmt.Errorf("release %d reservations for %s: %v", expected, beadID, releaseErr),
-			fmt.Errorf("verify reservation release for %s: %w", beadID, reconcileErr),
-		)
-	}
-	wantedIDs := make(map[int]struct{}, len(ids))
-	for _, id := range ids {
-		wantedIDs[id] = struct{}{}
-	}
-	wantedPaths := make(map[string]struct{}, len(paths))
-	for _, path := range paths {
-		wantedPaths[path] = struct{}{}
-	}
-	reason := fmt.Sprintf("bead assignment: %s", beadID)
-	for _, reservation := range active {
-		if reservation.ReleasedTS != nil {
-			continue
-		}
-		if len(wantedIDs) > 0 {
-			if _, stillActive := wantedIDs[reservation.ID]; stillActive {
-				return fmt.Errorf("reservation %d for %s remains active after release", reservation.ID, beadID)
-			}
-			continue
-		}
-		if reservation.AgentName != lease.AgentName || reservation.Reason != reason {
-			continue
-		}
-		if _, stillActive := wantedPaths[reservation.PathPattern]; stillActive {
-			return fmt.Errorf("reservation %q for %s remains active after release", reservation.PathPattern, beadID)
-		}
-	}
-	return nil
+	manager := assignpkg.NewFileReservationManager(c.reservationClient, c.projectKey)
+	_, err := manager.ReleaseExactForBead(ctx, current, lease.ReservationIDs, lease.Granted)
+	return err
 }
 
-func filterOccupiedAgents(agents []*AgentState, activeAssignments []*assignmentstore.Assignment) []*AgentState {
+func filterOccupiedAgents(agents []*AgentState, activeAssignments []*assignmentstore.Assignment) ([]*AgentState, error) {
 	occupiedTargets := make(map[string]struct{})
-	occupiedLegacyPanes := make(map[int]struct{})
 	for _, active := range activeAssignments {
 		if active == nil {
 			continue
 		}
-		target := strings.TrimSpace(active.OccupancyKey)
-		if target == "" {
-			target = strings.TrimSpace(active.DispatchTarget)
+		target, err := assignmentstore.CanonicalPaneIdentity(active)
+		if err != nil {
+			return nil, fmt.Errorf("active assignment %s has noncanonical pane identity: %w", active.BeadID, err)
 		}
-		if target != "" {
-			occupiedTargets[target] = struct{}{}
-		} else {
-			occupiedLegacyPanes[active.Pane] = struct{}{}
-		}
+		occupiedTargets[target] = struct{}{}
 	}
 	filtered := make([]*AgentState, 0, len(agents))
 	for _, agent := range agents {
@@ -648,12 +636,9 @@ func filterOccupiedAgents(agents []*AgentState, activeAssignments []*assignments
 		if _, occupied := occupiedTargets[strings.TrimSpace(agent.PaneID)]; occupied {
 			continue
 		}
-		if _, occupied := occupiedLegacyPanes[agent.PaneIndex]; occupied {
-			continue
-		}
 		filtered = append(filtered, agent)
 	}
-	return filtered
+	return filtered, nil
 }
 
 // findBestMatch finds the best work recommendation for an agent.
@@ -690,22 +675,22 @@ func (c *SessionCoordinator) findBestMatch(agent *AgentState, recommendations []
 // attemptAssignment attempts to assign work to an agent.
 func (c *SessionCoordinator) attemptAssignment(ctx context.Context, assignment *WorkAssignment, rec *bv.TriageRecommendation) AssignmentResult {
 	if c.mailClient == nil {
-		return AssignmentResult{Assignment: assignment, Error: "assignment delivery unavailable: agent mail client is not configured"}
+		return AssignmentResult{Assignment: safeCoordinatorWorkProjection(assignment), Error: "assignment delivery unavailable: agent mail client is not configured"}
 	}
 	if assignment.AgentMailName == "" {
-		return AssignmentResult{Assignment: assignment, Error: "assignment delivery unavailable: agent has no agent-mail identity"}
+		return AssignmentResult{Assignment: safeCoordinatorWorkProjection(assignment), Error: "assignment delivery unavailable: agent has no agent-mail identity"}
 	}
 
 	idempotencyKey, err := assignmentstore.NewAssignmentIdempotencyKey()
 	if err != nil {
-		return AssignmentResult{Assignment: assignment, Error: err.Error()}
+		return AssignmentResult{Assignment: safeCoordinatorWorkProjection(assignment), Error: err.Error()}
 	}
 	claimActor := assignmentstore.StableClaimActor(assignment.AgentMailName, idempotencyKey)
 	body := c.formatAssignmentMessage(assignment, rec, claimActor)
 
 	store, err := assignmentstore.LoadStoreStrict(c.session)
 	if err != nil {
-		return AssignmentResult{Assignment: assignment, ClaimActor: claimActor, IdempotencyKey: idempotencyKey, Error: fmt.Sprintf("loading assignment ledger: %v", err)}
+		return AssignmentResult{Assignment: safeCoordinatorWorkProjection(assignment), ClaimActor: claimActor, IdempotencyKey: idempotencyKey, Error: fmt.Sprintf("loading assignment ledger: %v", err)}
 	}
 	request := assignmentstore.AtomicRequest{
 		BeadID:             assignment.BeadID,
@@ -727,7 +712,7 @@ func (c *SessionCoordinator) attemptAssignment(ctx context.Context, assignment *
 
 func (c *SessionCoordinator) executeAtomicAssignment(ctx context.Context, store *assignmentstore.AssignmentStore, work *WorkAssignment, request assignmentstore.AtomicRequest) AssignmentResult {
 	result := AssignmentResult{
-		Assignment: work, ClaimActor: assignmentstore.StableClaimActor(request.Actor, request.IdempotencyKey),
+		Assignment: safeCoordinatorWorkProjection(work), ClaimActor: assignmentstore.StableClaimActor(request.Actor, request.IdempotencyKey),
 		IdempotencyKey: request.IdempotencyKey,
 	}
 	if c.mailClient == nil {
@@ -743,6 +728,9 @@ func (c *SessionCoordinator) executeAtomicAssignment(ctx context.Context, store 
 		atomicCoordinator = c.atomicCoordinatorFactory(store)
 	}
 	atomicResult, err := atomicCoordinator.Execute(ctx, request)
+	if coordinatorAtomicRecordMatchesRequest(atomicResult.Assignment, request) {
+		result.Assignment = coordinatorWorkAssignmentFromRecord(atomicResult.Assignment)
+	}
 	result.Reservations = append([]string(nil), atomicResult.Lease.Granted...)
 	if err != nil {
 		result.Error = err.Error()
@@ -753,11 +741,27 @@ func (c *SessionCoordinator) executeAtomicAssignment(ctx context.Context, store 
 	return result
 }
 
+func coordinatorAtomicRecordMatchesRequest(recorded *assignmentstore.Assignment, request assignmentstore.AtomicRequest) bool {
+	return recorded != nil && recorded.BeadID == request.BeadID &&
+		strings.TrimSpace(recorded.IdempotencyKey) != "" && recorded.IdempotencyKey == request.IdempotencyKey
+}
+
+func safeCoordinatorWorkProjection(work *WorkAssignment) *WorkAssignment {
+	if work == nil {
+		return nil
+	}
+	copy := *work
+	copy.BeadTitle = ""
+	copy.FilesToReserve = nil
+	return &copy
+}
+
 type coordinatorReservationClient interface {
 	EnsureProject(context.Context, string) (*agentmail.Project, error)
 	ReservePaths(context.Context, agentmail.FileReservationOptions) (*agentmail.ReservationResult, error)
 	ListReservations(context.Context, string, string, bool) ([]agentmail.FileReservation, error)
 	ReleaseReservations(context.Context, string, string, []string, []int) (*agentmail.ReleaseReservationsResult, error)
+	RenewReservations(context.Context, agentmail.RenewReservationsOptions) (*agentmail.RenewReservationsResult, error)
 }
 
 type coordinatorAgentMailReservationPort struct {
@@ -942,11 +946,19 @@ func (p *coordinatorAgentMailReservationPort) ensureProject(ctx context.Context)
 	if err != nil {
 		return 0, fmt.Errorf("ensure Agent Mail project %q: %w", p.projectKey, err)
 	}
+	return validatedCoordinatorAgentMailProjectID(project, p.projectKey)
+}
+
+func validatedCoordinatorAgentMailProjectID(project *agentmail.Project, projectKey string) (int, error) {
 	if project == nil || project.ID <= 0 {
-		return 0, fmt.Errorf("ensure Agent Mail project %q returned no durable project ID", p.projectKey)
+		return 0, fmt.Errorf("ensure Agent Mail project %q returned no durable project ID", projectKey)
 	}
-	if humanKey := strings.TrimSpace(project.HumanKey); humanKey != "" && humanKey != strings.TrimSpace(p.projectKey) {
-		return 0, fmt.Errorf("Agent Mail project binding mismatch: got %q, want %q", humanKey, p.projectKey)
+	expectedKey := strings.TrimSpace(projectKey)
+	if expectedKey == "" {
+		return 0, errors.New("agent-mail project binding requires a non-empty project key")
+	}
+	if humanKey := strings.TrimSpace(project.HumanKey); humanKey != expectedKey {
+		return 0, fmt.Errorf("agent-mail project binding mismatch: got %q, want %q", humanKey, projectKey)
 	}
 	return project.ID, nil
 }
@@ -973,9 +985,12 @@ func validateCoordinatorReservationPaths(paths []string) ([]string, error) {
 
 func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
 	claimPort := assignmentstore.ClaimFunc(func(ctx context.Context, beadID, actor string) (assignmentstore.ClaimReceipt, error) {
-		claim, err := bv.ClaimBead(ctx, c.projectKey, beadID, actor)
+		claim, err := bv.ClaimBeadForAssignment(ctx, c.projectKey, beadID, actor)
 		if err != nil {
-			if errors.Is(err, bv.ErrBeadAlreadyClaimed) {
+			switch {
+			case errors.Is(err, bv.ErrBeadAssignmentIneligible):
+				return assignmentstore.ClaimReceipt{}, fmt.Errorf("%w: %v", assignmentstore.ErrClaimIneligible, err)
+			case errors.Is(err, bv.ErrBeadAlreadyClaimed):
 				return assignmentstore.ClaimReceipt{}, fmt.Errorf("%w: %v", assignmentstore.ErrClaimConflict, err)
 			}
 			return assignmentstore.ClaimReceipt{}, err
@@ -993,9 +1008,10 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 				fmt.Errorf("ensure Agent Mail dispatch project: %w", err),
 			)
 		}
-		if project == nil || project.ID <= 0 {
+		projectID, projectErr := validatedCoordinatorAgentMailProjectID(project, c.projectKey)
+		if projectErr != nil {
 			return assignmentstore.DispatchReceipt{Duration: time.Since(started)}, assignmentstore.GuaranteeNoActuation(
-				errors.New("Agent Mail dispatch project has no durable ID"),
+				fmt.Errorf("validate Agent Mail dispatch project: %w", projectErr),
 			)
 		}
 		subject := fmt.Sprintf("Work Assignment: %s", req.BeadID)
@@ -1013,7 +1029,7 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 			return receipt, err
 		}
 		deliveryID, receiptErr := validatedAgentMailDeliveryID(
-			sent, c.projectKey, project.ID, c.agentName, req.AgentName, subject, req.Prompt,
+			sent, c.projectKey, projectID, c.agentName, req.AgentName, subject, req.Prompt,
 		)
 		if receiptErr != nil {
 			return receipt, receiptErr
@@ -1027,6 +1043,16 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 			return assignmentstore.PromptPreflightResult{}, fmt.Errorf("load redaction policy: %w", err)
 		}
 		redactionConfig := loaded.Redaction.ToRedactionLibConfig()
+		titleResult := redaction.ScanAndRedact(req.BeadTitle, redactionConfig)
+		if titleResult.Blocked {
+			return assignmentstore.PromptPreflightResult{}, fmt.Errorf("redaction policy blocked assignment title (%d findings)", len(titleResult.Findings))
+		}
+		for _, requestedPath := range req.RequestedPaths {
+			pathResult := redaction.ScanAndRedact(requestedPath, redactionConfig)
+			if len(pathResult.Findings) > 0 {
+				return assignmentstore.PromptPreflightResult{}, fmt.Errorf("redaction policy blocked assignment reservation path (%d findings)", len(pathResult.Findings))
+			}
+		}
 		dispatchResult := redaction.ScanAndRedact(req.Prompt, redactionConfig)
 		if dispatchResult.Blocked {
 			return assignmentstore.PromptPreflightResult{}, fmt.Errorf("redaction policy blocked assignment prompt (%d findings)", len(dispatchResult.Findings))
@@ -1034,15 +1060,41 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 		durableConfig := redactionConfig.DeepCopy()
 		durableConfig.Mode = redaction.ModeRedact
 		durablePrompt := redaction.ScanAndRedact(req.Prompt, durableConfig).Output
+		durableTitle := redaction.ScanAndRedact(req.BeadTitle, durableConfig).Output
 		return assignmentstore.PromptPreflightResult{
-			DispatchPrompt: dispatchResult.Output,
+			// Agent Mail is an external durable transport. Never send a raw
+			// credential merely because the local display policy is configured
+			// as off; use the same forced-redacted value persisted in the ledger.
+			DispatchPrompt: durablePrompt,
 			DurablePrompt:  durablePrompt,
+			DurableTitle:   durableTitle,
+		}, nil
+	})
+	replacementAuthorization := assignmentstore.WorkingReplacementAuthorizationFunc(func(ctx context.Context, beadID string) (assignmentstore.WorkingReplacementAuthorization, error) {
+		var (
+			details *bv.BeadAssignmentDetails
+			err     error
+		)
+		if c.workItemDetailsFn != nil {
+			details, err = c.workItemDetailsFn(ctx, beadID)
+		} else {
+			details, err = bv.GetBeadAssignmentDetailsContext(ctx, c.projectKey, beadID)
+		}
+		if err != nil {
+			return assignmentstore.WorkingReplacementAuthorization{}, err
+		}
+		if details == nil {
+			return assignmentstore.WorkingReplacementAuthorization{}, errors.New("live work-item details are missing")
+		}
+		return assignmentstore.WorkingReplacementAuthorization{
+			Status: details.Status, Assignee: details.Assignee,
 		}, nil
 	})
 	return assignmentstore.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, preflight).
-		WithWorkItemStatusPort(assignmentstore.WorkItemStatusFunc(func(_ context.Context, beadID string) (string, error) {
-			return bv.GetBeadStatus(c.projectKey, beadID)
-		}))
+		WithWorkItemStatusPort(assignmentstore.WorkItemStatusFunc(func(statusCtx context.Context, beadID string) (string, error) {
+			return bv.GetBeadStatusContext(statusCtx, c.projectKey, beadID)
+		})).
+		WithWorkingReplacementAuthorizationPort(replacementAuthorization)
 }
 
 func validatedAgentMailDeliveryID(sent *agentmail.SendResult, projectKey string, projectID int, senderName, agentName, subject, body string) (string, error) {
@@ -1144,7 +1196,7 @@ func removeRecommendation(recs []bv.TriageRecommendation, id string) []bv.Triage
 
 // GetAssignableWork returns work items that could be assigned to idle agents.
 func (c *SessionCoordinator) GetAssignableWork(ctx context.Context) ([]bv.TriageRecommendation, error) {
-	triage, err := bv.GetTriage(c.projectKey)
+	triage, err := bv.GetTriageContext(ctx, c.projectKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1167,7 +1219,7 @@ func (c *SessionCoordinator) SuggestAssignment(ctx context.Context, paneID strin
 		return nil, fmt.Errorf("agent not found: %s", paneID)
 	}
 
-	triage, err := bv.GetTriage(c.projectKey)
+	triage, err := bv.GetTriageContext(ctx, c.projectKey)
 	if err != nil {
 		return nil, err
 	}

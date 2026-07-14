@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +15,29 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+func TestPaneResponseFromTMUXPreservesPhysicalIdentity(t *testing.T) {
+	pane := tmux.Pane{
+		ID:          "%42",
+		WindowIndex: 3,
+		Index:       1,
+		Title:       "project__cod_2",
+		Type:        tmux.AgentCodex,
+		Variant:     "high",
+		Active:      true,
+		Width:       120,
+		Height:      40,
+		Command:     "codex",
+	}
+	response := paneResponseFromTMUX(pane)
+	if response.PaneID != "%42" || response.PaneTarget != "3.1" || response.WindowIndex != 3 || response.Index != 1 {
+		t.Fatalf("pane response identity = %+v", response)
+	}
+	if response.Title != pane.Title || response.Type != "codex" || response.Variant != pane.Variant ||
+		!response.Active || response.Width != 120 || response.Height != 40 || response.Command != "codex" {
+		t.Fatalf("pane response metadata = %+v", response)
+	}
+}
 
 func TestResolveExplicitSessionName(t *testing.T) {
 	sessions := []tmux.Session{
@@ -117,6 +142,16 @@ func TestResolveSessionWithOptionsRejectsInvalidExplicitSessionName(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "invalid session name") {
 		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveSessionWithOptionsContextRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ResolveSessionWithOptionsContext(ctx, "valid-session", nil, SessionResolveOptions{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ResolveSessionWithOptionsContext() error = %v, want context.Canceled", err)
 	}
 }
 
@@ -827,7 +862,7 @@ func TestResolveExplicitProjectDirForSession_RejectsWorkspaceFallback(t *testing
 		t.Fatal(err)
 	}
 
-	_, err := resolveExplicitProjectDirForSession("ntm")
+	_, err := resolveExplicitProjectDirWithoutLiveSession(t, "ntm")
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -865,7 +900,7 @@ func TestResolveExplicitProjectDirForSession_UsesSavedSessionAgentProject(t *tes
 	}
 	saveSessionAgentForTest(t, "ntm", actualProject, "GreenCastle")
 
-	got, err := resolveExplicitProjectDirForSession("ntm")
+	got, err := resolveExplicitProjectDirWithoutLiveSession(t, "ntm")
 	if err != nil {
 		t.Fatalf("resolveExplicitProjectDirForSession() error = %v", err)
 	}
@@ -897,7 +932,7 @@ func TestResolveCommandProjectDirForSession_ExplicitRejectsWorkspaceFallback(t *
 		t.Fatal(err)
 	}
 
-	if got := resolveCommandProjectDirForSession("ntm", false); got != "" {
+	if got := resolveCommandProjectDirForSession("ntm-explicit-missing-project-test", false); got != "" {
 		t.Fatalf("resolveCommandProjectDirForSession explicit = %q, want empty", got)
 	}
 }
@@ -977,13 +1012,151 @@ func TestResolveExplicitProjectDirForSession_IgnoresCWDMatchedSavedProject(t *te
 		t.Fatalf("save actual session agent: %v", err)
 	}
 
-	got, err := resolveExplicitProjectDirForSession(session)
+	got, err := resolveExplicitProjectDirWithoutLiveSession(t, session)
 	if err != nil {
 		t.Fatalf("resolveExplicitProjectDirForSession() error = %v", err)
 	}
 	if got != actualProject {
 		t.Fatalf("resolveExplicitProjectDirForSession() = %q, want %q", got, actualProject)
 	}
+}
+
+func TestResolveExplicitProjectDirForSession_UsesLiveSessionProject(t *testing.T) {
+	isolateSessionAgentStorage(t)
+
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+	cfg = &config.Config{ProjectsBase: t.TempDir()}
+
+	callerProject := t.TempDir()
+	sessionProject := t.TempDir()
+	for _, projectDir := range []string{callerProject, sessionProject} {
+		if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
+			t.Fatalf("create project marker: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(projectDir, ".beads"), 0o755); err != nil {
+			t.Fatalf("create beads marker: %v", err)
+		}
+	}
+	paneDir := filepath.Join(sessionProject, "internal", "cli")
+	if err := os.MkdirAll(paneDir, 0o755); err != nil {
+		t.Fatalf("create pane directory: %v", err)
+	}
+	if err := os.Chdir(callerProject); err != nil {
+		t.Fatal(err)
+	}
+
+	panes := []tmux.Pane{{ID: "%11"}, {ID: "%12"}}
+	got, err := resolveExplicitProjectDirForSessionWithLookup(
+		t.Context(),
+		"live-session-project-test",
+		func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
+		func(_ context.Context, paneID string) (string, error) {
+			if paneID == "%11" {
+				return paneDir, nil
+			}
+			return sessionProject, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("resolveExplicitProjectDirForSessionWithLookup() error = %v", err)
+	}
+	if got != sessionProject {
+		t.Fatalf("resolveExplicitProjectDirForSessionWithLookup() = %q, want live project %q instead of caller %q", got, sessionProject, callerProject)
+	}
+}
+
+func TestResolveExplicitProjectDirForSession_RejectsMixedLiveProjects(t *testing.T) {
+	firstProject := t.TempDir()
+	secondProject := t.TempDir()
+	for _, projectDir := range []string{firstProject, secondProject} {
+		if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
+			t.Fatalf("create project marker: %v", err)
+		}
+	}
+
+	panes := []tmux.Pane{{ID: "%21"}, {ID: "%22"}}
+	_, err := resolveExplicitProjectDirForSessionWithLookup(
+		t.Context(),
+		"mixed-live-project-test",
+		func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
+		func(_ context.Context, paneID string) (string, error) {
+			if paneID == "%21" {
+				return firstProject, nil
+			}
+			return secondProject, nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "panes span multiple project roots") {
+		t.Fatalf("resolveExplicitProjectDirForSessionWithLookup() error = %v, want mixed-root failure", err)
+	}
+}
+
+func TestResolveExplicitProjectDirForSessionContext_PropagatesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := resolveExplicitProjectDirForSessionContext(ctx, "canceled-live-project-test")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveExplicitProjectDirForSessionContext() error = %v, want context canceled", err)
+	}
+}
+
+func TestResolveExplicitProjectDirForSession_PropagatesLivePaneListingFailure(t *testing.T) {
+	wantErr := errors.New("tmux transport unavailable")
+	_, err := resolveExplicitProjectDirForSessionWithLookup(
+		t.Context(),
+		"live-pane-list-failure",
+		func(context.Context, string) ([]tmux.Pane, error) { return nil, wantErr },
+		nil,
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("resolveExplicitProjectDirForSessionWithLookup() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestResolveExplicitProjectDirForSession_MissingLiveSessionUsesConfiguredProject(t *testing.T) {
+	origCfg := cfg
+	t.Cleanup(func() { cfg = origCfg })
+
+	projectsBase := t.TempDir()
+	session := "configured-missing-live-session"
+	projectDir := filepath.Join(projectsBase, session)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("create configured project: %v", err)
+	}
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	got, err := resolveExplicitProjectDirForSessionWithLookup(
+		t.Context(),
+		session,
+		func(context.Context, string) ([]tmux.Pane, error) {
+			return nil, errors.New("tmux list-panes: exit status 1: can't find window: " + session)
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolve configured project after missing live session: %v", err)
+	}
+	if got != projectDir {
+		t.Fatalf("resolved project = %q, want %q", got, projectDir)
+	}
+}
+
+func resolveExplicitProjectDirWithoutLiveSession(t *testing.T, session string) (string, error) {
+	t.Helper()
+	return resolveExplicitProjectDirForSessionWithLookup(
+		t.Context(),
+		session,
+		func(context.Context, string) ([]tmux.Pane, error) { return nil, nil },
+		nil,
+	)
 }
 
 func TestNormalizeProjectScopedSessionName_UsesConfiguredProjectPrefix(t *testing.T) {

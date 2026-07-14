@@ -70,7 +70,7 @@ func TestAgentLifecycleSpawnWorkKill(t *testing.T) {
 		UserPane: true,
 	}
 
-	err = spawnSessionLogic(spawnOpts)
+	err = spawnSessionLogicContext(t.Context(), spawnOpts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestAgentLifecycleMultipleAgents(t *testing.T) {
 		UserPane: true,
 	}
 
-	err = spawnSessionLogic(spawnOpts)
+	err = spawnSessionLogicContext(t.Context(), spawnOpts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestAgentLifecycleRapidSpawnKill(t *testing.T) {
 		}
 
 		// Spawn
-		err := spawnSessionLogic(SpawnOptions{
+		err := spawnSessionLogicContext(t.Context(), SpawnOptions{
 			Session:  sessionName,
 			Agents:   []FlatAgent{{Type: AgentTypeClaude, Index: 1, Model: "test"}},
 			CCCount:  1,
@@ -414,7 +414,7 @@ func TestAgentLifecycleKillIdempotent(t *testing.T) {
 	}
 
 	// Spawn
-	err = spawnSessionLogic(SpawnOptions{
+	err = spawnSessionLogicContext(t.Context(), SpawnOptions{
 		Session:  sessionName,
 		Agents:   []FlatAgent{{Type: AgentTypeClaude, Index: 1, Model: "test"}},
 		CCCount:  1,

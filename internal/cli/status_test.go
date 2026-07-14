@@ -62,7 +62,7 @@ func TestStatusRealSession(t *testing.T) {
 		CCCount:  1,
 		UserPane: true,
 	}
-	err = spawnSessionLogic(opts)
+	err = spawnSessionLogicContext(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}

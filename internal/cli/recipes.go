@@ -86,9 +86,10 @@ func runRecipesList() error {
 	recipes, err := loader.LoadAll()
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-				"error": err.Error(),
-			})
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			}, err)
 		}
 		return err
 	}
@@ -176,9 +177,10 @@ func runRecipesShow(name string) error {
 	r, err := loader.Get(name)
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-				"error": err.Error(),
-			})
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			}, err)
 		}
 		return err
 	}

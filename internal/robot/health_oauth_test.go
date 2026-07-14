@@ -601,6 +601,15 @@ func TestExitCodeForResponse(t *testing.T) {
 			2,
 		},
 		{
+			"not_implemented_ignores_stale_error_meta",
+			func() RobotResponse {
+				resp := NewErrorResponse(errors.New("later"), ErrCodeNotImplemented, "")
+				resp.Meta = NewResponseMeta("x").WithExitCode(1)
+				return resp
+			}(),
+			2,
+		},
+		{
 			"failure_without_code",
 			RobotResponse{Success: false},
 			1,

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -736,26 +737,125 @@ func TestRecoveryContext_BuildWithDisabled(t *testing.T) {
 	}
 }
 
-// TestRecoveryContext_BuildGracefulDegradation tests graceful degradation when services are unavailable
+func writeRecoveryFakeBR(t *testing.T, script string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{".git", ".beads"} {
+		if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	return dir
+}
+
+func TestLoadRecoveryBeads_BlockingBRHonorsDeadline(t *testing.T) {
+	dir := writeRecoveryFakeBR(t, "#!/bin/sh\nexec /bin/sleep 30\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	inProgress, completed, blocked, err := loadRecoveryBeads(ctx, dir)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("loadRecoveryBeads lists=%+v/%+v/%+v error=%v, want deadline exceeded", inProgress, completed, blocked, err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("loadRecoveryBeads took %s after deadline", elapsed)
+	}
+}
+
+func TestBuildRecoveryContext_BlockingBRHonorsDeadline(t *testing.T) {
+	dir := writeRecoveryFakeBR(t, "#!/bin/sh\nexec /bin/sleep 30\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	recoveryCfg := config.SessionRecoveryConfig{
+		Enabled:             true,
+		IncludeBeadsContext: true,
+		MaxRecoveryTokens:   3000,
+	}
+
+	started := time.Now()
+	rc, err := buildRecoveryContext(ctx, "blocking-recovery", dir, recoveryCfg)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("buildRecoveryContext rc=%+v error=%v, want deadline exceeded", rc, err)
+	}
+	if rc != nil {
+		t.Fatalf("buildRecoveryContext rc=%+v, want nil on terminal deadline", rc)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("buildRecoveryContext took %s after deadline", elapsed)
+	}
+}
+
+func TestBuildRecoveryContext_OrdinaryBeadsFailureIsPartial(t *testing.T) {
+	dir := writeRecoveryFakeBR(t, "#!/bin/sh\nprintf 'ordinary recovery failure\\n' >&2\nexit 1\n")
+	recoveryCfg := config.SessionRecoveryConfig{
+		Enabled:             true,
+		IncludeBeadsContext: true,
+		MaxRecoveryTokens:   3000,
+	}
+
+	rc, err := buildRecoveryContext(context.Background(), "partial-recovery", dir, recoveryCfg)
+	if err != nil {
+		t.Fatalf("buildRecoveryContext returned terminal error for ordinary source failure: %v", err)
+	}
+	if rc == nil || rc.Error == nil {
+		t.Fatalf("buildRecoveryContext rc=%+v, want partial recovery diagnostics", rc)
+	}
+	if rc.Error.Code != "PARTIAL_RECOVERY" || !rc.Error.Recoverable {
+		t.Fatalf("recovery error=%+v, want recoverable PARTIAL_RECOVERY", rc.Error)
+	}
+	if details := strings.Join(rc.Error.Details, "\n"); !strings.Contains(details, "ordinary recovery failure") {
+		t.Fatalf("recovery error details=%q, want fake br failure", details)
+	}
+}
+
+func TestNewRecoverySpawnStatusExposesPartialSourceFailures(t *testing.T) {
+	if status := newRecoverySpawnStatus(false, nil); status != nil {
+		t.Fatalf("disabled recovery status=%+v, want nil", status)
+	}
+	empty := newRecoverySpawnStatus(true, nil)
+	if empty == nil || !empty.Enabled || empty.Applied || empty.Partial || empty.Warnings == nil {
+		t.Fatalf("empty enabled recovery status=%+v", empty)
+	}
+	rc := &RecoveryContext{
+		Beads: []RecoveryBead{{ID: "ntm-1", Title: "Continue recovery work"}},
+		Error: &RecoveryError{
+			Code:    "PARTIAL_RECOVERY",
+			Details: []string{"agent mail: unavailable", "cm memories: timed out"},
+		},
+	}
+	status := newRecoverySpawnStatus(true, rc)
+	if status == nil || !status.Enabled || !status.Applied || !status.Partial || status.ErrorCode != "PARTIAL_RECOVERY" ||
+		!reflect.DeepEqual(status.Warnings, rc.Error.Details) {
+		t.Fatalf("partial recovery status=%+v", status)
+	}
+}
+
+// TestRecoveryContext_BuildGracefulDegradation tests graceful degradation when an optional source is absent.
 func TestRecoveryContext_BuildGracefulDegradation(t *testing.T) {
 	t.Log("RECOVERY_TEST: TestRecoveryContext_BuildGracefulDegradation | Testing graceful degradation")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// Context termination is a terminal recovery failure. Keep this test
+	// hermetic: the dedicated blocking-source tests cover cancellation, while
+	// this case proves that a workspace without a local Beads database degrades
+	// without depending on live Agent Mail or CM process latency.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Config that enables all services but uses non-existent paths/services
 	recoveryCfg := config.SessionRecoveryConfig{
 		Enabled:             true,
-		IncludeAgentMail:    true,
 		IncludeBeadsContext: true,
-		IncludeCMMemories:   true,
 		MaxRecoveryTokens:   3000,
 		AutoInjectOnSpawn:   true,
 		StaleThresholdHours: 24,
 	}
 
-	// Use a non-existent session/project to trigger graceful fallbacks
-	rc, err := buildRecoveryContext(ctx, "nonexistent-session-12345", "/nonexistent/path", recoveryCfg)
+	rc, err := buildRecoveryContext(ctx, "nonexistent-session-12345", t.TempDir(), recoveryCfg)
 
 	t.Logf("RECOVERY_TEST: Graceful degradation | err=%v rc=%+v", err, rc)
 

@@ -126,8 +126,8 @@ func getQuickstartContent() *DocsContent {
 			{
 				Heading: "Overview",
 				Body: `Robot mode provides a JSON API for AI agents to orchestrate coding sessions in tmux.
-All robot commands output JSON to stdout with diagnostic messages to stderr.
-This separation enables reliable parsing while providing useful context for debugging.`,
+Terminal robot commands emit one machine-readable response on stdout and leave stderr empty whenever stdout is writable.
+Command failures and machine-actionable context are carried inside the response envelope; human-only startup warnings are suppressed.`,
 			},
 			{
 				Heading: "API Design Principles",

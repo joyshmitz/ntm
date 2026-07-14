@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -565,7 +566,9 @@ func captureStderr(t *testing.T, fn func()) string {
 		t.Fatalf("creating pipe: %v", err)
 	}
 	orig := os.Stderr
+	origLogWriter := log.Writer()
 	os.Stderr = w
+	log.SetOutput(w)
 	done := make(chan string, 1)
 	go func() {
 		var buf bytes.Buffer
@@ -575,6 +578,7 @@ func captureStderr(t *testing.T, fn func()) string {
 
 	fn()
 
+	log.SetOutput(origLogWriter)
 	os.Stderr = orig
 	_ = w.Close()
 	out := <-done

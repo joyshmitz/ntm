@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -806,7 +807,7 @@ func makeTestBead(id, title, priority string) bv.BeadPreview {
 func withAssignAllocationPressure(t *testing.T, pressure assign.AllocationPressure) {
 	t.Helper()
 	previous := collectAssignAllocationPressure
-	collectAssignAllocationPressure = func() assign.AllocationPressure {
+	collectAssignAllocationPressure = func(context.Context) assign.AllocationPressure {
 		return pressure
 	}
 	t.Cleanup(func() {
@@ -839,7 +840,7 @@ func TestGenerateAssignmentsEnhanced_RoundRobin_Basic(t *testing.T) {
 		makeTestBead("b5", "Task 5", "P3"),
 	}
 	opts := &AssignCommandOptions{Strategy: "round-robin"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 
 	if len(got) != 5 {
 		t.Fatalf("round-robin: got %d assignments, want 5", len(got))
@@ -862,7 +863,7 @@ func TestGenerateAssignmentsEnhanced_RoundRobin_Basic(t *testing.T) {
 func TestGenerateAssignmentsEnhanced_RoundRobin_NoAgents(t *testing.T) {
 	beads := []bv.BeadPreview{makeTestBead("b1", "Task 1", "P1")}
 	opts := &AssignCommandOptions{Strategy: "round-robin"}
-	got := generateAssignmentsEnhanced(nil, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), nil, beads, opts)
 	if len(got) != 0 {
 		t.Errorf("round-robin with no agents: got %d assignments, want 0", len(got))
 	}
@@ -871,7 +872,7 @@ func TestGenerateAssignmentsEnhanced_RoundRobin_NoAgents(t *testing.T) {
 func TestGenerateAssignmentsEnhanced_RoundRobin_NoBeads(t *testing.T) {
 	agents := []assignAgentInfo{makeTestAgent(0, "claude")}
 	opts := &AssignCommandOptions{Strategy: "round-robin"}
-	got := generateAssignmentsEnhanced(agents, nil, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, nil, opts)
 	if len(got) != 0 {
 		t.Errorf("round-robin with no beads: got %d assignments, want 0", len(got))
 	}
@@ -885,7 +886,7 @@ func TestGenerateAssignmentsEnhanced_RoundRobin_SingleAgent(t *testing.T) {
 		makeTestBead("b3", "Task 3", "P3"),
 	}
 	opts := &AssignCommandOptions{Strategy: "round-robin"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	if len(got) != 3 {
 		t.Fatalf("single agent round-robin: got %d, want 3", len(got))
 	}
@@ -907,7 +908,7 @@ func TestGenerateAssignmentsEnhanced_Quality_BestMatch(t *testing.T) {
 		makeTestBead("b1", "Implement new API endpoint", "P1"), // implementation → codex should score well
 	}
 	opts := &AssignCommandOptions{Strategy: "quality"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	if len(got) != 1 {
 		t.Fatalf("quality: got %d assignments, want 1", len(got))
 	}
@@ -934,7 +935,7 @@ func TestGenerateAssignmentsEnhanced_Quality_MoreBeadsThanAgents(t *testing.T) {
 		makeTestBead("b3", "Write docs", "P2"), // No agent left
 	}
 	opts := &AssignCommandOptions{Strategy: "quality"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	// Quality uses usedAgents map — each agent can only be assigned once
 	if len(got) != 2 {
 		t.Errorf("quality with 3 beads/2 agents: got %d assignments, want 2", len(got))
@@ -952,7 +953,7 @@ func TestGenerateAssignmentsEnhanced_Quality_MoreBeadsThanAgents(t *testing.T) {
 func TestGenerateAssignmentsEnhanced_Quality_NoAgents(t *testing.T) {
 	beads := []bv.BeadPreview{makeTestBead("b1", "Task", "P1")}
 	opts := &AssignCommandOptions{Strategy: "quality"}
-	got := generateAssignmentsEnhanced(nil, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), nil, beads, opts)
 	if len(got) != 0 {
 		t.Errorf("quality with no agents: got %d, want 0", len(got))
 	}
@@ -972,7 +973,7 @@ func TestGenerateAssignmentsEnhanced_Speed_FirstAvailable(t *testing.T) {
 		makeTestBead("b3", "Task 3", "P2"),
 	}
 	opts := &AssignCommandOptions{Strategy: "speed"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	if len(got) != 3 {
 		t.Fatalf("speed: got %d assignments, want 3", len(got))
 	}
@@ -1000,7 +1001,7 @@ func TestGenerateAssignmentsEnhanced_Speed_MoreBeadsThanAgents(t *testing.T) {
 		makeTestBead("b3", "Task 3", "P2"),
 	}
 	opts := &AssignCommandOptions{Strategy: "speed"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	// Speed uses usedAgents — only 1 agent available
 	if len(got) != 1 {
 		t.Errorf("speed with 3 beads/1 agent: got %d, want 1", len(got))
@@ -1018,7 +1019,7 @@ func TestGenerateAssignmentsEnhanced_Dependency_PriorityBoost(t *testing.T) {
 		makeTestBead("b1", "Critical fix", "P0"),
 	}
 	opts := &AssignCommandOptions{Strategy: "dependency"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	if len(got) != 1 {
 		t.Fatalf("dependency: got %d assignments, want 1", len(got))
 	}
@@ -1040,7 +1041,7 @@ func TestGenerateAssignmentsEnhanced_Dependency_MoreBeadsThanAgents(t *testing.T
 		makeTestBead("b2", "Task 2", "P2"),
 	}
 	opts := &AssignCommandOptions{Strategy: "dependency"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	// Only 1 agent, so only 1 assignment
 	if len(got) != 1 {
 		t.Errorf("dependency 2 beads/1 agent: got %d, want 1", len(got))
@@ -1055,7 +1056,7 @@ func TestGenerateAssignmentsEnhanced_Dependency_LowPriority(t *testing.T) {
 		makeTestBead("b1", "Low priority task", "P3"),
 	}
 	opts := &AssignCommandOptions{Strategy: "dependency"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	if len(got) != 1 {
 		t.Fatalf("dependency P3: got %d, want 1", len(got))
 	}
@@ -1085,7 +1086,7 @@ func TestGenerateAssignmentsEnhanced_Balanced_EvenSpread(t *testing.T) {
 	}
 	// Empty session → skips LoadStore
 	opts := &AssignCommandOptions{Strategy: "balanced", Session: ""}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	if len(got) != 3 {
 		t.Fatalf("balanced: got %d assignments, want 3", len(got))
 	}
@@ -1111,7 +1112,7 @@ func TestGenerateAssignmentsEnhanced_Balanced_SingleAgent(t *testing.T) {
 		makeTestBead("b2", "Task 2", "P2"),
 	}
 	opts := &AssignCommandOptions{Strategy: "balanced"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	if len(got) != 1 {
 		t.Fatalf("balanced single agent: got %d, want 1", len(got))
 	}
@@ -1127,7 +1128,7 @@ func TestGenerateAssignmentsEnhanced_Balanced_NoAgents(t *testing.T) {
 
 	beads := []bv.BeadPreview{makeTestBead("b1", "Task", "P1")}
 	opts := &AssignCommandOptions{Strategy: "balanced"}
-	got := generateAssignmentsEnhanced(nil, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), nil, beads, opts)
 	if len(got) != 0 {
 		t.Errorf("balanced with no agents: got %d, want 0", len(got))
 	}
@@ -1145,7 +1146,7 @@ func TestGenerateAssignmentsEnhanced_BalancedPressurePrefersHeadroom(t *testing.
 		makeTestBead("b1", "Performance benchmark load test", "P1"),
 	}
 
-	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"}, true)
+	got, plan := generateAssignmentsEnhancedWithPlan(t.Context(), agents, beads, &AssignCommandOptions{Strategy: "balanced"}, true)
 	if plan == nil {
 		t.Fatal("balanced pressure assignment should return an allocation plan")
 	}
@@ -1172,7 +1173,7 @@ func TestGenerateAssignmentsEnhanced_BalancedPressureUnavailableFallsBack(t *tes
 	agents := []assignAgentInfo{makeTestAgent(0, "claude")}
 	beads := []bv.BeadPreview{makeTestBead("b1", "Analyze flaky assignment path", "P1")}
 
-	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"}, true)
+	got, plan := generateAssignmentsEnhancedWithPlan(t.Context(), agents, beads, &AssignCommandOptions{Strategy: "balanced"}, true)
 	if plan == nil {
 		t.Fatal("balanced assignment should return an allocation plan")
 	}
@@ -1197,7 +1198,7 @@ func TestGenerateAssignmentsEnhanced_BalancedBVUnavailableMarksMissing(t *testin
 	agents := []assignAgentInfo{makeTestAgent(0, "claude")}
 	beads := []bv.BeadPreview{makeTestBead("b1", "Investigate degraded triage path", "P1")}
 
-	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"}, false)
+	got, plan := generateAssignmentsEnhancedWithPlan(t.Context(), agents, beads, &AssignCommandOptions{Strategy: "balanced"}, false)
 	if plan == nil {
 		t.Fatal("balanced assignment should return an allocation plan")
 	}
@@ -1222,7 +1223,7 @@ func TestGenerateAssignmentsEnhanced_BalancedCriticalPressureDefers(t *testing.T
 	agents := []assignAgentInfo{makeTestAgent(0, "codex")}
 	beads := []bv.BeadPreview{makeTestBead("b1", "Implement large benchmark suite", "P0")}
 
-	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"}, true)
+	got, plan := generateAssignmentsEnhancedWithPlan(t.Context(), agents, beads, &AssignCommandOptions{Strategy: "balanced"}, true)
 	if len(got) != 0 {
 		t.Fatalf("critical pressure: got %d assignments, want 0", len(got))
 	}
@@ -1248,7 +1249,7 @@ func TestGenerateAssignmentsEnhanced_DefaultIsBalanced(t *testing.T) {
 	}
 	// Unknown strategy falls through to default (balanced)
 	opts := &AssignCommandOptions{Strategy: "unknown_strategy"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	if len(got) != 2 {
 		t.Fatalf("default strategy: got %d, want 2", len(got))
 	}
@@ -1268,7 +1269,7 @@ func TestGenerateAssignmentsEnhanced_CommonFields(t *testing.T) {
 	agents := []assignAgentInfo{makeTestAgent(5, "claude")}
 	beads := []bv.BeadPreview{makeTestBead("bd-abc", "My Task", "P1")}
 	opts := &AssignCommandOptions{Strategy: "round-robin", Session: "test-session"}
-	got := generateAssignmentsEnhanced(agents, beads, opts)
+	got := generateAssignmentsEnhanced(t.Context(), agents, beads, opts)
 	if len(got) != 1 {
 		t.Fatalf("common fields: got %d, want 1", len(got))
 	}

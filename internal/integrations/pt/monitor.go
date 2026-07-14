@@ -14,7 +14,9 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
-var monitorLogger = slog.Default().With("component", "integrations.pt.monitor")
+func monitorLogger() *slog.Logger {
+	return slog.Default().With("component", "integrations.pt.monitor")
+}
 
 // Classification represents an agent's health classification.
 type Classification string
@@ -219,7 +221,7 @@ func (m *HealthMonitor) Start() error {
 
 	go m.monitorLoop()
 
-	monitorLogger.Info("health monitor started",
+	monitorLogger().Info("health monitor started",
 		"session", m.session,
 		"check_interval", m.config.CheckInterval,
 		"use_rano", m.useRano,
@@ -246,7 +248,7 @@ func (m *HealthMonitor) Stop() {
 	// Wait for loop to finish
 	<-m.doneCh
 
-	monitorLogger.Info("health monitor stopped")
+	monitorLogger().Info("health monitor stopped")
 }
 
 // Running returns true if the monitor is currently running.
@@ -314,14 +316,14 @@ func (m *HealthMonitor) checkAll() {
 
 	// Refresh PID map to get current pane->PID mappings
 	if err := m.pidMap.RefreshContext(ctx); err != nil {
-		monitorLogger.Warn("failed to refresh PID map", "error", err)
+		monitorLogger().Warn("failed to refresh PID map", "error", err)
 		return
 	}
 
 	// Get all PIDs with their labels
 	pidLabels := m.pidMap.GetPIDLabels()
 	if len(pidLabels) == 0 {
-		monitorLogger.Debug("no panes to monitor")
+		monitorLogger().Debug("no panes to monitor")
 		return
 	}
 
@@ -334,7 +336,7 @@ func (m *HealthMonitor) checkAll() {
 	// Classify all processes at once
 	results, err := m.ptAdapter.ClassifyProcesses(ctx, pids)
 	if err != nil {
-		monitorLogger.Warn("failed to classify processes", "error", err)
+		monitorLogger().Warn("failed to classify processes", "error", err)
 		return
 	}
 
@@ -404,7 +406,7 @@ func (m *HealthMonitor) checkAll() {
 	for pane := range m.states {
 		if !seenPanes[pane] {
 			delete(m.states, pane)
-			monitorLogger.Debug("removed stale pane state", "pane", pane)
+			monitorLogger().Debug("removed stale pane state", "pane", pane)
 		}
 	}
 
@@ -567,14 +569,14 @@ func (m *HealthMonitor) checkAlerts(pane string) []Alert {
 func (m *HealthMonitor) sendAlert(alert Alert) {
 	select {
 	case m.alertCh <- alert:
-		monitorLogger.Info("alert sent",
+		monitorLogger().Info("alert sent",
 			"type", alert.Type,
 			"pane", alert.Pane,
 			"state", alert.State,
 			"duration", alert.Duration,
 		)
 	default:
-		monitorLogger.Warn("alert channel full, dropping alert",
+		monitorLogger().Warn("alert channel full, dropping alert",
 			"type", alert.Type,
 			"pane", alert.Pane,
 		)
@@ -590,7 +592,7 @@ func (m *HealthMonitor) emitStateChange(change ClassificationStateChange) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					monitorLogger.Error("state change callback panicked", "panic", r, "pane", change.Pane)
+					monitorLogger().Error("state change callback panicked", "panic", r, "pane", change.Pane)
 				}
 			}()
 			cb(change)
@@ -606,7 +608,7 @@ func (m *HealthMonitor) emitAlert(alert Alert) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					monitorLogger.Error("alert callback panicked", "panic", r, "pane", alert.Pane)
+					monitorLogger().Error("alert callback panicked", "panic", r, "pane", alert.Pane)
 				}
 			}()
 			cb(alert)

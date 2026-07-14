@@ -40,7 +40,7 @@ func LoadMerged(cwd, globalPath string) (*Config, error) {
 		if projectDir != "" {
 			projectConfigPath = filepath.Join(projectDir, ".ntm", "config.toml")
 		}
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(log.Writer(),
 			"ntm: warning: ignoring invalid project config %s: %v (continuing with global config)\n",
 			projectConfigPath, err)
 		return cfg, nil

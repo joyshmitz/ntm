@@ -79,10 +79,12 @@ Examples:
 				// Run a fresh scan
 				if !scanner.IsAvailable() {
 					if jsonOutput {
-						return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-							"error":     "ubs not installed",
+						cause := scanner.ErrNotInstalled
+						return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+							"success":   false,
+							"error":     cause.Error(),
 							"available": false,
-						})
+						}, cause)
 					}
 					fmt.Println("UBS not installed. Install: https://github.com/nightowlai/ubs")
 					return nil
@@ -229,10 +231,12 @@ Examples:
 			// Check UBS availability
 			if !scanner.IsAvailable() {
 				if jsonOutput {
-					return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-						"error":     "ubs not installed",
+					cause := scanner.ErrNotInstalled
+					return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+						"success":   false,
+						"error":     cause.Error(),
 						"available": false,
-					})
+					}, cause)
 				}
 				fmt.Println("UBS not installed. Install: https://github.com/nightowlai/ubs")
 				return nil
@@ -299,11 +303,11 @@ Examples:
 			ctx := context.Background()
 			if err := scanner.NotifyScanResults(ctx, result, projectKey); err != nil {
 				if jsonOutput {
-					return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+					return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 						"success":   false,
 						"error":     err.Error(),
 						"timestamp": time.Now().UTC().Format(time.RFC3339),
-					})
+					}, err)
 				}
 				return fmt.Errorf("notification failed: %w", err)
 			}
@@ -356,10 +360,16 @@ Examples:
 			result, err := loadCachedScanResult(absPath)
 			if err != nil || result == nil {
 				if jsonOutput {
-					return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+					cause := err
+					if cause == nil {
+						cause = fmt.Errorf("no cached scan results")
+					}
+					return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+						"success":   false,
 						"available": false,
+						"error":     cause.Error(),
 						"message":   "no cached scan results, run 'ntm scan' or 'ntm bugs list' first",
-					})
+					}, cause)
 				}
 				fmt.Println("No cached scan results. Run 'ntm scan' or 'ntm bugs list' first.")
 				return nil

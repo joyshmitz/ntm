@@ -1,12 +1,168 @@
 package bv
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestRunBdContextCancelsWhileQueuedForWorkspaceGate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	normalized, err := normalizeTriageDir(dir)
+	if err != nil {
+		t.Fatalf("normalize triage dir: %v", err)
+	}
+	gate := workspaceBDMutex(normalized)
+	gate.Lock()
+	defer gate.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = RunBdContext(ctx, dir, "ready", "--json")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunBdContext error=%v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("workspace gate cancellation took %s", elapsed)
+	}
+}
+
+func TestGetBeadsSummaryContextCancelsWhileStatsWaitsForWorkspaceGate(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{".git", ".beads"} {
+		if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	normalized, err := normalizeTriageDir(dir)
+	if err != nil {
+		t.Fatalf("normalize triage dir: %v", err)
+	}
+	gate := workspaceBDMutex(normalized)
+	gate.Lock()
+	defer gate.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	result, err := GetBeadsSummaryContext(ctx, dir, 10)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetBeadsSummaryContext result=%+v error=%v, want deadline exceeded", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("Beads summary cancellation took %s", elapsed)
+	}
+}
+
+func TestRunBdContextCancelsDuringTransientRetryBackoff(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "attempts")
+	script := "#!/bin/sh\nprintf 'x\\n' >> " + marker + "\nprintf 'database is locked\\n' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := RunBdContext(ctx, dir, "ready", "--json")
+		result <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, _ := os.ReadFile(marker)
+		if strings.Count(string(data), "x") >= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("fake br did not reach third transient attempt")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunBdContext error=%v, want context canceled", err)
+		}
+		if elapsed := time.Since(started); elapsed > 120*time.Millisecond {
+			t.Fatalf("transient retry cancellation took %s", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunBdContext ignored cancellation during retry backoff")
+	}
+}
+
+func TestGetRecentlyCompletedListContext(t *testing.T) {
+	t.Run("returns_limited_completed_rows", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, name := range []string{".git", ".beads"} {
+			if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", name, err)
+			}
+		}
+		binDir := t.TempDir()
+		script := "#!/bin/sh\nprintf '[{\"id\":\"ntm-done-1\",\"title\":\"first\"},{\"id\":\"ntm-done-2\",\"title\":\"second\"}]\\n'\n"
+		if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
+			t.Fatalf("write fake br: %v", err)
+		}
+		t.Setenv("PATH", binDir)
+
+		items, err := GetRecentlyCompletedListContext(context.Background(), dir, 1)
+		if err != nil {
+			t.Fatalf("GetRecentlyCompletedListContext error: %v", err)
+		}
+		if len(items) != 1 || items[0].ID != "ntm-done-1" || items[0].Title != "first" {
+			t.Fatalf("completed items=%+v, want first row only", items)
+		}
+	})
+
+	t.Run("cancels_blocking_br", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, name := range []string{".git", ".beads"} {
+			if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", name, err)
+			}
+		}
+		binDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(binDir, "br"), []byte("#!/bin/sh\nexec /bin/sleep 30\n"), 0o700); err != nil {
+			t.Fatalf("write blocking fake br: %v", err)
+		}
+		t.Setenv("PATH", binDir)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		items, err := GetRecentlyCompletedListContext(ctx, dir, 10)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("items=%+v error=%v, want deadline exceeded", items, err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("blocking completed-list read took %s after cancellation", elapsed)
+		}
+	})
+}
 
 func TestUnmarshalBdList(t *testing.T) {
 	t.Parallel()

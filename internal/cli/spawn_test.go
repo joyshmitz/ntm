@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,6 +20,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/cm"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -122,6 +127,45 @@ func TestResolveSpawnPanePrompt_UsesZeroBasedAgentOrder(t *testing.T) {
 	}
 }
 
+func TestResolveSpawnPanePromptReportsConfiguredDefaultFileFailure(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-default-prompt.md")
+	opts := SpawnOptions{
+		Prompt: "explicit prompt must remain available for diagnostics",
+		DefaultPrompts: config.PromptsConfig{
+			CCDefaultFile: missing,
+		},
+	}
+
+	prompt, err := resolveSpawnPanePrompt(opts, AgentTypeClaude, 0)
+	if err == nil || !strings.Contains(err.Error(), "reading prompts.cc_default_file") || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("default prompt resolution error = %v", err)
+	}
+	if prompt != opts.Prompt {
+		t.Fatalf("prompt returned with resolution error = %q, want explicit prompt %q", prompt, opts.Prompt)
+	}
+}
+
+func TestSpawnPromptSequenceCassAdvisoryPolicy(t *testing.T) {
+	tests := []struct {
+		name     string
+		steps    []spawnPromptStep
+		cassOnly bool
+	}{
+		{name: "empty is not a failed injection", steps: nil, cassOnly: false},
+		{name: "cass only", steps: []spawnPromptStep{{Kind: "cass_context", Message: "history"}}, cassOnly: true},
+		{name: "recovery is requested work", steps: []spawnPromptStep{{Kind: "recovery_context", Message: "recover"}}, cassOnly: false},
+		{name: "user prompt is requested work", steps: []spawnPromptStep{{Kind: "user_prompt", Message: "build"}}, cassOnly: false},
+		{name: "combined cass and user remains fatal", steps: []spawnPromptStep{{Kind: "cass_context"}, {Kind: "user_prompt"}}, cassOnly: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := spawnPromptSequenceIsCassOnly(tt.steps); got != tt.cassOnly {
+				t.Fatalf("spawnPromptSequenceIsCassOnly() = %v, want %v", got, tt.cassOnly)
+			}
+		})
+	}
+}
+
 func TestSpawnHasPromptDelivery_RecognizesDefaultAndMarchingPrompts(t *testing.T) {
 
 	if !spawnHasPromptDelivery(SpawnOptions{
@@ -145,6 +189,227 @@ func TestSpawnHasPromptDelivery_RecognizesDefaultAndMarchingPrompts(t *testing.T
 	}) {
 		t.Fatal("expected no prompt delivery when no prompt sources are configured")
 	}
+}
+
+func TestValidateSpawnAgentTypes(t *testing.T) {
+	builtins := []FlatAgent{
+		{Type: AgentTypeClaude},
+		{Type: AgentTypeCodex},
+		{Type: AgentTypeGemini},
+		{Type: AgentTypeAntigravity},
+		{Type: AgentTypeOllama},
+		{Type: AgentTypeCursor},
+		{Type: AgentTypeWindsurf},
+		{Type: AgentTypeAider},
+		{Type: AgentTypeOpencode},
+	}
+	if err := validateSpawnAgentTypes(builtins, nil); err != nil {
+		t.Fatalf("built-in agent validation error = %v", err)
+	}
+
+	pluginMap := map[string]plugins.AgentPlugin{
+		"custom": {Name: "custom", Command: "custom-agent"},
+	}
+	if err := validateSpawnAgentTypes([]FlatAgent{{Type: AgentType("custom")}}, pluginMap); err != nil {
+		t.Fatalf("plugin agent validation error = %v", err)
+	}
+
+	err := validateSpawnAgentTypes([]FlatAgent{{Type: AgentType("mystery")}}, pluginMap)
+	if err == nil || !strings.Contains(err.Error(), `unknown agent type "mystery"`) {
+		t.Fatalf("unknown agent validation error = %v", err)
+	}
+}
+
+func TestValidateSpawnPaneCapacity(t *testing.T) {
+	tests := []struct {
+		name       string
+		paneCount  int
+		startIdx   int
+		agentCount int
+		wantErr    string
+	}{
+		{name: "exact agent panes", paneCount: 2, agentCount: 2},
+		{name: "user pane plus exact agent panes", paneCount: 3, startIdx: 1, agentCount: 2},
+		{name: "extra panes", paneCount: 4, startIdx: 1, agentCount: 2},
+		{name: "one agent pane missing", paneCount: 2, startIdx: 1, agentCount: 2, wantErr: "requires 2 agent pane(s), but only 1 are available"},
+		{name: "reserved offset exceeds topology", paneCount: 0, startIdx: 1, agentCount: 1, wantErr: "requires 1 agent pane(s), but only 0 are available"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			panes := make([]tmux.Pane, tt.paneCount)
+			err := validateSpawnPaneCapacity(panes, tt.startIdx, tt.agentCount)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateSpawnPaneCapacity() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateSpawnPaneCapacity() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSpawnUnknownAgentTextReturnsErrorWithoutWarning(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = false
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	stdout, err := captureStdout(t, func() error {
+		return spawnSessionLogicContext(t.Context(), SpawnOptions{
+			Session: "spawn-unknown-text",
+			Agents:  []FlatAgent{{Type: AgentType("mystery"), Index: 1}},
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown agent type "mystery"`) {
+		t.Fatalf("spawn error = %v, want unknown agent failure", err)
+	}
+	if errors.Is(err, errJSONFailure) {
+		t.Fatalf("text spawn error = %v, must not use JSON failure sentinel", err)
+	}
+	if stdout != "" {
+		t.Fatalf("text spawn stdout = %q, want no warning or success output", stdout)
+	}
+}
+
+func TestSpawnUnknownAgentJSONProcessHelper(t *testing.T) {
+	if os.Getenv("NTM_SPAWN_UNKNOWN_JSON_HELPER") != "1" {
+		return
+	}
+	jsonOutput = true
+	err := spawnSessionLogicContext(t.Context(), SpawnOptions{
+		Session: "spawn-unknown-json",
+		Agents:  []FlatAgent{{Type: AgentType("mystery"), Index: 1}},
+	})
+	os.Exit(ExitCode(err))
+}
+
+func TestSpawnUnknownAgentJSONProcessContract(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSpawnUnknownAgentJSONProcessHelper$")
+	cmd.Env = append(os.Environ(), "NTM_SPAWN_UNKNOWN_JSON_HELPER=1")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("unknown-agent process error = %v, want exit 1; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "" {
+		t.Fatalf("unknown-agent process stderr = %q, want empty", got)
+	}
+
+	var envelope struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode single spawn failure envelope: %v; stdout=%q", err, stdout.String())
+	}
+	if envelope.Success || !strings.Contains(envelope.Error, `unknown agent type "mystery"`) {
+		t.Fatalf("unknown-agent failure envelope = %+v", envelope)
+	}
+	if strings.Contains(stdout.String(), "Warning") || strings.Contains(stdout.String(), "⚠") {
+		t.Fatalf("JSON stdout leaked human warning: %q", stdout.String())
+	}
+}
+
+func TestRunSpawnAssignmentTextContextFailuresAreTerminal(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = false
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	newSuccessfulOps := func() spawnAssignmentOps {
+		ops := defaultSpawnAssignmentOps()
+		ops.waitForReady = func(context.Context, string, time.Duration, time.Duration, spawnSessionObserver) (int, error) {
+			return 2, nil
+		}
+		ops.assign = func(context.Context, string, SpawnOptions) (*AssignOutputEnhanced, error) {
+			return &AssignOutputEnhanced{Strategy: "balanced"}, nil
+		}
+		return ops
+	}
+
+	t.Run("ready failure stops before assignment", func(t *testing.T) {
+		ops := newSuccessfulOps()
+		assignCalled := false
+		ops.waitForReady = func(context.Context, string, time.Duration, time.Duration, spawnSessionObserver) (int, error) {
+			return 1, errors.New("readiness unavailable")
+		}
+		ops.assign = func(context.Context, string, SpawnOptions) (*AssignOutputEnhanced, error) {
+			assignCalled = true
+			return &AssignOutputEnhanced{}, nil
+		}
+		stdout, err := captureStdout(t, func() error {
+			return runSpawnAssignmentTextContext(t.Context(), "demo", SpawnOptions{}, nil, nil, ops)
+		})
+		if err == nil || !strings.Contains(err.Error(), "ready wait failed: readiness unavailable") {
+			t.Fatalf("ready failure = %v", err)
+		}
+		if assignCalled {
+			t.Fatal("assignment ran after terminal readiness failure")
+		}
+		if !strings.Contains(stdout, "Waiting for agents to become ready") {
+			t.Fatalf("ready failure output = %q", stdout)
+		}
+	})
+
+	t.Run("init failure stops before assignment", func(t *testing.T) {
+		ops := newSuccessfulOps()
+		assignCalled := false
+		ops.assign = func(context.Context, string, SpawnOptions) (*AssignOutputEnhanced, error) {
+			assignCalled = true
+			return &AssignOutputEnhanced{}, nil
+		}
+		stdout, err := captureStdout(t, func() error {
+			return runSpawnAssignmentTextContext(
+				t.Context(), "demo", SpawnOptions{InitPrompt: "initialize"},
+				&scriptedSpawnObserver{}, &recordingSpawnDispatcher{}, ops,
+			)
+		})
+		if err == nil || !strings.Contains(err.Error(), "init prompt failed: observe init prompt targets: no scripted observation") {
+			t.Fatalf("init failure = %v", err)
+		}
+		if assignCalled {
+			t.Fatal("assignment ran after terminal init failure")
+		}
+		if !strings.Contains(stdout, "Sending init prompt to ready agents") {
+			t.Fatalf("init failure output = %q", stdout)
+		}
+	})
+
+	t.Run("assignment failure returns error", func(t *testing.T) {
+		ops := newSuccessfulOps()
+		ops.assign = func(context.Context, string, SpawnOptions) (*AssignOutputEnhanced, error) {
+			return nil, errors.New("planner unavailable")
+		}
+		stdout, err := captureStdout(t, func() error {
+			return runSpawnAssignmentTextContext(t.Context(), "demo", SpawnOptions{}, nil, nil, ops)
+		})
+		if err == nil || !strings.Contains(err.Error(), "assignment failed: planner unavailable") {
+			t.Fatalf("assignment failure = %v", err)
+		}
+		if !strings.Contains(stdout, "Assigning work to agents") {
+			t.Fatalf("assignment failure output = %q", stdout)
+		}
+	})
+
+	t.Run("cancellation remains classifiable", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		stdout, err := captureStdout(t, func() error {
+			return runSpawnAssignmentTextContext(ctx, "demo", SpawnOptions{}, nil, nil, newSuccessfulOps())
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled assignment error = %v, want context cancellation", err)
+		}
+		if stdout != "" {
+			t.Fatalf("canceled assignment stdout = %q, want no phase output", stdout)
+		}
+	})
 }
 
 func TestNewInternalMonitorCommand_ValidatesSessionAndExecutable(t *testing.T) {
@@ -171,7 +436,7 @@ func TestWaitForSpawnSetupCompletion_Interrupted(t *testing.T) {
 	sigChan := make(chan os.Signal, 1)
 	sigChan <- os.Interrupt
 
-	err := waitForSpawnSetupCompletion(setupDone, sigChan, true)
+	err := waitForSpawnSetupCompletionContext(t.Context(), setupDone, sigChan, true)
 	if err == nil {
 		t.Fatal("expected interrupt error")
 	}
@@ -185,8 +450,8 @@ func TestWaitForSpawnSetupCompletion_Completes(t *testing.T) {
 	setupDone := make(chan struct{})
 	close(setupDone)
 
-	if err := waitForSpawnSetupCompletion(setupDone, make(chan os.Signal), true); err != nil {
-		t.Fatalf("waitForSpawnSetupCompletion() error = %v, want nil", err)
+	if err := waitForSpawnSetupCompletionContext(t.Context(), setupDone, make(chan os.Signal), true); err != nil {
+		t.Fatalf("waitForSpawnSetupCompletionContext() error = %v, want nil", err)
 	}
 }
 
@@ -244,7 +509,7 @@ func TestSpawnSessionLogic(t *testing.T) {
 		CCCount:  1,
 		UserPane: true,
 	}
-	err = spawnSessionLogic(opts)
+	err = spawnSessionLogicContext(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
@@ -534,7 +799,7 @@ func TestPreflightOllamaSpawn_ModelPresent(t *testing.T) {
 	defer func() { jsonOutput = oldJSON }()
 	jsonOutput = true
 
-	host, err := preflightOllamaSpawn(SpawnOptions{
+	host, err := preflightOllamaSpawnContext(t.Context(), SpawnOptions{
 		Agents:     []FlatAgent{{Type: AgentTypeOllama, Index: 1, Model: "codellama:latest"}},
 		LocalHost:  server.URL,
 		LocalModel: "codellama:latest",
@@ -568,7 +833,7 @@ func TestPreflightOllamaSpawn_MissingModel_JSONModeErrors(t *testing.T) {
 	defer func() { jsonOutput = oldJSON }()
 	jsonOutput = true
 
-	_, err := preflightOllamaSpawn(SpawnOptions{
+	_, err := preflightOllamaSpawnContext(t.Context(), SpawnOptions{
 		Agents:    []FlatAgent{{Type: AgentTypeOllama, Index: 1, Model: "codellama:latest"}},
 		LocalHost: server.URL,
 	})
@@ -605,7 +870,7 @@ func TestPreflightOllamaSpawn_MissingModel_TextModePullsOnConfirm(t *testing.T) 
 	jsonOutput = false
 
 	withStdinInput(t, "y\n", func() {
-		host, err := preflightOllamaSpawn(SpawnOptions{
+		host, err := preflightOllamaSpawnContext(t.Context(), SpawnOptions{
 			Agents:    []FlatAgent{{Type: AgentTypeOllama, Index: 1, Model: "deepseek-coder:6.7b"}},
 			LocalHost: server.URL,
 		})
@@ -638,7 +903,7 @@ func TestPreflightOllamaSpawn_MissingModel_TextModeDecline(t *testing.T) {
 	jsonOutput = false
 
 	withStdinInput(t, "n\n", func() {
-		_, err := preflightOllamaSpawn(SpawnOptions{
+		_, err := preflightOllamaSpawnContext(t.Context(), SpawnOptions{
 			Agents:    []FlatAgent{{Type: AgentTypeOllama, Index: 1, Model: "deepseek-coder:6.7b"}},
 			LocalHost: server.URL,
 		})
@@ -730,7 +995,7 @@ func TestSpawnSessionLogic_Ollama(t *testing.T) {
 		AiderCount:    0,
 	}
 
-	if err := spawnSessionLogic(opts); err != nil {
+	if err := spawnSessionLogicContext(t.Context(), opts); err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}
 

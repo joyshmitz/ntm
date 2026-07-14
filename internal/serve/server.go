@@ -3642,7 +3642,7 @@ func (s *Server) handleAgentSpawnV1(w http.ResponseWriter, r *http.Request) {
 		WaitReady: req.WaitReady,
 	}
 
-	result, err := robot.GetSpawn(opts, nil)
+	result, err := robot.GetSpawn(r.Context(), opts, nil)
 	if err != nil {
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
 		return

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,23 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/scanner"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
+)
+
+type scanRunner interface {
+	Scan(context.Context, string, scanner.ScanOptions) (*scanner.ScanResult, error)
+}
+
+var (
+	scanIsAvailable = scanner.IsAvailable
+	newScanRunner   = func() (scanRunner, error) {
+		if cfg == nil {
+			return scanner.New()
+		}
+		return scanner.NewScannerWithConfig(&cfg.Scanner)
+	}
+	createBeadsFromScan = scanner.CreateBeadsFromFindings
+	updateBeadsFromScan = scanner.UpdateBeadsFromFindings
+	notifyScanResults   = scanner.NotifyScanResults
 )
 
 func newScanCmd() *cobra.Command {
@@ -146,22 +164,33 @@ func runScan(path string, opts scanner.ScanOptions, createBeads, updateBeads, no
 	t := theme.Current()
 
 	// Check if UBS is available
-	if !scanner.IsAvailable() {
+	if !scanIsAvailable() {
+		cause := scanner.ErrNotInstalled
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-				"error":     "ubs not installed",
-				"available": false,
-			})
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success":    false,
+				"error":      "ubs not installed",
+				"error_code": "DEPENDENCY_MISSING",
+				"available":  false,
+			}, cause)
 		}
 		fmt.Printf("%s✗%s UBS not installed\n", colorize(t.Error), "\033[0m")
 		fmt.Printf("  Install: %shttps://github.com/nightowlai/ubs%s\n", "\033[2m", "\033[0m")
-		return nil
+		return cause
 	}
 
 	// Create scanner
-	s, err := scanner.NewScannerWithConfig(&cfg.Scanner)
+	s, err := newScanRunner()
 	if err != nil {
-		return fmt.Errorf("creating scanner: %w", err)
+		cause := fmt.Errorf("creating scanner: %w", err)
+		if jsonOutput {
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success":    false,
+				"error":      cause.Error(),
+				"error_code": "SCAN_SETUP_FAILED",
+			}, cause)
+		}
+		return cause
 	}
 
 	// Show scanning message if not JSON output
@@ -173,37 +202,48 @@ func runScan(path string, opts scanner.ScanOptions, createBeads, updateBeads, no
 	ctx := context.Background()
 	result, err := s.Scan(ctx, path, opts)
 	if err != nil {
+		cause := fmt.Errorf("scan failed: %w", err)
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-				"error": err.Error(),
-			})
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success":    false,
+				"error":      cause.Error(),
+				"error_code": "SCAN_FAILED",
+			}, cause)
 		}
-		return fmt.Errorf("scan failed: %w", err)
+		return cause
 	}
 
 	// Run beads bridge if requested
 	var bridgeResult *scanner.BridgeResult
 	var updateResult *scanner.BridgeResult
+	var terminalFailures []error
 	if createBeads && len(result.Findings) > 0 {
-		bridgeResult, err = scanner.CreateBeadsFromFindings(result, bridgeCfg)
+		bridgeResult, err = createBeadsFromScan(result, bridgeCfg)
 		if err != nil {
+			terminalFailures = append(terminalFailures, fmt.Errorf("creating beads: %w", err))
 			if !jsonOutput {
 				fmt.Printf("%s✗%s Beads creation failed: %v\n", colorize(t.Error), "\033[0m", err)
 			}
+		} else if bridgeResult != nil && bridgeResult.Errors > 0 {
+			terminalFailures = append(terminalFailures, fmt.Errorf("creating beads: %d operation(s) failed", bridgeResult.Errors))
 		}
 	}
 	if updateBeads {
-		updateResult, err = scanner.UpdateBeadsFromFindings(result, bridgeCfg)
+		updateResult, err = updateBeadsFromScan(result, bridgeCfg)
 		if err != nil {
+			terminalFailures = append(terminalFailures, fmt.Errorf("updating beads: %w", err))
 			if !jsonOutput {
 				fmt.Printf("%s✗%s Beads update failed: %v\n", colorize(t.Error), "\033[0m", err)
 			}
+		} else if updateResult != nil && updateResult.Errors > 0 {
+			terminalFailures = append(terminalFailures, fmt.Errorf("updating beads: %d operation(s) failed", updateResult.Errors))
 		}
 	}
 
 	// Notify agents if requested
 	if notifyAgents && (result.HasCritical() || result.HasWarning()) {
-		if err := scanner.NotifyScanResults(ctx, result, path); err != nil {
+		if err := notifyScanResults(ctx, result, path); err != nil {
+			terminalFailures = append(terminalFailures, fmt.Errorf("notifying agents: %w", err))
 			if !jsonOutput {
 				fmt.Printf("⚠ Notification failed: %v\n", err)
 			}
@@ -212,10 +252,17 @@ func runScan(path string, opts scanner.ScanOptions, createBeads, updateBeads, no
 		}
 	}
 
+	if result.HasCritical() {
+		terminalFailures = append(terminalFailures, errors.New("scan found critical issues"))
+	} else if opts.FailOnWarning && result.HasWarning() {
+		terminalFailures = append(terminalFailures, errors.New("scan found warnings and --fail-on-warning is set"))
+	}
+
 	// Output results
 	if jsonOutput {
 		output := map[string]interface{}{
-			"scan": result,
+			"success": len(terminalFailures) == 0,
+			"scan":    result,
 		}
 		if bridgeResult != nil {
 			output["beads_created"] = bridgeResult
@@ -253,6 +300,12 @@ func runScan(path string, opts scanner.ScanOptions, createBeads, updateBeads, no
 			}
 		}
 
+		if len(terminalFailures) > 0 {
+			cause := errors.Join(terminalFailures...)
+			output["error"] = cause.Error()
+			output["error_code"] = "SCAN_FAILED"
+			return emitJSONFailureEnvelopeWithCause(output, cause)
+		}
 		return json.NewEncoder(os.Stdout).Encode(output)
 	}
 
@@ -321,15 +374,7 @@ func runScan(path string, opts scanner.ScanOptions, createBeads, updateBeads, no
 		}
 	}
 
-	// Exit with error if requested and issues found
-	if opts.FailOnWarning && result.HasWarning() {
-		os.Exit(1)
-	}
-	if result.HasCritical() {
-		os.Exit(1)
-	}
-
-	return nil
+	return errors.Join(terminalFailures...)
 }
 
 func printScanResults(t theme.Theme, result *scanner.ScanResult, showWarnings bool) {

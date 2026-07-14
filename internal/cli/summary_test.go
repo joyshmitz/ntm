@@ -204,6 +204,7 @@ func TestResolveProjectDir_UsesConfiguredProjectPrefix(t *testing.T) {
 
 func TestResolveProjectDir_ExplicitRejectsWorkspaceFallback(t *testing.T) {
 	isolateSessionAgentStorage(t)
+	session := fmt.Sprintf("missing-summary-project-%d", time.Now().UnixNano())
 
 	origCfg := cfg
 	origWd, _ := os.Getwd()
@@ -222,7 +223,7 @@ func TestResolveProjectDir_ExplicitRejectsWorkspaceFallback(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	_, err := resolveProjectDir("ntm", wd, true)
+	_, err := resolveProjectDir(session, wd, true)
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}

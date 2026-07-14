@@ -2,6 +2,7 @@ package output
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -82,8 +83,18 @@ func TestDetectFormat(t *testing.T) {
 
 func TestErrorResponse(t *testing.T) {
 	err := NewError("something failed")
+	if err.Success {
+		t.Error("NewError().Success = true, want false")
+	}
 	if err.Error != "something failed" {
 		t.Errorf("NewError().Error = %q, want %q", err.Error, "something failed")
+	}
+	encoded, marshalErr := json.Marshal(err)
+	if marshalErr != nil {
+		t.Fatalf("json.Marshal(NewError()) error = %v", marshalErr)
+	}
+	if !bytes.Contains(encoded, []byte(`"success":false`)) {
+		t.Fatalf("json.Marshal(NewError()) = %s, want explicit success:false", encoded)
 	}
 
 	err = NewErrorWithCode("NOT_FOUND", "session not found")

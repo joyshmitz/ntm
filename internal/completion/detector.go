@@ -3,12 +3,15 @@ package completion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
@@ -34,42 +37,52 @@ const (
 
 // CompletionEvent represents a detected completion
 type CompletionEvent struct {
-	Pane       int             `json:"pane"`
-	PaneID     string          `json:"pane_id,omitempty"`
-	PaneTarget string          `json:"pane_target,omitempty"`
-	AgentType  string          `json:"agent_type"`
-	BeadID     string          `json:"bead_id"`
-	Method     DetectionMethod `json:"method"`
-	Timestamp  time.Time       `json:"timestamp"`
-	Duration   time.Duration   `json:"duration"`    // How long agent worked
-	Output     string          `json:"output"`      // Last N lines (for debugging)
-	IsFailed   bool            `json:"is_failed"`   // True if failure detected
-	FailReason string          `json:"fail_reason"` // Reason for failure
+	EventID       string          `json:"event_id,omitempty"`
+	ConsumerToken string          `json:"-"`
+	LeaseDuration time.Duration   `json:"-"`
+	Pane          int             `json:"pane"`
+	PaneID        string          `json:"pane_id,omitempty"`
+	PaneTarget    string          `json:"pane_target,omitempty"`
+	AgentType     string          `json:"agent_type"`
+	BeadID        string          `json:"bead_id"`
+	Method        DetectionMethod `json:"method"`
+	Timestamp     time.Time       `json:"timestamp"`
+	Duration      time.Duration   `json:"duration"`    // How long agent worked
+	Output        string          `json:"output"`      // Last N lines (for debugging)
+	IsFailed      bool            `json:"is_failed"`   // True if failure detected
+	FailReason    string          `json:"fail_reason"` // Reason for failure
 }
+
+// TerminalReconciler releases the durable external handles recorded on a
+// pending terminal assignment and completes its local terminal transition.
+// It must return applied=true only after the ledger row is terminal.
+type TerminalReconciler func(context.Context, *assignment.Assignment) (bool, error)
 
 // DetectionConfig configures the detector behavior
 type DetectionConfig struct {
-	PollInterval      time.Duration // Interval for bead status polling (default 5s)
-	IdleThreshold     time.Duration // Duration of inactivity to consider complete (default 120s)
-	RetryOnError      bool          // Retry failed checks (default true)
-	RetryInterval     time.Duration // Time between retries (default 10s)
-	MaxRetries        int           // Max retries before giving up (default 3)
-	DedupWindow       time.Duration // Prevent duplicate events (default 5s)
-	GracefulDegrading bool          // Fall back to lesser methods (default true)
-	CaptureLines      int           // Lines to capture for pattern matching (default 50)
+	PollInterval            time.Duration // Interval for bead status polling (default 5s)
+	IdleThreshold           time.Duration // Duration of inactivity to consider complete (default 120s)
+	RetryOnError            bool          // Retry failed checks (default true)
+	RetryInterval           time.Duration // Time between retries (default 10s)
+	MaxRetries              int           // Max retries before giving up (default 3)
+	DedupWindow             time.Duration // Prevent duplicate events (default 5s)
+	CompletionLeaseDuration time.Duration // Durable single-consumer lease (default 30s)
+	GracefulDegrading       bool          // Fall back to lesser methods (default true)
+	CaptureLines            int           // Lines to capture for pattern matching (default 50)
 }
 
 // DefaultConfig returns sensible default configuration
 func DefaultConfig() DetectionConfig {
 	return DetectionConfig{
-		PollInterval:      5 * time.Second,
-		IdleThreshold:     120 * time.Second,
-		RetryOnError:      true,
-		RetryInterval:     10 * time.Second,
-		MaxRetries:        3, // Canonical default: config.RetryConfig.Completion.MaxAttempts
-		DedupWindow:       5 * time.Second,
-		GracefulDegrading: true,
-		CaptureLines:      50,
+		PollInterval:            5 * time.Second,
+		IdleThreshold:           120 * time.Second,
+		RetryOnError:            true,
+		RetryInterval:           10 * time.Second,
+		MaxRetries:              3, // Canonical default: config.RetryConfig.Completion.MaxAttempts
+		DedupWindow:             5 * time.Second,
+		CompletionLeaseDuration: 30 * time.Second,
+		GracefulDegrading:       true,
+		CaptureLines:            50,
 	}
 }
 
@@ -81,11 +94,13 @@ type CompletionDetector struct {
 	Patterns    []*regexp.Regexp // Completion patterns
 	FailPattern []*regexp.Regexp // Failure patterns
 
-	mu              sync.RWMutex
-	activityTracker map[string]*activityState // durable pane target -> activity state
-	recentEvents    map[string]time.Time      // assignment attempt key -> last event time (for dedup)
-	brAvailable     *bool                     // nil = unknown, cached after first check
-	observer        *statuspkg.SessionObserver
+	mu                 sync.RWMutex
+	activityTracker    map[string]*activityState // durable pane target -> activity state
+	recentEvents       map[string]time.Time      // assignment attempt key -> last event time (for dedup)
+	brAvailable        *bool                     // nil = unknown, cached after first check
+	observer           *statuspkg.SessionObserver
+	terminalReconciler TerminalReconciler
+	consumerToken      string
 }
 
 // activityState tracks output activity per pane
@@ -109,6 +124,8 @@ var defaultCompletionPatterns = []string{
 	`(?i)finished\s+working`,
 }
 
+var completionConsumerFallbackCounter uint64
+
 // Default failure patterns (case-insensitive)
 var defaultFailurePatterns = []string{
 	`(?i)unable\s+to\s+complete`,
@@ -128,6 +145,16 @@ func New(session string, store *assignment.AssignmentStore) *CompletionDetector 
 
 // NewWithConfig creates a new CompletionDetector with custom configuration
 func NewWithConfig(session string, store *assignment.AssignmentStore, cfg DetectionConfig) *CompletionDetector {
+	if cfg.CompletionLeaseDuration <= 0 {
+		cfg.CompletionLeaseDuration = DefaultConfig().CompletionLeaseDuration
+	}
+	if raw := strings.TrimSpace(os.Getenv("NTM_TEST_COMPLETION_LEASE_DURATION")); raw != "" {
+		if duration, err := time.ParseDuration(raw); err == nil && duration > 0 {
+			cfg.CompletionLeaseDuration = duration
+		} else {
+			slog.Warn("ignoring invalid completion lease E2E override", "value", raw)
+		}
+	}
 	d := &CompletionDetector{
 		Session:         session,
 		Config:          cfg,
@@ -135,6 +162,7 @@ func NewWithConfig(session string, store *assignment.AssignmentStore, cfg Detect
 		activityTracker: make(map[string]*activityState),
 		recentEvents:    make(map[string]time.Time),
 		observer:        statuspkg.NewSessionObserver(statuspkg.NewDetector()),
+		consumerToken:   newCompletionConsumerToken(),
 	}
 
 	// Compile default patterns
@@ -150,6 +178,25 @@ func NewWithConfig(session string, store *assignment.AssignmentStore, cfg Detect
 	}
 
 	return d
+}
+
+func newCompletionConsumerToken() string {
+	token, err := assignment.NewAssignmentIdempotencyKey()
+	if err == nil {
+		return "completion/" + token
+	}
+	return fmt.Sprintf("completion/%d/%d/%d", os.Getpid(), time.Now().UTC().UnixNano(), atomic.AddUint64(&completionConsumerFallbackCounter, 1))
+}
+
+// SetTerminalReconciler configures the external release boundary used after a
+// completion event has durably established its exact-generation barrier.
+func (d *CompletionDetector) SetTerminalReconciler(reconciler TerminalReconciler) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.terminalReconciler = reconciler
+	d.mu.Unlock()
 }
 
 // AddPattern adds a custom completion pattern
@@ -220,9 +267,42 @@ func (d *CompletionDetector) checkAll(ctx context.Context, events chan<- Complet
 	if err := d.Store.Load(); err != nil {
 		slog.Warn("completion detector failed to reload assignment store; using in-memory view", "session", d.Session, "error", err)
 	}
+	for _, terminal := range d.Store.ListPendingCompletionEvents() {
+		event, eventErr := completionEventFromDurableTerminal(terminal, nil)
+		if eventErr != nil {
+			slog.Warn("completion detector rejected pending completion event", "bead", terminal.BeadID, "error", eventErr)
+			continue
+		}
+		if !d.emitCompletionEvent(ctx, terminal, event, events) {
+			return
+		}
+	}
 
 	assignments := d.Store.ListActive()
 	for _, a := range assignments {
+		if assignmentHasPendingTerminalOutcome(a) {
+			event := completionEventFromPendingTerminal(a)
+			applied, reconcileErr := d.reconcileTerminalBarrier(ctx, a)
+			if reconcileErr != nil {
+				slog.Warn("failed to resume assignment terminal reconciliation", "bead", a.BeadID, "error", reconcileErr)
+				if ctx.Err() != nil {
+					return
+				}
+				continue
+			}
+			if applied {
+				terminal := d.Store.Get(a.BeadID)
+				event, reconcileErr = completionEventFromDurableTerminal(terminal, event)
+				if reconcileErr != nil {
+					slog.Warn("completion detector rejected reconciled completion event", "bead", a.BeadID, "error", reconcileErr)
+					continue
+				}
+				if !d.emitCompletionEvent(ctx, terminal, event, events) {
+					return
+				}
+			}
+			continue
+		}
 		if !assignmentEligibleForCompletionScan(a) {
 			continue
 		}
@@ -230,35 +310,210 @@ func (d *CompletionDetector) checkAll(ctx context.Context, events chan<- Complet
 		case <-ctx.Done():
 			return
 		default:
-			if event := d.checkAssignment(ctx, a); event != nil {
-				// Check dedup window
-				d.mu.Lock()
-				now := time.Now()
-				if !d.recordEventLocked(a, now) {
-					d.mu.Unlock()
+			event, checkErr := d.checkAssignment(ctx, a)
+			if checkErr != nil {
+				slog.Warn("completion detector rejected assignment", "bead", a.BeadID, "error", checkErr)
+				continue
+			}
+			if event != nil {
+				applied, persistErr := d.persistCompletionEvent(ctx, a, event)
+				if persistErr != nil {
+					slog.Warn("failed to persist assignment completion", "bead", a.BeadID, "error", persistErr)
+					if ctx.Err() != nil {
+						return
+					}
 					continue
 				}
-				delete(d.activityTracker, assignmentTargetKey(a))
-				d.mu.Unlock()
-
-				// Update assignment store
-				if event.IsFailed {
-					if err := d.Store.MarkFailed(a.BeadID, event.FailReason); err != nil {
-						slog.Warn("failed to mark assignment as failed", "bead", a.BeadID, "error", err)
-					}
-				} else {
-					if err := d.Store.MarkCompleted(a.BeadID); err != nil {
-						slog.Warn("failed to mark assignment as completed", "bead", a.BeadID, "error", err)
-					}
+				if !applied {
+					continue
 				}
 
-				select {
-				case events <- *event:
-				case <-ctx.Done():
+				terminal := d.Store.Get(a.BeadID)
+				event, persistErr = completionEventFromDurableTerminal(terminal, event)
+				if persistErr != nil {
+					slog.Warn("completion detector rejected persisted completion event", "bead", a.BeadID, "error", persistErr)
+					continue
+				}
+				if !d.emitCompletionEvent(ctx, terminal, event, events) {
 					return
 				}
 			}
 		}
+	}
+}
+
+func (d *CompletionDetector) persistCompletionEvent(ctx context.Context, observed *assignment.Assignment, event *CompletionEvent) (bool, error) {
+	if d == nil || d.Store == nil || observed == nil || event == nil {
+		return false, nil
+	}
+	terminalStatus := assignment.StatusCompleted
+	reason := ""
+	if event.IsFailed {
+		terminalStatus = assignment.StatusFailed
+		reason = event.FailReason
+	}
+	barrier, applied, err := d.Store.BeginTerminalReconciliationWithCompletionEventIfCurrent(ctx, observed, terminalStatus, reason)
+	if err != nil || !applied {
+		return false, err
+	}
+	return d.reconcileTerminalBarrier(ctx, barrier)
+}
+
+func (d *CompletionDetector) reconcileTerminalBarrier(ctx context.Context, barrier *assignment.Assignment) (bool, error) {
+	if d == nil || d.Store == nil || !assignmentHasPendingTerminalOutcome(barrier) {
+		return false, nil
+	}
+	d.mu.RLock()
+	reconciler := d.terminalReconciler
+	d.mu.RUnlock()
+	if reconciler != nil {
+		applied, err := reconciler(ctx, barrier)
+		if err != nil || !applied {
+			return false, err
+		}
+		return d.terminalReconciliationFinished(barrier.BeadID)
+	}
+	if terminalReconciliationNeedsExternalCleanup(barrier) {
+		return false, nil
+	}
+	if _, err := d.Store.RecordClearLeasesReleased(ctx, barrier.BeadID); err != nil {
+		return false, err
+	}
+	if _, err := d.Store.RecordTerminalClaimReleased(ctx, barrier.BeadID); err != nil {
+		return false, err
+	}
+	if err := d.Store.CompleteTerminalReconciliation(ctx, barrier.BeadID, barrier.PendingTerminalStatus, barrier.PendingTerminalReason); err != nil {
+		return false, err
+	}
+	return d.terminalReconciliationFinished(barrier.BeadID)
+}
+
+func (d *CompletionDetector) terminalReconciliationFinished(beadID string) (bool, error) {
+	if err := d.Store.LoadStrict(); err != nil {
+		return false, fmt.Errorf("verify terminal reconciliation for %s: %w", beadID, err)
+	}
+	current := d.Store.Get(beadID)
+	return current != nil && (current.Status == assignment.StatusCompleted || current.Status == assignment.StatusFailed) && current.ClearState == assignment.ClearStateNone, nil
+}
+
+func terminalReconciliationNeedsExternalCleanup(current *assignment.Assignment) bool {
+	if current == nil {
+		return false
+	}
+	return strings.TrimSpace(current.ClaimActor) != "" || current.ReservationRequired ||
+		len(current.ReservationIDs) > 0 || len(current.ReservedPaths) > 0 ||
+		current.ReservationState == assignment.ReservationReserving || current.ReservationState == assignment.ReservationReserved ||
+		current.ReservationState == assignment.ReservationUnknown
+}
+
+func assignmentHasPendingTerminalOutcome(current *assignment.Assignment) bool {
+	return current != nil && current.ClearState != assignment.ClearStateNone &&
+		(current.PendingTerminalStatus == assignment.StatusCompleted || current.PendingTerminalStatus == assignment.StatusFailed)
+}
+
+func completionEventFromPendingTerminal(current *assignment.Assignment) *CompletionEvent {
+	startTime := current.AssignedAt
+	if current.StartedAt != nil {
+		startTime = *current.StartedAt
+	}
+	return &CompletionEvent{
+		EventID:       current.PendingCompletionEventID,
+		ConsumerToken: strings.TrimSpace(current.CompletionConsumerToken),
+		Pane:          current.Pane,
+		PaneID:        strings.TrimSpace(current.OccupancyKey),
+		PaneTarget:    strings.TrimSpace(current.DispatchTarget),
+		AgentType:     current.AgentType,
+		BeadID:        current.BeadID,
+		Timestamp:     time.Now(),
+		Duration:      time.Since(startTime),
+		IsFailed:      current.PendingTerminalStatus == assignment.StatusFailed,
+		FailReason:    current.PendingTerminalReason,
+	}
+}
+
+func completionEventFromDurableTerminal(current *assignment.Assignment, event *CompletionEvent) (*CompletionEvent, error) {
+	if current == nil {
+		return nil, nil
+	}
+	if event == nil {
+		event = &CompletionEvent{}
+	}
+	startTime := current.AssignedAt
+	if current.StartedAt != nil {
+		startTime = *current.StartedAt
+	}
+	paneID, err := assignment.CanonicalPaneIdentity(current)
+	if err != nil {
+		return nil, err
+	}
+	event.EventID = strings.TrimSpace(current.PendingCompletionEventID)
+	event.ConsumerToken = strings.TrimSpace(current.CompletionConsumerToken)
+	event.Pane = current.Pane
+	event.PaneID = paneID
+	event.PaneTarget = strings.TrimSpace(current.DispatchTarget)
+	event.AgentType = current.AgentType
+	event.BeadID = current.BeadID
+	event.IsFailed = current.Status == assignment.StatusFailed
+	event.FailReason = current.FailReason
+	detectedAt := event.Timestamp
+	if current.CompletionDetectedAt != nil {
+		detectedAt = *current.CompletionDetectedAt
+	} else if detectedAt.IsZero() {
+		detectedAt = time.Now()
+	}
+	event.Timestamp = detectedAt
+	event.Duration = detectedAt.Sub(startTime)
+	if event.Duration < 0 {
+		event.Duration = 0
+	}
+	return event, nil
+}
+
+func (d *CompletionDetector) emitCompletionEvent(ctx context.Context, observed *assignment.Assignment, event *CompletionEvent, events chan<- CompletionEvent) bool {
+	if event == nil || observed == nil || strings.TrimSpace(event.EventID) == "" ||
+		(observed.Status != assignment.StatusCompleted && observed.Status != assignment.StatusFailed) ||
+		strings.TrimSpace(observed.PendingCompletionEventID) != strings.TrimSpace(event.EventID) {
+		return true
+	}
+	now := time.Now()
+	d.mu.Lock()
+	recentlyEmitted := d.eventRecordedRecentlyLocked(observed, now)
+	d.mu.Unlock()
+	if recentlyEmitted {
+		return true
+	}
+	claimed, acquired, claimErr := d.Store.ClaimPendingCompletionEvent(
+		ctx, observed.BeadID, event.EventID, d.consumerToken, d.Config.CompletionLeaseDuration,
+	)
+	if claimErr != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		slog.Warn("completion detector failed to claim pending event", "bead", observed.BeadID, "event_id", event.EventID, "error", claimErr)
+		return true
+	}
+	if !acquired {
+		return true
+	}
+	observed = claimed
+	event.ConsumerToken = d.consumerToken
+	event.LeaseDuration = d.Config.CompletionLeaseDuration
+	d.mu.Lock()
+	if !d.recordEventLocked(observed, now) {
+		d.mu.Unlock()
+		return true
+	}
+	delete(d.activityTracker, assignmentTargetKey(observed))
+	d.mu.Unlock()
+
+	select {
+	case events <- *event:
+		return true
+	case <-ctx.Done():
+		d.mu.Lock()
+		delete(d.recentEvents, assignmentAttemptKey(observed))
+		d.mu.Unlock()
+		return false
 	}
 }
 
@@ -270,7 +525,10 @@ func assignmentEligibleForCompletionScan(a *assignment.Assignment) bool {
 }
 
 // checkAssignment checks a single assignment for completion
-func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.Assignment) *CompletionEvent {
+func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.Assignment) (*CompletionEvent, error) {
+	if _, err := assignment.CanonicalPaneIdentity(a); err != nil {
+		return nil, err
+	}
 	startTime := a.AssignedAt
 	if a.StartedAt != nil {
 		startTime = *a.StartedAt
@@ -279,7 +537,7 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 	// 1. Check if pane exists
 	paneActivities, err := tmux.GetPanesWithActivityContext(ctx, d.Session)
 	if err != nil {
-		return nil // Can't check, try later
+		return nil, nil // Can't check, try later
 	}
 	panes := make([]tmux.Pane, 0, len(paneActivities))
 	for _, activity := range paneActivities {
@@ -288,6 +546,9 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 
 	pane, err := resolveAssignmentPane(d.Session, a, panes)
 	if err != nil {
+		if errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) {
+			return nil, err
+		}
 		return &CompletionEvent{
 			Pane:       a.Pane,
 			PaneTarget: strings.TrimSpace(a.DispatchTarget),
@@ -298,7 +559,7 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 			Duration:   time.Since(startTime),
 			IsFailed:   true,
 			FailReason: fmt.Sprintf("pane target cannot be resolved safely: %v", err),
-		}
+		}, nil
 	}
 	target := pane.ID
 	if target == "" {
@@ -319,7 +580,7 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 				Timestamp:  time.Now(),
 				Duration:   time.Since(startTime),
 				Output:     truncateOutput(output, 500),
-			}
+			}, nil
 		}
 	}
 
@@ -327,7 +588,7 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 	output, err := tmux.CapturePaneOutputContext(ctx, target, d.Config.CaptureLines)
 	if err != nil {
 		// Can't capture, rely on bead polling
-		return nil
+		return nil, nil
 	}
 	paneActivity := tmux.PaneActivity{Pane: pane}
 	for _, activity := range paneActivities {
@@ -338,9 +599,10 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 	}
 	paneObservation := d.observer.ObservePaneCapture(d.Session, paneActivity, output, nil)
 	if assignmentObservationShowsWorking(a, paneObservation) {
-		if err := d.Store.MarkWorking(a.BeadID); err != nil {
+		applied, err := d.Store.MarkWorkingIfCurrent(ctx, a)
+		if err != nil {
 			slog.Warn("completion detector failed to mark assignment working", "bead", a.BeadID, "pane_id", pane.ID, "error", err)
-		} else {
+		} else if applied {
 			a.Status = assignment.StatusWorking
 		}
 	}
@@ -359,7 +621,7 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 			Output:     truncateOutput(output, 500),
 			IsFailed:   true,
 			FailReason: reason,
-		}
+		}, nil
 	}
 
 	// 5. Check for completion patterns — but ONLY as a SUCCESS when an
@@ -386,7 +648,7 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 					Timestamp:  time.Now(),
 					Duration:   time.Since(startTime),
 					Output:     truncateOutput(output, 500),
-				}
+				}, nil
 			}
 		}
 		// Pattern matched but the bead is not (yet) closed: treat as not-done.
@@ -408,15 +670,15 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 				event.Method = MethodBeadClosed
 				event.IsFailed = false
 				event.FailReason = ""
-				return event
+				return event, nil
 			}
 		}
 		event.IsFailed = true
 		event.FailReason = fmt.Sprintf("agent idle for %s with bead %s still open (stalled or crashed)", d.Config.IdleThreshold, a.BeadID)
-		return event
+		return event, nil
 	}
 
-	return nil
+	return nil, nil
 }
 
 func assignmentObservationShowsWorking(a *assignment.Assignment, observation statuspkg.PaneObservation) bool {
@@ -445,6 +707,9 @@ func assignmentAttemptKey(a *assignment.Assignment) string {
 	if a == nil {
 		return ""
 	}
+	if idempotencyKey := strings.TrimSpace(a.IdempotencyKey); idempotencyKey != "" {
+		return fmt.Sprintf("%s:%s:%s", a.BeadID, assignmentTargetKey(a), idempotencyKey)
+	}
 
 	timestamp := a.AssignedAt
 	if timestamp.IsZero() {
@@ -458,51 +723,26 @@ func assignmentAttemptKey(a *assignment.Assignment) string {
 }
 
 func assignmentTargetKey(a *assignment.Assignment) string {
-	if a == nil {
-		return ""
-	}
-	if target := strings.TrimSpace(a.OccupancyKey); target != "" {
-		return target
-	}
-	if target := strings.TrimSpace(a.DispatchTarget); target != "" {
-		return target
-	}
-	return fmt.Sprintf("legacy-pane-%d", a.Pane)
+	target, _ := assignment.CanonicalPaneIdentity(a)
+	return target
 }
 
 func resolveAssignmentPane(session string, a *assignment.Assignment, panes []tmux.Pane) (tmux.Pane, error) {
 	if a == nil {
 		return tmux.Pane{}, fmt.Errorf("assignment is required")
 	}
-	target := strings.TrimSpace(a.OccupancyKey)
-	if target == "" {
-		target = strings.TrimSpace(a.DispatchTarget)
+	target, err := assignment.CanonicalPaneIdentity(a)
+	if err != nil {
+		return tmux.Pane{}, err
 	}
 	if prefix := strings.TrimSpace(session) + ":"; target != "" && strings.HasPrefix(target, prefix) {
 		target = strings.TrimPrefix(target, prefix)
 	}
-	if target != "" {
-		resolved, err := tmux.ResolvePaneSelectors(panes, []string{target}, true)
-		if err != nil {
-			return tmux.Pane{}, err
-		}
-		return resolved[0], nil
+	resolved, err := tmux.ResolvePaneSelectors(panes, []string{target}, true)
+	if err != nil {
+		return tmux.Pane{}, err
 	}
-
-	var matches []tmux.Pane
-	for _, pane := range panes {
-		if pane.Index == a.Pane {
-			matches = append(matches, pane)
-		}
-	}
-	switch len(matches) {
-	case 0:
-		return tmux.Pane{}, fmt.Errorf("legacy pane index %d not found", a.Pane)
-	case 1:
-		return matches[0], nil
-	default:
-		return tmux.Pane{}, fmt.Errorf("legacy pane index %d is ambiguous across %d windows; persist pane ID or window.pane", a.Pane, len(matches))
-	}
+	return resolved[0], nil
 }
 
 func (d *CompletionDetector) pruneExpiredRecentEventsLocked(now time.Time) {
@@ -527,30 +767,47 @@ func (d *CompletionDetector) recordEventLocked(a *assignment.Assignment, now tim
 	return true
 }
 
-// CheckNow performs an immediate check for a specific pane
-func (d *CompletionDetector) CheckNow(pane int) (*CompletionEvent, error) {
+func (d *CompletionDetector) eventRecordedRecentlyLocked(a *assignment.Assignment, now time.Time) bool {
+	d.pruneExpiredRecentEventsLocked(now)
+	lastEvent, exists := d.recentEvents[assignmentAttemptKey(a)]
+	return exists && now.Sub(lastEvent) < d.Config.DedupWindow
+}
+
+// CheckNow performs an immediate check for one canonical pane identity.
+func (d *CompletionDetector) CheckNow(target string) (*CompletionEvent, error) {
 	if d.Store == nil {
 		return nil, fmt.Errorf("no assignment store configured")
 	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, fmt.Errorf("canonical pane target is required")
+	}
 
-	// Find assignment for this pane
+	// Find the assignment for this exact durable pane identity.
 	var targets []*assignment.Assignment
 	for _, a := range d.Store.ListActive() {
-		if a.Pane == pane {
+		if !assignmentEligibleForCompletionScan(a) {
+			continue
+		}
+		identity, err := assignment.CanonicalPaneIdentity(a)
+		if err != nil {
+			return nil, err
+		}
+		if identity == target {
 			targets = append(targets, a)
 		}
 	}
 
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("no active assignment for pane %d", pane)
+		return nil, fmt.Errorf("no active assignment for pane %s", target)
 	}
 	if len(targets) > 1 {
-		return nil, fmt.Errorf("pane index %d has %d active assignments; use durable pane targets", pane, len(targets))
+		return nil, fmt.Errorf("canonical pane %s has %d active assignments", target, len(targets))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return d.checkAssignment(ctx, targets[0]), nil
+	return d.checkAssignment(ctx, targets[0])
 }
 
 // isBrAvailable checks if the br CLI is available (cached)

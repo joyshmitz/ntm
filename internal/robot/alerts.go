@@ -8,8 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -507,9 +507,9 @@ func (l *LogChannel) Send(ctx context.Context, alert *Alert) error {
 		return err
 	}
 
-	// Write directly to stderr to avoid modifying global log state
-	// which would be a race condition with other log users
-	fmt.Fprintf(os.Stderr, "[ALERT] %s\n", string(payload))
+	// Route through the standard log writer so robot-mode execution can suppress
+	// diagnostics without changing alert delivery for interactive commands.
+	fmt.Fprintf(log.Writer(), "[ALERT] %s\n", string(payload))
 	return nil
 }
 

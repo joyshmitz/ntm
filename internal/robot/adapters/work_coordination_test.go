@@ -3,8 +3,11 @@ package adapters
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -566,6 +569,83 @@ func TestCollectCoordinationContinuesWhenAgentListingFails(t *testing.T) {
 	}
 	if !strings.Contains(section.Reason, "list_agents failed") {
 		t.Fatalf("reason = %q, want list_agents failure context", section.Reason)
+	}
+}
+
+func TestWorkCoordinationAdapterAgentMailAvailabilityHonorsCanceledContext(t *testing.T) {
+	requests := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	adapter := NewWorkCoordinationAdapter(WorkCoordinationAdapterConfig{
+		ProjectDir:      t.TempDir(),
+		AgentMailClient: agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/")),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if adapter.Available(ctx) {
+		t.Fatal("adapter reported available for canceled context")
+	}
+	section := adapter.collectCoordination(ctx, time.Now())
+	if section == nil || section.Available || !strings.Contains(section.Reason, "agent mail unavailable") {
+		t.Fatalf("canceled coordination section = %+v", section)
+	}
+	select {
+	case <-requests:
+		t.Fatal("canceled adapter availability reached Agent Mail")
+	default:
+	}
+}
+
+func TestWorkCoordinationAdapterCollectCancelsBlockedBVWork(t *testing.T) {
+	projectDir := t.TempDir()
+	for _, name := range []string{".git", ".beads"} {
+		if err := os.Mkdir(filepath.Join(projectDir, name), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+	}
+	binDir := t.TempDir()
+	startedPath := filepath.Join(t.TempDir(), "bv-started")
+	script := "#!/bin/sh\n: > " + startedPath + "\nexec /bin/sleep 30\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write blocking bv: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	adapter := NewWorkCoordinationAdapter(DefaultWorkCoordinationAdapterConfig(projectDir))
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := adapter.Collect(ctx)
+		result <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(startedPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("blocking bv collection did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Collect error=%v, want context canceled", err)
+		}
+		if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+			t.Fatalf("blocked BV collection ignored cancellation for %v", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked BV collection did not join after cancellation")
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,10 +38,7 @@ type BulkAssignOptions struct {
 	RequireReservation bool
 	ReservationPaths   []string
 	// SkipPaneSelectors accepts canonical N, W.P, and %N pane selectors.
-	// SkipPanes is retained only until all callers migrate; ambiguous local
-	// indices fail closed in multi-window sessions.
 	SkipPaneSelectors  []string
-	SkipPanes          []int
 	PromptTemplatePath string
 	// DefaultTemplatePath is a project/user-level configured template file
 	// (cfg.Assign.PromptTemplateFile). It is used when PromptTemplatePath is
@@ -58,21 +54,18 @@ type BulkAssignOptions struct {
 
 // BulkAssignDependencies allows tests to stub external interactions.
 type BulkAssignDependencies struct {
-	FetchTriage       func(dir string) (*bv.TriageResponse, error)
-	FetchInProgress   func(dir string, limit int) ([]bv.BeadInProgress, error)
-	ListPanes         func(session string) ([]tmux.Pane, error)
-	SendKeys          func(paneID, message string, enter bool) error
-	SendKeysForAgent  func(paneID, message string, enter bool, agentType tmux.AgentType) error
+	FetchTriage       func(context.Context, string) (*bv.TriageResponse, error)
+	FetchInProgress   func(context.Context, string, int) ([]bv.BeadInProgress, error)
+	ListPanes         func(context.Context, string) ([]tmux.Pane, error)
 	ReadFile          func(path string) ([]byte, error)
-	FetchBeadTitle    func(dir, beadID string) (string, error)
-	FetchBeadDetails  func(dir, beadID string) (BeadDetails, error)
-	Now               func() time.Time
+	FetchBeadTitle    func(context.Context, string, string) (string, error)
+	FetchBeadDetails  func(context.Context, string, string) (BeadDetails, error)
 	Cwd               func() (string, error)
-	PaneCurrentPath   func(paneID string) (string, error)
-	ResolveProject    func(session string, panes []tmux.Pane) (string, error)
+	PaneCurrentPath   func(context.Context, string) (string, error)
+	ResolveProject    func(context.Context, string, []tmux.Pane) (string, error)
 	LoadStore         func(session string) (*assignment.AssignmentStore, error)
 	ClaimBead         func(context.Context, string, string, string) (bv.BeadClaimResult, error)
-	GetBeadStatus     func(string, string) (string, error)
+	GetBeadStatus     func(context.Context, string, string) (string, error)
 	NewIdempotencyKey func() (string, error)
 	ReservationPort   assignment.ReservationPort
 	ResolveAgentName  func(context.Context, string, string, string, string) (string, error)
@@ -95,7 +88,6 @@ type BulkAssignOutput struct {
 	RobotResponse
 	Session          string                 `json:"session"`
 	Strategy         string                 `json:"strategy"`
-	Timestamp        time.Time              `json:"timestamp"`
 	Assignments      []BulkAssignAssignment `json:"assignments"`
 	Summary          BulkAssignSummary      `json:"summary"`
 	UnassignedBeads  []string               `json:"unassigned_beads,omitempty"`
@@ -122,6 +114,8 @@ type BulkAssignAssignment struct {
 	Error             string `json:"error,omitempty"`
 	paneIndex         int
 	paneTitle         string
+	failureCause      error
+	failureCode       string
 }
 
 // BulkAssignSummary aggregates assignment stats.
@@ -158,7 +152,7 @@ type bulkPane struct {
 
 // GetBulkAssign generates the bulk assignment plan and returns the result.
 // This function returns the data struct directly, enabling CLI/REST parity.
-func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
+func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutput, error) {
 	output := &BulkAssignOutput{
 		RobotResponse:   NewRobotResponse(true),
 		Session:         opts.Session,
@@ -166,6 +160,13 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 		UnassignedBeads: []string{},
 		UnassignedPanes: []string{},
 		DryRun:          opts.DryRun,
+	}
+	if ctx == nil {
+		return nil, errors.New("robot bulk assignment context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		setBulkAssignCancellation(output, err)
+		return output, nil
 	}
 
 	if opts.Session == "" {
@@ -178,11 +179,15 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 	}
 
 	deps := bulkAssignDeps(opts.Deps)
-	strategy := normalizeBulkAssignStrategy(opts.Strategy)
+	strategy, err := normalizeBulkAssignStrategy(opts.Strategy)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInvalidFlag, "Use impact, ready, stale, or balanced")
+		return output, nil
+	}
+	opts.Strategy = strategy
 	output.Strategy = strategy
-	output.Timestamp = deps.Now().UTC()
 
-	panes, err := deps.ListPanes(opts.Session)
+	panes, err := deps.ListPanes(ctx, opts.Session)
 	if err != nil {
 		errorCode, hint := bulkAssignPaneListError(err)
 		output.RobotResponse = NewErrorResponse(
@@ -192,18 +197,26 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 		)
 		return output, nil
 	}
-
-	skipSelectors := append([]string(nil), opts.SkipPaneSelectors...)
-	for _, paneIndex := range opts.SkipPanes {
-		skipSelectors = append(skipSelectors, strconv.Itoa(paneIndex))
+	if err := ctx.Err(); err != nil {
+		setBulkAssignCancellation(output, err)
+		return output, nil
 	}
-	paneList, err := filterBulkAssignPanes(panes, skipSelectors)
+
+	paneList, err := filterBulkAssignPanes(panes, opts.SkipPaneSelectors)
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(err, ErrCodeInvalidFlag, "Use N, W.P, or %N pane selectors; bare N must be unambiguous")
 		return output, nil
 	}
-	projectDir, err := deps.ResolveProject(opts.Session, panes)
+	projectDir, err := deps.ResolveProject(ctx, opts.Session, panes)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			setBulkAssignCancellation(output, err)
+			return output, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			setBulkAssignCancellation(output, ctxErr)
+			return output, nil
+		}
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("failed to resolve session project: %w", err),
 			ErrCodeInternalError,
@@ -219,9 +232,12 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 			output.RobotResponse = NewErrorResponse(err, ErrCodeInvalidFlag, "Provide valid JSON mapping pane->bead")
 			return output, nil
 		}
-		plan := planBulkAssignFromAllocation(opts, deps, paneList, allocation)
+		plan := planBulkAssignFromAllocation(ctx, opts, deps, paneList, allocation)
 		output.AllocationSource = "explicit"
-		applyBulkAssignPlan(opts, deps, output, plan)
+		applyBulkAssignPlan(ctx, opts, deps, output, plan)
+		if err := ctx.Err(); err != nil {
+			setBulkAssignCancellation(output, err)
+		}
 		return output, nil
 	}
 
@@ -234,8 +250,16 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 		return output, nil
 	}
 
-	triage, err := deps.FetchTriage(opts.projectDir)
+	triage, err := deps.FetchTriage(ctx, opts.projectDir)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			setBulkAssignCancellation(output, err)
+			return output, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			setBulkAssignCancellation(output, ctxErr)
+			return output, nil
+		}
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("bv triage failed: %w", err),
 			ErrCodeInternalError,
@@ -243,9 +267,21 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 		)
 		return output, nil
 	}
+	if err := ctx.Err(); err != nil {
+		setBulkAssignCancellation(output, err)
+		return output, nil
+	}
 
-	inProgress, err := deps.FetchInProgress(opts.projectDir, 200)
+	inProgress, err := deps.FetchInProgress(ctx, opts.projectDir, 200)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			setBulkAssignCancellation(output, err)
+			return output, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			setBulkAssignCancellation(output, ctxErr)
+			return output, nil
+		}
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("fetch in-progress failed: %w", err),
 			ErrCodeInternalError,
@@ -253,14 +289,31 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 		)
 		return output, nil
 	}
+	if err := ctx.Err(); err != nil {
+		setBulkAssignCancellation(output, err)
+		return output, nil
+	}
 
 	plan := planBulkAssignFromBV(opts, deps, paneList, triage, inProgress)
 	output.AllocationSource = "bv"
-	applyBulkAssignPlan(opts, deps, output, plan)
+	applyBulkAssignPlan(ctx, opts, deps, output, plan)
+	if err := ctx.Err(); err != nil {
+		setBulkAssignCancellation(output, err)
+	}
 	return output, nil
 }
 
+func setBulkAssignCancellation(output *BulkAssignOutput, err error) {
+	if output == nil || err == nil {
+		return
+	}
+	output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry the command after cancellation")
+}
+
 func bulkAssignPaneListError(err error) (string, string) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ErrCodeTimeout, "Retry after confirming the tmux server is responsive"
+	}
 	switch tmux.ClassifyCommandError(err).Kind {
 	case tmux.CommandErrorSessionNotFound, tmux.CommandErrorPaneNotFound:
 		// list-panes is session-scoped. tmux commonly reports a missing session as
@@ -275,8 +328,8 @@ func bulkAssignPaneListError(err error) (string, string) {
 
 // PrintBulkAssign handles the --robot-bulk-assign command.
 // This is a thin wrapper around GetBulkAssign() for CLI output.
-func PrintBulkAssign(opts BulkAssignOptions) error {
-	output, err := GetBulkAssign(opts)
+func PrintBulkAssign(ctx context.Context, opts BulkAssignOptions) error {
+	output, err := GetBulkAssign(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -286,22 +339,19 @@ func PrintBulkAssign(opts BulkAssignOptions) error {
 func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
 	deps := BulkAssignDependencies{
-		FetchTriage:      bv.GetTriage,
-		FetchInProgress:  func(dir string, limit int) ([]bv.BeadInProgress, error) { return bv.GetInProgressList(dir, limit), nil },
-		ListPanes:        tmux.GetPanes,
-		SendKeys:         tmux.SendKeys,
-		SendKeysForAgent: tmux.SendKeysForAgent,
+		FetchTriage:      bv.GetTriageContext,
+		FetchInProgress:  bv.GetInProgressListContext,
+		ListPanes:        tmux.GetPanesContext,
 		ReadFile:         os.ReadFile,
 		FetchBeadTitle:   fetchBeadTitle,
 		FetchBeadDetails: fetchBeadDetails,
-		Now:              time.Now,
 		Cwd:              os.Getwd,
-		PaneCurrentPath: func(paneID string) (string, error) {
-			return tmux.DefaultClient.Run("display-message", "-p", "-t", paneID, "#{pane_current_path}")
+		PaneCurrentPath: func(ctx context.Context, paneID string) (string, error) {
+			return tmux.DefaultClient.RunContext(ctx, "display-message", "-p", "-t", paneID, "#{pane_current_path}")
 		},
 		LoadStore:         assignment.LoadStoreStrict,
-		ClaimBead:         bv.ClaimBead,
-		GetBeadStatus:     bv.GetBeadStatus,
+		ClaimBead:         bv.ClaimBeadForAssignment,
+		GetBeadStatus:     bv.GetBeadStatusContext,
 		NewIdempotencyKey: assignment.NewAssignmentIdempotencyKey,
 		ObserveSession:    observer.Observe,
 		DispatchDeliverer: dispatchsvc.TMUXDeliverer{},
@@ -326,8 +376,8 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 			}
 		},
 	}
-	deps.ResolveProject = func(session string, panes []tmux.Pane) (string, error) {
-		return resolveBulkAssignmentProject(session, panes, deps.PaneCurrentPath, deps.Cwd)
+	deps.ResolveProject = func(ctx context.Context, session string, panes []tmux.Pane) (string, error) {
+		return resolveBulkAssignmentProject(ctx, session, panes, deps.PaneCurrentPath, deps.Cwd)
 	}
 
 	if custom == nil {
@@ -342,17 +392,6 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	if custom.ListPanes != nil {
 		deps.ListPanes = custom.ListPanes
 	}
-	if custom.SendKeys != nil {
-		deps.SendKeys = custom.SendKeys
-		if custom.SendKeysForAgent == nil {
-			deps.SendKeysForAgent = func(paneID, message string, enter bool, _ tmux.AgentType) error {
-				return custom.SendKeys(paneID, message, enter)
-			}
-		}
-	}
-	if custom.SendKeysForAgent != nil {
-		deps.SendKeysForAgent = custom.SendKeysForAgent
-	}
 	if custom.ReadFile != nil {
 		deps.ReadFile = custom.ReadFile
 	}
@@ -361,9 +400,6 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	}
 	if custom.FetchBeadDetails != nil {
 		deps.FetchBeadDetails = custom.FetchBeadDetails
-	}
-	if custom.Now != nil {
-		deps.Now = custom.Now
 	}
 	if custom.Cwd != nil {
 		deps.Cwd = custom.Cwd
@@ -374,7 +410,10 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	if custom.ResolveProject != nil {
 		deps.ResolveProject = custom.ResolveProject
 	} else if custom.Cwd != nil && custom.PaneCurrentPath == nil {
-		deps.ResolveProject = func(string, []tmux.Pane) (string, error) {
+		deps.ResolveProject = func(ctx context.Context, _ string, _ []tmux.Pane) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 			return custom.Cwd()
 		}
 	}
@@ -411,28 +450,22 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	if custom.Wait != nil {
 		deps.Wait = custom.Wait
 	}
-	if custom.SendKeysForAgent != nil || custom.SendKeys != nil {
-		deps.DispatchDeliverer = dispatchsvc.DelivererFunc(func(_ context.Context, delivery dispatchsvc.Delivery) error {
-			target := delivery.Target.Ref.ID
-			if target == "" {
-				target = fmt.Sprintf("%s:%d", delivery.Session, delivery.Target.Ref.PaneIndex)
-			}
-			if custom.SendKeysForAgent != nil {
-				return custom.SendKeysForAgent(target, delivery.Message, delivery.Protocol != dispatchsvc.ProtocolStageOnly, delivery.Target.AgentType)
-			}
-			return custom.SendKeys(target, delivery.Message, delivery.Protocol != dispatchsvc.ProtocolStageOnly)
-		})
-	}
-
 	return deps
 }
 
 func resolveBulkAssignmentProject(
+	ctx context.Context,
 	session string,
 	panes []tmux.Pane,
-	paneCurrentPath func(string) (string, error),
+	paneCurrentPath func(context.Context, string) (string, error),
 	cwd func() (string, error),
 ) (string, error) {
+	if ctx == nil {
+		return "", errors.New("bulk assignment project context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	session = strings.TrimSpace(session)
 	if session == "" {
 		return "", errors.New("session is required")
@@ -441,7 +474,7 @@ func resolveBulkAssignmentProject(
 		return "", err
 	}
 	if len(panes) > 0 {
-		projectDir, err := ResolveLiveSessionProject(session, panes, paneCurrentPath)
+		projectDir, err := ResolveLiveSessionProjectContext(ctx, session, panes, paneCurrentPath)
 		if err != nil {
 			return "", err
 		}
@@ -457,6 +490,9 @@ func resolveBulkAssignmentProject(
 		return util.ResolveProjectDir(candidate)
 	}
 	var lookupErrors []error
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if registry, err := agentmail.LoadBestSessionAgentRegistry(session); err != nil {
 		lookupErrors = append(lookupErrors, fmt.Errorf("load session agent registry: %w", err))
 	} else if registry != nil {
@@ -464,12 +500,18 @@ func resolveBulkAssignmentProject(
 			return projectDir, nil
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if info, err := agentmail.LoadBestSessionAgent(session); err != nil {
 		lookupErrors = append(lookupErrors, fmt.Errorf("load session agent identity: %w", err))
 	} else if info != nil {
 		if projectDir := usable(info.ProjectKey); projectDir != "" {
 			return projectDir, nil
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	if cfg, err := config.Load(config.DefaultPath()); err != nil {
 		lookupErrors = append(lookupErrors, fmt.Errorf("load configuration: %w", err))
@@ -479,6 +521,9 @@ func resolveBulkAssignmentProject(
 		}
 	}
 	if cwd != nil {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if currentDir, err := cwd(); err != nil {
 			lookupErrors = append(lookupErrors, fmt.Errorf("resolve caller working directory: %w", err))
 		} else if projectDir := usable(currentDir); projectDir != "" {
@@ -495,15 +540,32 @@ func resolveBulkAssignmentProject(
 // live pane in a tmux session and fails closed when the panes disagree.
 func ResolveLiveSessionProject(session string, panes []tmux.Pane, paneCurrentPath func(string) (string, error)) (string, error) {
 	if paneCurrentPath == nil {
+		return ResolveLiveSessionProjectContext(context.Background(), session, panes, nil)
+	}
+	return ResolveLiveSessionProjectContext(context.Background(), session, panes, func(_ context.Context, paneID string) (string, error) {
+		return paneCurrentPath(paneID)
+	})
+}
+
+// ResolveLiveSessionProjectContext derives one authoritative project root
+// while honoring cancellation of every pane current-directory lookup.
+func ResolveLiveSessionProjectContext(ctx context.Context, session string, panes []tmux.Pane, paneCurrentPath func(context.Context, string) (string, error)) (string, error) {
+	if ctx == nil {
+		return "", errors.New("live session project context is required")
+	}
+	if paneCurrentPath == nil {
 		return "", fmt.Errorf("resolve live project for session %q: pane current-path lookup is not configured", session)
 	}
 	roots := make(map[string][]string)
 	for _, pane := range panes {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		paneID := strings.TrimSpace(pane.ID)
 		if paneID == "" {
 			return "", fmt.Errorf("resolve live project for session %q: pane has no stable ID", session)
 		}
-		currentPath, err := paneCurrentPath(paneID)
+		currentPath, err := paneCurrentPath(ctx, paneID)
 		if err != nil {
 			return "", fmt.Errorf("resolve live project for session %q pane %s: %w", session, paneID, err)
 		}
@@ -538,16 +600,16 @@ func ResolveLiveSessionProject(session string, panes []tmux.Pane, paneCurrentPat
 	return "", fmt.Errorf("resolve live project for session %q: panes span multiple project roots: %s", session, strings.Join(parts, "; "))
 }
 
-func normalizeBulkAssignStrategy(strategy string) string {
+func normalizeBulkAssignStrategy(strategy string) (string, error) {
 	strategy = strings.ToLower(strings.TrimSpace(strategy))
 	if strategy == "" {
-		return "impact"
+		return "impact", nil
 	}
 	switch strategy {
 	case "impact", "ready", "stale", "balanced":
-		return strategy
+		return strategy, nil
 	default:
-		return "impact"
+		return "", fmt.Errorf("invalid bulk assignment strategy %q", strategy)
 	}
 }
 
@@ -582,11 +644,11 @@ func filterBulkAssignPanes(panes []tmux.Pane, skipSelectors []string) ([]bulkPan
 
 func planBulkAssignFromBV(opts BulkAssignOptions, deps BulkAssignDependencies, panes []bulkPane, triage *bv.TriageResponse, inProgress []bv.BeadInProgress) bulkAssignPlan {
 	candidates := buildBulkAssignCandidates(triage, inProgress)
-	beads := selectBulkAssignBeads(normalizeBulkAssignStrategy(opts.Strategy), candidates)
+	beads := selectBulkAssignBeads(opts.Strategy, candidates)
 	return allocateBulkAssignBeads(panes, beads)
 }
 
-func planBulkAssignFromAllocation(opts BulkAssignOptions, deps BulkAssignDependencies, panes []bulkPane, allocation map[string]string) bulkAssignPlan {
+func planBulkAssignFromAllocation(ctx context.Context, opts BulkAssignOptions, deps BulkAssignDependencies, panes []bulkPane, allocation map[string]string) bulkAssignPlan {
 	paneSet := make(map[string]bulkPane, len(panes))
 	for _, pane := range panes {
 		paneSet[pane.Ref.StableKey()] = pane
@@ -627,8 +689,7 @@ func planBulkAssignFromAllocation(opts BulkAssignOptions, deps BulkAssignDepende
 			Status:    "planned",
 		}
 		if resolveErr != nil {
-			assignment.Status = "failed"
-			assignment.Error = resolveErr.Error()
+			failBulkAssignment(&assignment, resolveErr, ErrCodePaneNotFound)
 			plan.Assignments = append(plan.Assignments, assignment)
 			plan.failed++
 			continue
@@ -653,10 +714,9 @@ func planBulkAssignFromAllocation(opts BulkAssignOptions, deps BulkAssignDepende
 			if plan.Assignments[existingIndex].Status != "failed" {
 				plan.failed++
 			}
-			plan.Assignments[existingIndex].Status = "failed"
-			plan.Assignments[existingIndex].Error = conflict
-			assignment.Status = "failed"
-			assignment.Error = conflict
+			conflictErr := errors.New(conflict)
+			failBulkAssignment(&plan.Assignments[existingIndex], conflictErr, ErrCodeInvalidFlag)
+			failBulkAssignment(&assignment, conflictErr, ErrCodeInvalidFlag)
 			plan.Assignments = append(plan.Assignments, assignment)
 			plan.failed++
 			continue
@@ -666,17 +726,15 @@ func planBulkAssignFromAllocation(opts BulkAssignOptions, deps BulkAssignDepende
 		beadByPane[stableKey] = beadID
 
 		if beadID == "" {
-			assignment.Status = "failed"
-			assignment.Error = "empty bead id"
+			failBulkAssignment(&assignment, errors.New("empty bead id"), ErrCodeInvalidFlag)
 			plan.Assignments = append(plan.Assignments, assignment)
 			plan.failed++
 			continue
 		}
 
-		title, err := deps.FetchBeadTitle(opts.projectDir, beadID)
+		title, err := deps.FetchBeadTitle(ctx, opts.projectDir, beadID)
 		if err != nil {
-			assignment.Status = "failed"
-			assignment.Error = err.Error()
+			failBulkAssignment(&assignment, err, "")
 		} else {
 			assignment.BeadTitle = title
 		}
@@ -695,6 +753,17 @@ func planBulkAssignFromAllocation(opts BulkAssignOptions, deps BulkAssignDepende
 	sort.Strings(plan.UnassignedPanes)
 
 	return plan
+}
+
+func failBulkAssignment(output *BulkAssignAssignment, err error, code string) {
+	if output == nil || err == nil {
+		return
+	}
+	output.Status = "failed"
+	output.PromptSent = false
+	output.Error = err.Error()
+	output.failureCause = err
+	output.failureCode = code
 }
 
 type bulkAssignPlan struct {
@@ -912,12 +981,55 @@ func bulkAssignReason(bead bulkBead) string {
 	}
 }
 
-func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, output *BulkAssignOutput, plan bulkAssignPlan) {
+func applyBulkAssignPlan(ctx context.Context, opts BulkAssignOptions, deps BulkAssignDependencies, output *BulkAssignOutput, plan bulkAssignPlan) {
+	if ctx == nil {
+		for i := range plan.Assignments {
+			failBulkAssignment(&plan.Assignments[i], errors.New("bulk assignment context is required"), ErrCodeInternalError)
+		}
+		finishBulkAssignOutput(output, plan)
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		markPendingBulkAssignmentsCanceled(plan.Assignments, err)
+		finishBulkAssignOutput(output, plan)
+		return
+	}
+	redactionConfig, redactionErr := deps.LoadRedaction(opts.projectDir)
+	if redactionErr != nil {
+		for i := range plan.Assignments {
+			plan.Assignments[i].BeadTitle = ""
+			failBulkAssignment(&plan.Assignments[i], fmt.Errorf("load bulk assignment redaction policy: %w", redactionErr), "")
+		}
+		finishBulkAssignOutput(output, plan)
+		return
+	}
+	durableRedactionConfig := redactionConfig.DeepCopy()
+	durableRedactionConfig.Mode = redaction.ModeRedact
+	for i := range plan.Assignments {
+		planned := &plan.Assignments[i]
+		titleResult := redaction.ScanAndRedact(planned.BeadTitle, redactionConfig)
+		planned.BeadTitle = redaction.ScanAndRedact(planned.BeadTitle, durableRedactionConfig).Output
+		if titleResult.Blocked {
+			failBulkAssignment(planned, fmt.Errorf("assignment title blocked by redaction policy (%d findings)", len(titleResult.Findings)), "")
+		}
+	}
+	for _, requestedPath := range opts.ReservationPaths {
+		pathResult := redaction.ScanAndRedact(requestedPath, redactionConfig)
+		if len(pathResult.Findings) == 0 {
+			continue
+		}
+		for i := range plan.Assignments {
+			if plan.Assignments[i].Status != "failed" {
+				failBulkAssignment(&plan.Assignments[i], fmt.Errorf("assignment reservation path blocked by redaction policy (%d findings)", len(pathResult.Findings)), "")
+			}
+		}
+		break
+	}
+
 	template, templateErr := loadBulkAssignTemplate(opts, deps)
 	if templateErr != nil {
 		for i := range plan.Assignments {
-			plan.Assignments[i].Status = "failed"
-			plan.Assignments[i].Error = templateErr.Error()
+			failBulkAssignment(&plan.Assignments[i], templateErr, "")
 			plan.failed++
 		}
 	}
@@ -926,8 +1038,7 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 	if opts.RequireReservation && len(opts.ReservationPaths) == 0 {
 		for i := range plan.Assignments {
 			if plan.Assignments[i].Status != "failed" {
-				plan.Assignments[i].Status = "failed"
-				plan.Assignments[i].Error = assignment.ErrReservationPathsRequired.Error()
+				failBulkAssignment(&plan.Assignments[i], assignment.ErrReservationPathsRequired, ErrCodeInvalidFlag)
 			}
 		}
 		finishBulkAssignOutput(output, plan)
@@ -940,11 +1051,9 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 		if assignment.Status == "failed" {
 			continue
 		}
-		prompt, err := buildBulkAssignPrompt(template, deps, assignment, output.Session, opts.projectDir, needsDetails)
+		prompt, err := buildBulkAssignPrompt(ctx, template, deps, assignment, output.Session, opts.projectDir, needsDetails)
 		if err != nil {
-			assignment.Status = "failed"
-			assignment.Error = err.Error()
-			assignment.PromptSent = false
+			failBulkAssignment(assignment, err, "")
 			continue
 		}
 		prompts[i] = prompt
@@ -959,25 +1068,36 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 		return
 	}
 
-	runtime, runtimeErr := newBulkAtomicRuntime(deps, output.Session, opts.projectDir)
+	runtime, runtimeErr := newBulkAtomicRuntime(ctx, deps, output.Session, opts.projectDir)
 	if runtimeErr != nil {
 		for i := range plan.Assignments {
 			if plan.Assignments[i].Status == "failed" {
 				continue
 			}
-			plan.Assignments[i].Status = "failed"
-			plan.Assignments[i].Error = runtimeErr.Error()
+			failBulkAssignment(&plan.Assignments[i], runtimeErr, "")
 		}
 		finishBulkAssignOutput(output, plan)
 		return
 	}
+	if err := ctx.Err(); err != nil {
+		markPendingBulkAssignmentsCanceled(plan.Assignments, err)
+		finishBulkAssignOutput(output, plan)
+		return
+	}
+
+	workCtx, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
 
 	applyOne := func(index int) {
 		assignmentResult := &plan.Assignments[index]
 		if assignmentResult.Status == "failed" {
 			return
 		}
-		runtime.execute(context.Background(), output.Session, assignmentResult, prompts[index], opts.RequireReservation, opts.ReservationPaths)
+		if err := workCtx.Err(); err != nil {
+			failBulkAssignment(assignmentResult, fmt.Errorf("bulk assignment canceled: %w", err), ErrCodeTimeout)
+			return
+		}
+		runtime.execute(workCtx, output.Session, assignmentResult, prompts[index], opts.RequireReservation, opts.ReservationPaths)
 	}
 
 	if opts.Parallel {
@@ -1000,11 +1120,14 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 				continue
 			}
 			if attempted && opts.Stagger > 0 {
-				if err := deps.Wait(context.Background(), opts.Stagger); err != nil {
-					plan.Assignments[i].Status = "failed"
-					plan.Assignments[i].Error = fmt.Sprintf("assignment pacing: %v", err)
-					continue
+				if err := deps.Wait(workCtx, opts.Stagger); err != nil {
+					markPendingBulkAssignmentsCanceled(plan.Assignments[i:], err)
+					break
 				}
+			}
+			if err := workCtx.Err(); err != nil {
+				markPendingBulkAssignmentsCanceled(plan.Assignments[i:], err)
+				break
 			}
 			attempted = true
 			applyOne(i)
@@ -1012,6 +1135,15 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 	}
 
 	finishBulkAssignOutput(output, plan)
+}
+
+func markPendingBulkAssignmentsCanceled(assignments []BulkAssignAssignment, err error) {
+	for i := range assignments {
+		if assignments[i].Status == "failed" || assignments[i].Status == "assigned" {
+			continue
+		}
+		failBulkAssignment(&assignments[i], fmt.Errorf("bulk assignment canceled: %w", err), ErrCodeTimeout)
+	}
 }
 
 func finishBulkAssignOutput(output *BulkAssignOutput, plan bulkAssignPlan) {
@@ -1037,12 +1169,37 @@ func finishBulkAssignOutput(output *BulkAssignOutput, plan bulkAssignPlan) {
 		Failed:     failed,
 	}
 	if failed > 0 {
+		code, hint := bulkAssignFailureClass(output.Assignments)
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("%d of %d bulk assignments failed", failed, len(output.Assignments)),
-			ErrCodeInternalError,
-			"Inspect assignments[].error; no failed target was dispatched",
+			code,
+			hint,
 		)
 	}
+}
+
+func bulkAssignFailureClass(assignments []BulkAssignAssignment) (string, string) {
+	for _, item := range assignments {
+		if errors.Is(item.failureCause, context.Canceled) || errors.Is(item.failureCause, context.DeadlineExceeded) || item.failureCode == ErrCodeTimeout {
+			return ErrCodeTimeout, "Retry the command after cancellation"
+		}
+	}
+	for _, item := range assignments {
+		if item.failureCode == ErrCodeInvalidFlag {
+			return ErrCodeInvalidFlag, "Correct the allocation or assignment options and retry"
+		}
+	}
+	for _, item := range assignments {
+		if item.failureCode == ErrCodePaneNotFound {
+			return ErrCodePaneNotFound, "Inspect canonical pane addresses and retry"
+		}
+	}
+	for _, item := range assignments {
+		if errors.Is(item.failureCause, assignment.ErrDispatchOutcomeUnknown) || item.failureCode == ErrCodeDispatchUnknown {
+			return ErrCodeDispatchUnknown, "Inspect the durable assignment receipt before retrying; delivery outcome is unknown"
+		}
+	}
+	return "ASSIGNMENT_FAILED", "Inspect assignments[].error; no failed target was dispatched"
 }
 
 type robotAgentMailReservationClient interface {
@@ -1179,33 +1336,56 @@ func (r *robotAgentMailReservationRuntime) Reserve(ctx context.Context, req assi
 	}
 	seenPaths := make(map[string]struct{}, len(result.Granted))
 	seenIDs := make(map[int]struct{}, len(result.Granted))
+	expectedReason := fmt.Sprintf("bead assignment: %s", req.BeadID)
+	now := time.Now().UTC()
+	var validationErrors []error
 	for _, granted := range result.Granted {
+		path := strings.TrimSpace(granted.PathPattern)
+		validHandle := true
 		if granted.ID <= 0 {
-			return lease, fmt.Errorf("Agent Mail reservation for %s has invalid ID %d", granted.PathPattern, granted.ID)
-		}
-		if _, duplicate := seenIDs[granted.ID]; duplicate {
-			return lease, fmt.Errorf("Agent Mail repeated reservation ID %d", granted.ID)
+			validationErrors = append(validationErrors, fmt.Errorf("Agent Mail reservation for %s has invalid ID %d", path, granted.ID))
+			validHandle = false
+		} else if _, duplicate := seenIDs[granted.ID]; duplicate {
+			validationErrors = append(validationErrors, fmt.Errorf("Agent Mail repeated reservation ID %d", granted.ID))
+			validHandle = false
+		} else {
+			seenIDs[granted.ID] = struct{}{}
 		}
 		if granted.ProjectID != r.projectID || granted.AgentName != req.AgentName {
-			return lease, fmt.Errorf("Agent Mail reservation %d receipt project or recipient mismatch", granted.ID)
+			validationErrors = append(validationErrors, fmt.Errorf("Agent Mail reservation %d receipt project or recipient mismatch", granted.ID))
+		}
+		if granted.Reason != expectedReason {
+			validationErrors = append(validationErrors, fmt.Errorf("Agent Mail reservation %d receipt reason mismatch", granted.ID))
+		}
+		if granted.ReleasedTS != nil {
+			validationErrors = append(validationErrors, fmt.Errorf("Agent Mail reservation %d is already released", granted.ID))
 		}
 		if !granted.Exclusive {
-			return lease, fmt.Errorf("Agent Mail reservation %d is not exclusive", granted.ID)
+			validationErrors = append(validationErrors, fmt.Errorf("Agent Mail reservation %d is not exclusive", granted.ID))
 		}
-		if _, expected := requestedSet[granted.PathPattern]; !expected {
-			return lease, fmt.Errorf("Agent Mail granted unexpected path %q", granted.PathPattern)
+		if _, expected := requestedSet[path]; !expected {
+			validationErrors = append(validationErrors, fmt.Errorf("Agent Mail granted unexpected path %q", path))
+		} else if _, duplicate := seenPaths[path]; duplicate {
+			validationErrors = append(validationErrors, fmt.Errorf("Agent Mail granted path %q more than once", path))
+		} else {
+			seenPaths[path] = struct{}{}
 		}
-		if _, duplicate := seenPaths[granted.PathPattern]; duplicate {
-			return lease, fmt.Errorf("Agent Mail granted path %q more than once", granted.PathPattern)
-		}
-		seenIDs[granted.ID] = struct{}{}
-		seenPaths[granted.PathPattern] = struct{}{}
-		lease.Granted = append(lease.Granted, granted.PathPattern)
-		lease.ReservationIDs = append(lease.ReservationIDs, granted.ID)
 		expiresAt := granted.ExpiresTS.Time
+		if expiresAt.IsZero() || !expiresAt.After(now) {
+			validationErrors = append(validationErrors, fmt.Errorf("Agent Mail reservation %d has no live future expiry", granted.ID))
+		}
 		if !expiresAt.IsZero() && (lease.ExpiresAt == nil || expiresAt.Before(*lease.ExpiresAt)) {
 			lease.ExpiresAt = &expiresAt
 		}
+		if validHandle {
+			lease.Granted = append(lease.Granted, path)
+			lease.ReservationIDs = append(lease.ReservationIDs, granted.ID)
+		}
+	}
+	sort.Strings(lease.Granted)
+	sort.Ints(lease.ReservationIDs)
+	if validationErr := errors.Join(validationErrors...); validationErr != nil {
+		return lease, errors.Join(validationErr, reserveErr)
 	}
 	if reserveErr != nil {
 		return lease, reserveErr
@@ -1224,8 +1404,6 @@ func (r *robotAgentMailReservationRuntime) Reserve(ctx context.Context, req assi
 		}
 		return lease, grantErr
 	}
-	sort.Strings(lease.Granted)
-	sort.Ints(lease.ReservationIDs)
 	return lease, nil
 }
 
@@ -1252,7 +1430,9 @@ func (r *robotAgentMailReservationRuntime) ReconcileReservation(ctx context.Cont
 		Requested: append([]string(nil), requested...),
 	}
 	seen := make(map[string]struct{}, len(requested))
+	seenIDs := make(map[int]struct{}, len(requested))
 	reason := fmt.Sprintf("bead assignment: %s", req.BeadID)
+	now := time.Now().UTC()
 	for _, reservation := range reservations {
 		if reservation.ReleasedTS != nil || reservation.AgentName != req.AgentName || reservation.Reason != reason {
 			continue
@@ -1260,17 +1440,25 @@ func (r *robotAgentMailReservationRuntime) ReconcileReservation(ctx context.Cont
 		if _, wanted := requestedSet[reservation.PathPattern]; !wanted {
 			continue
 		}
-		if reservation.ID <= 0 || reservation.ProjectID != r.projectID || !reservation.Exclusive {
+		if reservation.ID <= 0 {
+			return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown, Lease: lease}, nil
+		}
+		if _, duplicate := seenIDs[reservation.ID]; duplicate {
 			return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown, Lease: lease}, nil
 		}
 		if _, duplicate := seen[reservation.PathPattern]; duplicate {
 			return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown, Lease: lease}, nil
 		}
+		seenIDs[reservation.ID] = struct{}{}
 		seen[reservation.PathPattern] = struct{}{}
 		lease.Granted = append(lease.Granted, reservation.PathPattern)
 		lease.ReservationIDs = append(lease.ReservationIDs, reservation.ID)
 		expiresAt := reservation.ExpiresTS.Time
-		if !expiresAt.IsZero() && (lease.ExpiresAt == nil || expiresAt.Before(*lease.ExpiresAt)) {
+		if reservation.ProjectID != r.projectID || !reservation.Exclusive ||
+			expiresAt.IsZero() || !expiresAt.After(now) {
+			return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown, Lease: lease}, nil
+		}
+		if lease.ExpiresAt == nil || expiresAt.Before(*lease.ExpiresAt) {
 			lease.ExpiresAt = &expiresAt
 		}
 	}
@@ -1327,10 +1515,10 @@ func (r *bulkAtomicRuntime) observeSession(ctx context.Context, session string) 
 	return r.observation, r.observeErr
 }
 
-func newBulkAtomicRuntime(deps BulkAssignDependencies, session, workDir string) (*bulkAtomicRuntime, error) {
+func newBulkAtomicRuntime(ctx context.Context, deps BulkAssignDependencies, session, workDir string) (*bulkAtomicRuntime, error) {
 	if strings.TrimSpace(workDir) == "" {
 		var err error
-		workDir, err = deps.ResolveProject(session, nil)
+		workDir, err = deps.ResolveProject(ctx, session, nil)
 		if err != nil {
 			return nil, fmt.Errorf("resolve bulk assignment project: %w", err)
 		}
@@ -1359,6 +1547,14 @@ func newBulkAtomicRuntime(deps BulkAssignDependencies, session, workDir string) 
 }
 
 func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output *BulkAssignAssignment, prompt string, requireReservation bool, reservationPaths []string) {
+	if ctx == nil {
+		failBulkAssignment(output, errors.New("bulk assignment context is required"), ErrCodeInternalError)
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		failBulkAssignment(output, fmt.Errorf("bulk assignment canceled: %w", err), ErrCodeTimeout)
+		return
+	}
 	target := bulkAssignPaneTarget(session, output)
 	reservationPort := r.deps.ReservationPort
 	resolveAgentName := r.deps.ResolveAgentName
@@ -1370,44 +1566,50 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 	} else {
 		observation, observeErr := r.observeSession(ctx, session)
 		if observeErr != nil {
-			output.Status = "failed"
-			output.Error = fmt.Sprintf("observe pane %s before assignment: %v", output.Pane, observeErr)
+			failBulkAssignment(output, fmt.Errorf("observe pane %s before assignment: %w", output.Pane, observeErr), "")
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			failBulkAssignment(output, fmt.Errorf("bulk assignment canceled after observation: %w", err), ErrCodeTimeout)
 			return
 		}
 		if !statuspkg.DispatchObservationIsCurrent(observation.ObservedAt, time.Now()) {
-			output.Status = "failed"
-			output.Error = fmt.Sprintf("pane %s (%s) observation is stale", output.Pane, target)
+			failBulkAssignment(output, fmt.Errorf("pane %s (%s) observation is stale", output.Pane, target), "")
 			return
 		}
 		if !observation.SafeToDispatch(target) {
-			output.Status = "failed"
-			output.Error = fmt.Sprintf("pane %s (%s) is not safe to dispatch", output.Pane, target)
+			failBulkAssignment(output, fmt.Errorf("pane %s (%s) is not safe to dispatch", output.Pane, target), "")
 			return
 		}
 
 		if requireReservation && reservationPort == nil {
 			mailRuntime, runtimeErr := newRobotAgentMailReservationRuntime(ctx, r.workDir, session, nil)
 			if runtimeErr != nil {
-				output.Status = "failed"
-				output.Error = runtimeErr.Error()
+				failBulkAssignment(output, runtimeErr, "")
 				return
 			}
 			reservationPort = mailRuntime
 			resolveAgentName = mailRuntime.ResolveRecipient
 		}
+		if err := ctx.Err(); err != nil {
+			failBulkAssignment(output, fmt.Errorf("bulk assignment canceled before reservation identity resolution: %w", err), ErrCodeTimeout)
+			return
+		}
 
 		agentName = fmt.Sprintf("ntm:%s:%s", session, target)
 		if requireReservation {
 			if resolveAgentName == nil {
-				output.Status = "failed"
-				output.Error = "required reservation has no exact Agent Mail pane-identity resolver"
+				failBulkAssignment(output, errors.New("required reservation has no exact Agent Mail pane-identity resolver"), "")
 				return
 			}
 			var resolveErr error
 			agentName, resolveErr = resolveAgentName(ctx, r.workDir, session, target, output.paneTitle)
 			if resolveErr != nil {
-				output.Status = "failed"
-				output.Error = resolveErr.Error()
+				failBulkAssignment(output, resolveErr, "")
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				failBulkAssignment(output, fmt.Errorf("bulk assignment canceled after reservation identity resolution: %w", err), ErrCodeTimeout)
 				return
 			}
 		}
@@ -1415,16 +1617,19 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 		var keyErr error
 		idempotencyKey, keyErr = robotAtomicIdempotencyKey(r.store, output.Bead, target, output.paneIndex, output.AgentType, agentName, prompt, requireReservation, reservationPaths, r.newKey)
 		if keyErr != nil {
-			output.Status = "failed"
-			output.Error = keyErr.Error()
+			failBulkAssignment(output, keyErr, "")
 			return
 		}
 	}
 	output.IdempotencyKey = idempotencyKey
+	if err := ctx.Err(); err != nil {
+		failBulkAssignment(output, fmt.Errorf("bulk assignment canceled before atomic claim: %w", err), ErrCodeTimeout)
+		return
+	}
 
 	coordinator := assignment.NewAtomicCoordinator(r.store, r.claimPort, reservationPort, r.dispatchPort, r.dispatchPort).
-		WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(_ context.Context, beadID string) (string, error) {
-			return r.deps.GetBeadStatus(r.workDir, beadID)
+		WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(statusCtx context.Context, beadID string) (string, error) {
+			return r.deps.GetBeadStatus(statusCtx, r.workDir, beadID)
 		}))
 	result, executeErr := coordinator.Execute(ctx, assignment.AtomicRequest{
 		BeadID:             output.Bead,
@@ -1441,27 +1646,52 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 		RequestedPaths:     append([]string(nil), reservationPaths...),
 		ReservationTTL:     time.Hour,
 	})
-	if result.Assignment != nil && result.Assignment.IdempotencyKey == idempotencyKey {
+	applyBulkAtomicExecutionResult(ctx, output, idempotencyKey, result, executeErr)
+}
+
+func applyBulkAtomicExecutionResult(ctx context.Context, output *BulkAssignAssignment, idempotencyKey string, result assignment.AtomicResult, executeErr error) {
+	if output == nil {
+		return
+	}
+	matchingAssignment := result.Assignment != nil && result.Assignment.BeadID == output.Bead && result.Assignment.IdempotencyKey == idempotencyKey
+	if matchingAssignment {
+		output.BeadTitle = result.Assignment.BeadTitle
 		output.Claimed = result.Assignment.ClaimState == assignment.ClaimClaimed
 		output.ClaimActor = result.Assignment.ClaimActor
 		output.ReservationIDs = append([]int(nil), result.Assignment.ReservationIDs...)
 		output.DispatchReceiptID = result.Assignment.DispatchReceiptID
 	}
 	if executeErr != nil {
-		output.Status = "failed"
-		output.Error = executeErr.Error()
-		output.PromptSent = false
+		failBulkAssignment(output, executeErr, "")
 		return
 	}
-	output.Status = "assigned"
-	output.PromptSent = result.Sent
+	durableSent := result.Sent && matchingAssignment && result.Assignment.DispatchState == assignment.DispatchSent && strings.TrimSpace(result.Assignment.DispatchReceiptID) != ""
+	if durableSent {
+		output.Status = "assigned"
+		output.PromptSent = true
+		return
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			failBulkAssignment(output, fmt.Errorf("bulk assignment canceled: %w", err), ErrCodeTimeout)
+			return
+		}
+	}
+	if result.Sent || strings.TrimSpace(output.DispatchReceiptID) != "" {
+		failBulkAssignment(output, assignment.ErrDispatchOutcomeUnknown, ErrCodeDispatchUnknown)
+		return
+	}
+	failBulkAssignment(output, errors.New("atomic assignment completed without a durable dispatch receipt"), ErrCodeInternalError)
 }
 
 func newRobotAtomicClaimPort(workDir string, claim func(context.Context, string, string, string) (bv.BeadClaimResult, error)) assignment.ClaimPort {
 	return assignment.ClaimFunc(func(ctx context.Context, beadID, actor string) (assignment.ClaimReceipt, error) {
 		claimed, err := claim(ctx, workDir, beadID, actor)
 		if err != nil {
-			if errors.Is(err, bv.ErrBeadAlreadyClaimed) {
+			switch {
+			case errors.Is(err, bv.ErrBeadAssignmentIneligible):
+				return assignment.ClaimReceipt{}, fmt.Errorf("%w: %v", assignment.ErrClaimIneligible, err)
+			case errors.Is(err, bv.ErrBeadAlreadyClaimed):
 				return assignment.ClaimReceipt{}, fmt.Errorf("%w: %v", assignment.ErrClaimConflict, err)
 			}
 			return assignment.ClaimReceipt{}, err
@@ -1474,7 +1704,7 @@ func newRobotAtomicClaimPort(workDir string, claim func(context.Context, string,
 
 type robotAtomicPaneDispatchPort struct {
 	session         string
-	listPanes       func(string) ([]tmux.Pane, error)
+	listPanes       func(context.Context, string) ([]tmux.Pane, error)
 	observeSession  func(context.Context, string) (statuspkg.SessionObservation, error)
 	redactionConfig redaction.Config
 	deliverer       dispatchsvc.Deliverer
@@ -1483,7 +1713,7 @@ type robotAtomicPaneDispatchPort struct {
 
 func newRobotAtomicPaneDispatchPort(
 	session string,
-	listPanes func(string) ([]tmux.Pane, error),
+	listPanes func(context.Context, string) ([]tmux.Pane, error),
 	observeSession func(context.Context, string) (statuspkg.SessionObservation, error),
 	redactionConfig redaction.Config,
 	deliverer dispatchsvc.Deliverer,
@@ -1496,7 +1726,7 @@ func newRobotAtomicPaneDispatchPort(
 }
 
 func (p *robotAtomicPaneDispatchPort) prepare(ctx context.Context, req assignment.DispatchRequest) (*dispatchsvc.Service, *dispatchsvc.Prepared, error) {
-	panes, err := p.listPanes(p.session)
+	panes, err := p.listPanes(ctx, p.session)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load dispatch topology: %w", err)
 	}
@@ -1519,6 +1749,22 @@ func (p *robotAtomicPaneDispatchPort) prepare(ctx context.Context, req assignmen
 }
 
 func (p *robotAtomicPaneDispatchPort) Preflight(ctx context.Context, req assignment.DispatchRequest) (assignment.PromptPreflightResult, error) {
+	titleResult := redaction.ScanAndRedact(req.BeadTitle, p.redactionConfig)
+	if titleResult.Blocked {
+		return assignment.PromptPreflightResult{}, &dispatchsvc.Error{
+			Code: dispatchsvc.ErrRedactionBlocked,
+			Err:  fmt.Errorf("assignment title blocked by redaction policy (%d findings)", len(titleResult.Findings)),
+		}
+	}
+	for _, requestedPath := range req.RequestedPaths {
+		pathResult := redaction.ScanAndRedact(requestedPath, p.redactionConfig)
+		if len(pathResult.Findings) > 0 {
+			return assignment.PromptPreflightResult{}, &dispatchsvc.Error{
+				Code: dispatchsvc.ErrRedactionBlocked,
+				Err:  fmt.Errorf("assignment reservation path blocked by redaction policy (%d findings)", len(pathResult.Findings)),
+			}
+		}
+	}
 	_, prepared, err := p.prepare(ctx, req)
 	if err != nil {
 		return assignment.PromptPreflightResult{}, err
@@ -1530,7 +1776,8 @@ func (p *robotAtomicPaneDispatchPort) Preflight(ctx context.Context, req assignm
 	durableConfig := p.redactionConfig.DeepCopy()
 	durableConfig.Mode = redaction.ModeRedact
 	durablePrompt := redaction.ScanAndRedact(req.Prompt, durableConfig).Output
-	return assignment.PromptPreflightResult{DispatchPrompt: dispatchPrompt, DurablePrompt: durablePrompt}, nil
+	durableTitle := redaction.ScanAndRedact(req.BeadTitle, durableConfig).Output
+	return assignment.PromptPreflightResult{DispatchPrompt: dispatchPrompt, DurablePrompt: durablePrompt, DurableTitle: durableTitle}, nil
 }
 
 func (p *robotAtomicPaneDispatchPort) Dispatch(ctx context.Context, req assignment.DispatchRequest) (assignment.DispatchReceipt, error) {
@@ -1570,7 +1817,7 @@ func (p *robotAtomicPaneDispatchPort) Dispatch(ctx context.Context, req assignme
 func robotAtomicIdempotencyKey(
 	store *assignment.AssignmentStore,
 	beadID, target string,
-	pane int,
+	_ int,
 	agentType, agentName, prompt string,
 	requireReservation bool,
 	requestedPaths []string,
@@ -1583,7 +1830,7 @@ func robotAtomicIdempotencyKey(
 		return existing.PendingPrompt == prompt || existing.PromptSent == prompt
 	}
 	if existing := store.Get(beadID); existing != nil && !robotAtomicAssignmentTerminal(existing.Status) && existing.IdempotencyKey != "" &&
-		existing.DispatchTarget == target && existing.Pane == pane &&
+		existing.DispatchTarget == target &&
 		existing.AgentType == agentType && existing.AgentName == agentName &&
 		existing.ReservationRequired == requireReservation &&
 		stringSlicesEqualRobot(existing.ReservationInputPaths, requestedPaths) &&
@@ -1596,7 +1843,7 @@ func robotAtomicIdempotencyKey(
 func robotAtomicReplayIntent(
 	store *assignment.AssignmentStore,
 	beadID, target string,
-	pane int,
+	_ int,
 	agentType, prompt string,
 	requireReservation bool,
 	requestedPaths []string,
@@ -1616,7 +1863,7 @@ func robotAtomicReplayIntent(
 	if existing.IntentSHA256 == "" {
 		intentMatches = existing.PendingPrompt == prompt || existing.PromptSent == prompt
 	}
-	if existing.DispatchTarget != target || occupancyKey != target || existing.Pane != pane ||
+	if existing.DispatchTarget != target || occupancyKey != target ||
 		existing.AgentType != agentType || !intentMatches ||
 		existing.ReservationRequired != requireReservation ||
 		!stringSlicesEqualRobot(existing.ReservationInputPaths, requestedPaths) {
@@ -1683,14 +1930,14 @@ func bulkAssignPaneTarget(session string, assignment *BulkAssignAssignment) stri
 	return assignment.Pane
 }
 
-func buildBulkAssignPrompt(template string, deps BulkAssignDependencies, assignment *BulkAssignAssignment, session, projectDir string, needsDetails bool) (string, error) {
+func buildBulkAssignPrompt(ctx context.Context, template string, deps BulkAssignDependencies, assignment *BulkAssignAssignment, session, projectDir string, needsDetails bool) (string, error) {
 	beadType := ""
 	var beadDeps []string
 	if needsDetails {
 		if deps.FetchBeadDetails == nil {
 			return "", fmt.Errorf("bead details fetcher not configured")
 		}
-		details, err := deps.FetchBeadDetails(projectDir, assignment.Bead)
+		details, err := deps.FetchBeadDetails(ctx, projectDir, assignment.Bead)
 		if err != nil {
 			return "", err
 		}
@@ -1784,6 +2031,9 @@ func parseBulkAssignAllocation(raw string) (map[string]string, error) {
 	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
 		return nil, fmt.Errorf("allocation JSON parse failed: %w", err)
 	}
+	if len(decoded) == 0 {
+		return nil, errors.New("allocation JSON must contain at least one pane-to-bead mapping")
+	}
 
 	result := make(map[string]string)
 	for k, v := range decoded {
@@ -1810,16 +2060,19 @@ func decodeBulkAssignTriage(raw []byte) (*bv.TriageResponse, error) {
 	return &resp, nil
 }
 
-func fetchBeadTitle(dir, beadID string) (string, error) {
-	details, err := fetchBeadDetails(dir, beadID)
+func fetchBeadTitle(ctx context.Context, dir, beadID string) (string, error) {
+	details, err := fetchBeadDetails(ctx, dir, beadID)
 	if err != nil {
 		return "", err
 	}
 	return details.Title, nil
 }
 
-func fetchBeadDetails(dir, beadID string) (BeadDetails, error) {
-	cmd := exec.Command("br", "show", beadID, "--json")
+func fetchBeadDetails(ctx context.Context, dir, beadID string) (BeadDetails, error) {
+	if ctx == nil {
+		return BeadDetails{}, errors.New("bead details context is required")
+	}
+	cmd := exec.CommandContext(ctx, "br", "show", beadID, "--json")
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
@@ -1861,23 +2114,4 @@ func fetchBeadDetails(dir, beadID string) (BeadDetails, error) {
 		Type:         issues[0].IssueType,
 		Dependencies: deps,
 	}, nil
-}
-
-func parseBulkAssignSkipPanes(raw string) ([]string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
-	}
-	parts := strings.Split(raw, ",")
-	values := make([]string, 0, len(parts))
-	for index, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		if trimmed == "" {
-			return nil, fmt.Errorf("invalid pane selector list %q: empty selector at position %d", raw, index+1)
-		}
-		if _, err := tmux.ParsePaneSelector(trimmed); err != nil {
-			return nil, fmt.Errorf("invalid pane selector %q: %w", trimmed, err)
-		}
-		values = append(values, trimmed)
-	}
-	return values, nil
 }

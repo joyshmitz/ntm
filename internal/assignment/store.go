@@ -2,6 +2,7 @@
 package assignment
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +28,26 @@ const (
 	// assignmentsDirName is the directory name for assignment storage
 	assignmentsDirName     = "assignments"
 	fileExtension          = ".json"
-	assignmentStoreVersion = 7
+	assignmentStoreVersion = 9
+
+	// assignmentStoreGenerationVersion is the first schema version whose
+	// snapshots carry a monotonic persistence generation. The generation makes
+	// a fully published backup distinguishable from an older primary without
+	// relying on wall-clock ordering.
+	assignmentStoreGenerationVersion = 9
+
+	// assignmentSaveFailAfterBackupEnv is an E2E-only failpoint. Its value is a
+	// bead ID; the save fails after publishing a snapshot containing that bead's
+	// delivery receipt to the backup, but before replacing the primary.
+	assignmentSaveFailAfterBackupEnv = "NTM_TEST_ASSIGNMENT_SAVE_FAIL_AFTER_BACKUP"
+
+	// completionAckFailOnceEnv is an E2E-only failpoint. Its value is a bead ID;
+	// the first acknowledgement attempt for that bead fails before persistence,
+	// while later attempts in the same process proceed normally.
+	completionAckFailOnceEnv = "NTM_TEST_COMPLETION_ACK_FAIL_ONCE"
 )
+
+var completionAckFailures sync.Map
 
 // AssignmentStatus represents the current state of an assignment
 type AssignmentStatus string
@@ -106,6 +126,13 @@ type Assignment struct {
 	ClearState               AssignmentClearState `json:"clear_state,omitempty"`
 	ClearStartedAt           *time.Time           `json:"clear_started_at,omitempty"`
 	ClearError               string               `json:"clear_error,omitempty"`
+	PendingTerminalStatus    AssignmentStatus     `json:"pending_terminal_status,omitempty"`
+	PendingTerminalReason    string               `json:"pending_terminal_reason,omitempty"`
+	TerminalClaimReleased    bool                 `json:"terminal_claim_released,omitempty"`
+	PendingCompletionEventID string               `json:"pending_completion_event_id,omitempty"`
+	CompletionDetectedAt     *time.Time           `json:"completion_detected_at,omitempty"`
+	CompletionConsumerToken  string               `json:"completion_consumer_token,omitempty"`
+	CompletionLeaseExpiresAt *time.Time           `json:"completion_lease_expires_at,omitempty"`
 }
 
 // AssignmentUpdate describes mutable assignment metadata that can be updated
@@ -160,6 +187,8 @@ func cloneAssignment(a *Assignment) *Assignment {
 	cloned.DispatchStartedAt = cloneTimePtr(a.DispatchStartedAt)
 	cloned.DispatchedAt = cloneTimePtr(a.DispatchedAt)
 	cloned.ClearStartedAt = cloneTimePtr(a.ClearStartedAt)
+	cloned.CompletionDetectedAt = cloneTimePtr(a.CompletionDetectedAt)
+	cloned.CompletionLeaseExpiresAt = cloneTimePtr(a.CompletionLeaseExpiresAt)
 	cloned.ReservationRequested = append([]string(nil), a.ReservationRequested...)
 	cloned.ReservationInputPaths = append([]string(nil), a.ReservationInputPaths...)
 	cloned.ReservedPaths = append([]string(nil), a.ReservedPaths...)
@@ -170,16 +199,40 @@ func cloneAssignment(a *Assignment) *Assignment {
 
 // AssignmentStore manages bead-to-agent assignments for a session
 type AssignmentStore struct {
-	SessionName        string                 `json:"session_name"`
-	Assignments        map[string]*Assignment `json:"assignments"`                   // bead_id -> active or terminal assignment
-	ClearedGenerations map[string]uint64      `json:"cleared_generations,omitempty"` // bead_id -> completed explicit clears
-	UpdatedAt          time.Time              `json:"updated_at"`
-	Version            int                    `json:"version"` // Schema version for migrations
+	SessionName           string                 `json:"session_name"`
+	Assignments           map[string]*Assignment `json:"assignments"`                   // bead_id -> active or terminal assignment
+	ClearedGenerations    map[string]uint64      `json:"cleared_generations,omitempty"` // bead_id -> completed explicit clears
+	PersistenceGeneration uint64                 `json:"persistence_generation,omitempty"`
+	UpdatedAt             time.Time              `json:"updated_at"`
+	Version               int                    `json:"version"` // Schema version for migrations
 
-	mutex    sync.RWMutex
-	path     string                 // Path to persistence file
-	baseline map[string]*Assignment // Last disk snapshot used to derive local deltas
-	replace  map[string]struct{}    // Beads intentionally replaced as whole records
+	mutex                sync.RWMutex
+	path                 string                 // Path to persistence file
+	baseline             map[string]*Assignment // Last disk snapshot used to derive local deltas
+	replace              map[string]struct{}    // Beads intentionally replaced as whole records
+	afterBackupPublished func(*AssignmentStore) error
+	completionLeaseClock func() time.Time
+	completionLeaseLock  func(context.Context, string, string) (func(), error)
+}
+
+// completionLeaseNow samples the authoritative lease clock only after the
+// caller has acquired the cross-process bead lock and refreshed durable state.
+func (s *AssignmentStore) completionLeaseNow() (time.Time, error) {
+	now := time.Now().UTC()
+	if s.completionLeaseClock != nil {
+		now = s.completionLeaseClock().UTC()
+	}
+	if now.IsZero() {
+		return time.Time{}, errors.New("completion lease clock returned a zero timestamp")
+	}
+	return now, nil
+}
+
+func (s *AssignmentStore) acquireCompletionLeaseOperationLock(ctx context.Context, beadID string) (func(), error) {
+	if s.completionLeaseLock != nil {
+		return s.completionLeaseLock(ctx, s.path, beadID)
+	}
+	return acquireAtomicBeadOperationLock(ctx, s.path, beadID)
 }
 
 // PersistenceError represents an error during persistence operations
@@ -240,14 +293,15 @@ func NewStore(sessionName string) *AssignmentStore {
 	_ = os.MkdirAll(sessionDir, 0700)
 
 	return &AssignmentStore{
-		SessionName:        sessionName,
-		Assignments:        make(map[string]*Assignment),
-		ClearedGenerations: make(map[string]uint64),
-		UpdatedAt:          time.Now().UTC(),
-		Version:            assignmentStoreVersion,
-		path:               filepath.Join(sessionDir, assignmentsDirName+fileExtension),
-		baseline:           make(map[string]*Assignment),
-		replace:            make(map[string]struct{}),
+		SessionName:           sessionName,
+		Assignments:           make(map[string]*Assignment),
+		ClearedGenerations:    make(map[string]uint64),
+		PersistenceGeneration: 0,
+		UpdatedAt:             time.Now().UTC(),
+		Version:               assignmentStoreVersion,
+		path:                  filepath.Join(sessionDir, assignmentsDirName+fileExtension),
+		baseline:              make(map[string]*Assignment),
+		replace:               make(map[string]struct{}),
 	}
 }
 
@@ -272,9 +326,11 @@ func LoadStoreStrict(sessionName string) (*AssignmentStore, error) {
 	return store, nil
 }
 
-// LoadStrict is the fail-closed counterpart to Load. A missing store is a
-// valid empty ledger only when no backup exists. Mutating callers never fall
-// back to a backup because it may predate a persisted sending barrier.
+// LoadStrict is the fail-closed counterpart to Load. A corrupt primary is never
+// replaced from backup because the backup may predate an external side-effect
+// barrier. Strict recovery accepts only the two publication windows proven by
+// durable generations: backup generation 1 before the first primary exists, or
+// a backup exactly one generation ahead of a valid primary.
 func (s *AssignmentStore) LoadStrict() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -284,48 +340,19 @@ func (s *AssignmentStore) LoadStrict() error {
 	}
 	defer unlock()
 
-	data, err := os.ReadFile(s.path)
+	selection, err := selectAssignmentSnapshot(s.path, s.SessionName, true)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return &PersistenceError{Operation: "load", Path: s.path, Cause: err}
-		}
-		bakPath := s.path + ".bak"
-		if _, backupErr := os.Stat(bakPath); backupErr == nil {
-			return &PersistenceError{
-				Operation: "load",
-				Path:      s.path,
-				Cause:     fmt.Errorf("primary ledger is missing while backup %s exists", bakPath),
-			}
-		} else if !os.IsNotExist(backupErr) {
-			return &PersistenceError{Operation: "inspect backup", Path: bakPath, Cause: backupErr}
-		}
+		return &PersistenceError{Operation: "load", Path: s.path, Cause: err}
+	}
+	if selection == nil {
 		return nil
 	}
-
-	var loaded AssignmentStore
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		return &PersistenceError{Operation: "parse primary ledger", Path: s.path, Cause: err}
+	if selection.promoteBackup {
+		if err := publishAssignmentPrimary(s.path, selection.data); err != nil {
+			return &PersistenceError{Operation: "promote newer backup", Path: s.path, Cause: err}
+		}
 	}
-
-	s.SessionName = loaded.SessionName
-	s.Assignments = loaded.Assignments
-	s.ClearedGenerations = loaded.ClearedGenerations
-	s.UpdatedAt = loaded.UpdatedAt
-	s.Version = loaded.Version
-	if s.Version < assignmentStoreVersion {
-		s.Version = assignmentStoreVersion
-	}
-	if s.Assignments == nil {
-		s.Assignments = make(map[string]*Assignment)
-	}
-	if s.ClearedGenerations == nil {
-		s.ClearedGenerations = make(map[string]uint64)
-	}
-	for _, assignment := range s.Assignments {
-		normalizeFailureReason(assignment)
-	}
-	s.baseline = cloneAssignmentMap(s.Assignments)
-	s.replace = make(map[string]struct{})
+	s.applySnapshotLocked(selection.snapshot)
 	return nil
 }
 
@@ -339,49 +366,38 @@ func (s *AssignmentStore) Load() error {
 	}
 	defer unlock()
 
-	data, err := os.ReadFile(s.path)
+	selection, err := selectAssignmentSnapshot(s.path, s.SessionName, false)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// Try backup
-			bakPath := s.path + ".bak"
-			data, err = os.ReadFile(bakPath)
-			if err != nil {
-				// Start fresh - not an error
-				return nil
-			}
-			// Log recovery from backup
-			slog.Warn("recovered assignment store from backup", "path", bakPath)
-		} else {
-			return &PersistenceError{Operation: "load", Path: s.path, Cause: err}
+		return &PersistenceError{Operation: "load", Path: s.path, Cause: err}
+	}
+	if selection == nil {
+		return nil
+	}
+	if selection.sourcePath != s.path {
+		slog.Warn("recovered assignment store from backup", "path", selection.sourcePath, "generation", selection.snapshot.PersistenceGeneration)
+	}
+	if selection.promoteBackup {
+		if err := publishAssignmentPrimary(s.path, selection.data); err != nil {
+			return &PersistenceError{Operation: "promote newer backup", Path: s.path, Cause: err}
 		}
 	}
+	s.applySnapshotLocked(selection.snapshot)
+	return nil
+}
 
-	var loaded AssignmentStore
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		// Try backup on corrupt JSON
-		bakPath := s.path + ".bak"
-		data, bakErr := os.ReadFile(bakPath)
-		if bakErr != nil {
-			// Start fresh
-			slog.Warn("assignment store corrupted, starting fresh", "error", err)
-			return nil
-		}
-		if err := json.Unmarshal(data, &loaded); err != nil {
-			slog.Warn("assignment store and backup corrupted, starting fresh", "error", err)
-			return nil
-		}
-		slog.Warn("assignment store corrupted, recovered from backup")
+func (s *AssignmentStore) applySnapshotLocked(loaded *AssignmentStore) {
+	if loaded == nil {
+		return
 	}
-
 	s.SessionName = loaded.SessionName
-	s.Assignments = loaded.Assignments
-	s.ClearedGenerations = loaded.ClearedGenerations
+	s.Assignments = cloneAssignmentMap(loaded.Assignments)
+	s.ClearedGenerations = cloneClearedGenerationMap(loaded.ClearedGenerations)
+	s.PersistenceGeneration = loaded.PersistenceGeneration
 	s.UpdatedAt = loaded.UpdatedAt
 	s.Version = loaded.Version
 	if s.Version < assignmentStoreVersion {
 		s.Version = assignmentStoreVersion
 	}
-
 	if s.Assignments == nil {
 		s.Assignments = make(map[string]*Assignment)
 	}
@@ -393,8 +409,6 @@ func (s *AssignmentStore) Load() error {
 	}
 	s.baseline = cloneAssignmentMap(s.Assignments)
 	s.replace = make(map[string]struct{})
-
-	return nil
 }
 
 // Save writes the assignment store to disk with backup
@@ -418,28 +432,38 @@ func (s *AssignmentStore) saveLocked() error {
 	}
 	defer unlock()
 
-	latest, latestClearedGenerations, err := readAssignmentStateForMerge(s.path)
+	latestSnapshot, err := readAssignmentStateForMerge(s.path, s.SessionName)
 	if err != nil {
 		return &PersistenceError{Operation: "reload before save", Path: s.path, Cause: err}
 	}
+	latest := latestSnapshot.Assignments
+	latestClearedGenerations := latestSnapshot.ClearedGenerations
 	merged, mergeErr := mergeAssignmentDeltas(latest, s.baseline, s.Assignments, s.replace)
 	if mergeErr != nil {
 		s.Assignments = cloneAssignmentMap(latest)
 		s.ClearedGenerations = cloneClearedGenerationMap(latestClearedGenerations)
+		s.PersistenceGeneration = latestSnapshot.PersistenceGeneration
+		s.UpdatedAt = latestSnapshot.UpdatedAt
+		s.Version = latestSnapshot.Version
 		s.baseline = cloneAssignmentMap(latest)
 		s.replace = make(map[string]struct{})
 		return &PersistenceError{Operation: "merge before save", Path: s.path, Cause: mergeErr}
 	}
 	mergedClearedGenerations := mergeClearedGenerations(latestClearedGenerations, s.ClearedGenerations)
+	if latestSnapshot.PersistenceGeneration == ^uint64(0) {
+		return &PersistenceError{Operation: "save", Path: s.path, Cause: errors.New("persistence generation exhausted")}
+	}
+	nextGeneration := latestSnapshot.PersistenceGeneration + 1
 
 	updatedAt := time.Now().UTC()
 
 	snapshot := &AssignmentStore{
-		SessionName:        s.SessionName,
-		Assignments:        merged,
-		ClearedGenerations: mergedClearedGenerations,
-		UpdatedAt:          updatedAt,
-		Version:            assignmentStoreVersion,
+		SessionName:           s.SessionName,
+		Assignments:           merged,
+		ClearedGenerations:    mergedClearedGenerations,
+		PersistenceGeneration: nextGeneration,
+		UpdatedAt:             updatedAt,
+		Version:               assignmentStoreVersion,
 	}
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -474,9 +498,9 @@ func (s *AssignmentStore) saveLocked() error {
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	// Publish the same new snapshot to the backup before the primary. If the
-	// process stops between these renames, the still-valid primary is older but
-	// cannot have crossed an external side-effect boundary that follows Save.
+	// Publish the same new snapshot to the backup before the primary. The durable
+	// generation lets restart recovery recognize this exact publication window,
+	// including saves that persist a receipt after an external side effect.
 	bakPath := s.path + ".bak"
 	backupTemp, err := os.CreateTemp(dir, ".assignments-backup-*.tmp")
 	if err != nil {
@@ -509,6 +533,9 @@ func (s *AssignmentStore) saveLocked() error {
 	if err := syncAssignmentDirectory(dir); err != nil {
 		return &PersistenceError{Operation: "sync backup directory", Path: dir, Cause: err}
 	}
+	if err := s.failAfterBackupPublished(snapshot); err != nil {
+		return &PersistenceError{Operation: "publish backup", Path: bakPath, Cause: err}
+	}
 
 	// Rename temp to current
 	if err := os.Rename(tmpPath, s.path); err != nil {
@@ -521,6 +548,7 @@ func (s *AssignmentStore) saveLocked() error {
 	s.ClearedGenerations = mergedClearedGenerations
 	s.baseline = cloneAssignmentMap(merged)
 	s.replace = make(map[string]struct{})
+	s.PersistenceGeneration = nextGeneration
 	s.UpdatedAt = updatedAt
 	s.Version = assignmentStoreVersion
 
@@ -553,22 +581,156 @@ func mergeClearedGenerations(latest, current map[string]uint64) map[string]uint6
 	return merged
 }
 
-func readAssignmentStateForMerge(path string) (map[string]*Assignment, map[string]uint64, error) {
+type assignmentSnapshotCandidate struct {
+	path     string
+	snapshot *AssignmentStore
+	data     []byte
+	exists   bool
+	err      error
+}
+
+type assignmentSnapshotSelection struct {
+	snapshot      *AssignmentStore
+	sourcePath    string
+	data          []byte
+	promoteBackup bool
+}
+
+func readAssignmentStateForMerge(path, expectedSession string) (*AssignmentStore, error) {
+	selection, err := selectAssignmentSnapshot(path, expectedSession, true)
+	if err != nil {
+		return nil, err
+	}
+	if selection == nil {
+		return &AssignmentStore{
+			SessionName:        expectedSession,
+			Assignments:        make(map[string]*Assignment),
+			ClearedGenerations: make(map[string]uint64),
+			Version:            assignmentStoreVersion,
+		}, nil
+	}
+	if selection.promoteBackup {
+		if err := publishAssignmentPrimary(path, selection.data); err != nil {
+			return nil, fmt.Errorf("promote newer backup: %w", err)
+		}
+	}
+	return selection.snapshot, nil
+}
+
+func selectAssignmentSnapshot(path, expectedSession string, strict bool) (*assignmentSnapshotSelection, error) {
+	primary := readAssignmentSnapshotCandidate(path, expectedSession)
+	backup := readAssignmentSnapshotCandidate(path+".bak", expectedSession)
+
+	if strict {
+		if primary.exists && primary.err != nil {
+			return nil, fmt.Errorf("invalid primary ledger: %w", primary.err)
+		}
+		if backup.exists && backup.err != nil {
+			return nil, fmt.Errorf("invalid backup ledger: %w", backup.err)
+		}
+		if !primary.exists {
+			if !backup.exists {
+				return nil, nil
+			}
+			if backup.snapshot.PersistenceGeneration != 1 {
+				return nil, fmt.Errorf("primary ledger is missing while backup generation is %d, want initial generation 1", backup.snapshot.PersistenceGeneration)
+			}
+			return selectBackupSnapshot(backup, true), nil
+		}
+		if !backup.exists {
+			return selectPrimarySnapshot(primary), nil
+		}
+		return selectAssignmentSnapshotPair(primary, backup)
+	}
+
+	if primary.exists && primary.err == nil {
+		if !backup.exists || backup.err != nil {
+			return selectPrimarySnapshot(primary), nil
+		}
+		return selectAssignmentSnapshotPair(primary, backup)
+	}
+	if backup.exists && backup.err == nil {
+		promote := backup.snapshot.PersistenceGeneration == 1 && !primary.exists
+		return selectBackupSnapshot(backup, promote), nil
+	}
+	if !primary.exists && !backup.exists {
+		return nil, nil
+	}
+	if primary.err != nil {
+		return nil, fmt.Errorf("invalid primary ledger: %w", primary.err)
+	}
+	return nil, fmt.Errorf("invalid backup ledger: %w", backup.err)
+}
+
+func selectAssignmentSnapshotPair(primary, backup assignmentSnapshotCandidate) (*assignmentSnapshotSelection, error) {
+	primaryGeneration := primary.snapshot.PersistenceGeneration
+	backupGeneration := backup.snapshot.PersistenceGeneration
+	switch {
+	case backupGeneration > primaryGeneration:
+		if backupGeneration-primaryGeneration != 1 {
+			return nil, fmt.Errorf("backup generation %d is not the immediate successor of primary generation %d", backupGeneration, primaryGeneration)
+		}
+		return selectBackupSnapshot(backup, true), nil
+	case backupGeneration < primaryGeneration:
+		return selectPrimarySnapshot(primary), nil
+	default:
+		if !bytes.Equal(primary.data, backup.data) {
+			return nil, fmt.Errorf("primary and backup diverge at persistence generation %d", primaryGeneration)
+		}
+		return selectPrimarySnapshot(primary), nil
+	}
+}
+
+func selectPrimarySnapshot(primary assignmentSnapshotCandidate) *assignmentSnapshotSelection {
+	return &assignmentSnapshotSelection{
+		snapshot:   primary.snapshot,
+		sourcePath: primary.path,
+		data:       primary.data,
+	}
+}
+
+func selectBackupSnapshot(backup assignmentSnapshotCandidate, promote bool) *assignmentSnapshotSelection {
+	return &assignmentSnapshotSelection{
+		snapshot:      backup.snapshot,
+		sourcePath:    backup.path,
+		data:          backup.data,
+		promoteBackup: promote,
+	}
+}
+
+func readAssignmentSnapshotCandidate(path, expectedSession string) assignmentSnapshotCandidate {
+	candidate := assignmentSnapshotCandidate{path: path}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if _, backupErr := os.Stat(path + ".bak"); backupErr == nil {
-				return nil, nil, fmt.Errorf("primary ledger is missing while backup %s exists", path+".bak")
-			} else if !os.IsNotExist(backupErr) {
-				return nil, nil, backupErr
-			}
-			return make(map[string]*Assignment), make(map[string]uint64), nil
+			return candidate
 		}
-		return nil, nil, err
+		candidate.exists = true
+		candidate.err = err
+		return candidate
 	}
+	candidate.exists = true
+	candidate.data = data
+	candidate.snapshot, candidate.err = decodeAssignmentSnapshot(data, expectedSession)
+	return candidate
+}
+
+func decodeAssignmentSnapshot(data []byte, expectedSession string) (*AssignmentStore, error) {
 	var loaded AssignmentStore
 	if err := json.Unmarshal(data, &loaded); err != nil {
-		return nil, nil, err
+		return nil, err
+	}
+	if expectedSession != "" && loaded.SessionName != expectedSession {
+		return nil, fmt.Errorf("ledger session %q does not match requested session %q", loaded.SessionName, expectedSession)
+	}
+	if loaded.Version > assignmentStoreVersion {
+		return nil, fmt.Errorf("ledger schema version %d is newer than supported version %d", loaded.Version, assignmentStoreVersion)
+	}
+	if loaded.Version >= assignmentStoreGenerationVersion && loaded.PersistenceGeneration == 0 {
+		return nil, fmt.Errorf("schema version %d is missing persistence generation", loaded.Version)
+	}
+	if loaded.Version < assignmentStoreGenerationVersion && loaded.PersistenceGeneration != 0 {
+		return nil, fmt.Errorf("legacy schema version %d has persistence generation %d", loaded.Version, loaded.PersistenceGeneration)
 	}
 	if loaded.Assignments == nil {
 		loaded.Assignments = make(map[string]*Assignment)
@@ -576,7 +738,119 @@ func readAssignmentStateForMerge(path string) (map[string]*Assignment, map[strin
 	if loaded.ClearedGenerations == nil {
 		loaded.ClearedGenerations = make(map[string]uint64)
 	}
-	return cloneAssignmentMap(loaded.Assignments), cloneClearedGenerationMap(loaded.ClearedGenerations), nil
+	for beadID, assignment := range loaded.Assignments {
+		if err := validateCompletionOutboxAssignment(assignment); err != nil {
+			return nil, fmt.Errorf("assignment %q completion outbox: %w", beadID, err)
+		}
+		normalizeFailureReason(assignment)
+	}
+	return &loaded, nil
+}
+
+func validateCompletionOutboxAssignment(current *Assignment) error {
+	if current == nil {
+		return errors.New("assignment is null")
+	}
+	eventID := strings.TrimSpace(current.PendingCompletionEventID)
+	consumerToken := strings.TrimSpace(current.CompletionConsumerToken)
+	if current.PendingCompletionEventID != "" && eventID == "" {
+		return errors.New("pending completion event ID is blank")
+	}
+	if current.CompletionConsumerToken != "" && consumerToken == "" {
+		return errors.New("completion consumer token is blank")
+	}
+	hasEvent := eventID != ""
+	hasDetectedAt := current.CompletionDetectedAt != nil
+	if hasEvent != hasDetectedAt {
+		return errors.New("pending completion event ID and detection timestamp must appear together")
+	}
+	if hasDetectedAt {
+		if err := validateCompletionOutboxTimestamp("detection", current.CompletionDetectedAt); err != nil {
+			return err
+		}
+		terminalStatus := current.Status == StatusCompleted || current.Status == StatusFailed
+		pendingTerminalStatus := current.ClearState != ClearStateNone &&
+			(current.PendingTerminalStatus == StatusCompleted || current.PendingTerminalStatus == StatusFailed)
+		if !terminalStatus && !pendingTerminalStatus {
+			return errors.New("pending completion event requires a terminal assignment outcome")
+		}
+	}
+
+	hasConsumerToken := consumerToken != ""
+	hasLeaseExpiry := current.CompletionLeaseExpiresAt != nil
+	if hasConsumerToken != hasLeaseExpiry {
+		return errors.New("completion consumer token and lease expiry must appear together")
+	}
+	if !hasConsumerToken {
+		return nil
+	}
+	if !hasEvent {
+		return errors.New("completion consumer lease requires a pending completion event")
+	}
+	if current.Status != StatusCompleted && current.Status != StatusFailed {
+		return errors.New("completion consumer lease requires a terminal assignment status")
+	}
+	if current.ClearState != ClearStateNone {
+		return errors.New("completion consumer lease requires completed terminal reconciliation")
+	}
+	return validateCompletionOutboxTimestamp("lease expiry", current.CompletionLeaseExpiresAt)
+}
+
+func validateCompletionOutboxTimestamp(name string, timestamp *time.Time) error {
+	if timestamp == nil || timestamp.IsZero() {
+		return fmt.Errorf("completion %s timestamp is invalid", name)
+	}
+	_, offset := timestamp.Zone()
+	if offset != 0 {
+		return fmt.Errorf("completion %s timestamp must be UTC", name)
+	}
+	return nil
+}
+
+func publishAssignmentPrimary(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmpFile, err := os.CreateTemp(dir, ".assignments-recovery-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmpFile.Chmod(0600); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return syncAssignmentDirectory(dir)
+}
+
+func (s *AssignmentStore) failAfterBackupPublished(snapshot *AssignmentStore) error {
+	if s.afterBackupPublished != nil {
+		if err := s.afterBackupPublished(snapshot); err != nil {
+			return err
+		}
+	}
+	beadID := strings.TrimSpace(os.Getenv(assignmentSaveFailAfterBackupEnv))
+	if beadID == "" || snapshot == nil {
+		return nil
+	}
+	assignment := snapshot.Assignments[beadID]
+	if assignment == nil || assignment.DispatchState != DispatchSent || strings.TrimSpace(assignment.DispatchReceiptID) == "" {
+		return nil
+	}
+	return fmt.Errorf("injected failure after publishing dispatch receipt for %s to backup", beadID)
 }
 
 func mergeAssignmentDeltas(latest, baseline, current map[string]*Assignment, replacements map[string]struct{}) (map[string]*Assignment, error) {
@@ -816,20 +1090,6 @@ func (s *AssignmentStore) List() []*Assignment {
 	return result
 }
 
-// ListByPane returns all assignments for a specific pane
-func (s *AssignmentStore) ListByPane(pane int) []*Assignment {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-
-	var result []*Assignment
-	for _, a := range s.Assignments {
-		if a.Pane == pane {
-			result = append(result, cloneAssignment(a))
-		}
-	}
-	return result
-}
-
 // ListByStatus returns all assignments with a specific status
 func (s *AssignmentStore) ListByStatus(status AssignmentStatus) []*Assignment {
 	s.mutex.RLock()
@@ -876,6 +1136,92 @@ func (s *AssignmentStore) BeginClearIfStatus(ctx context.Context, beadID string,
 	return s.beginClear(ctx, beadID, startedAt, expected)
 }
 
+// BeginTerminalReconciliationIfCurrent durably records the desired terminal
+// outcome on the exact assignment generation observed by the caller. The clear
+// barrier is persisted before any external lease or claim release may run. It
+// does not create a completion outbox entry because most reconciliation callers
+// have no event consumer that can acknowledge one.
+func (s *AssignmentStore) BeginTerminalReconciliationIfCurrent(ctx context.Context, observed *Assignment, terminalStatus AssignmentStatus, reason string) (*Assignment, bool, error) {
+	return s.beginTerminalReconciliationIfCurrent(ctx, observed, terminalStatus, reason, false)
+}
+
+// BeginTerminalReconciliationWithCompletionEventIfCurrent establishes the same
+// exact-generation barrier and also creates a durable completion outbox entry.
+// Only callers with an acknowledge-capable completion-event consumer may use it.
+func (s *AssignmentStore) BeginTerminalReconciliationWithCompletionEventIfCurrent(ctx context.Context, observed *Assignment, terminalStatus AssignmentStatus, reason string) (*Assignment, bool, error) {
+	return s.beginTerminalReconciliationIfCurrent(ctx, observed, terminalStatus, reason, true)
+}
+
+func (s *AssignmentStore) beginTerminalReconciliationIfCurrent(ctx context.Context, observed *Assignment, terminalStatus AssignmentStatus, reason string, createCompletionEvent bool) (*Assignment, bool, error) {
+	if observed == nil || strings.TrimSpace(observed.BeadID) == "" {
+		return nil, false, errors.New("observed assignment generation is required")
+	}
+	if terminalStatus != StatusCompleted && terminalStatus != StatusFailed {
+		return nil, false, fmt.Errorf("terminal reconciliation status must be completed or failed, got %s", terminalStatus)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationUnlock, err := acquireAtomicBeadOperationLock(ctx, s.path, observed.BeadID)
+	if err != nil {
+		return nil, false, fmt.Errorf("lock terminal assignment reconciliation %s: %w", observed.BeadID, err)
+	}
+	defer operationUnlock()
+	if err := s.LoadStrict(); err != nil {
+		return nil, false, fmt.Errorf("refresh terminal assignment reconciliation %s: %w", observed.BeadID, err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	current := s.Assignments[observed.BeadID]
+	if !SameAssignmentGeneration(observed, current) {
+		return nil, false, nil
+	}
+	if current.DispatchState == DispatchSending {
+		return nil, false, fmt.Errorf("%w: cannot retire %s while dispatch outcome is unknown", ErrDispatchOutcomeUnknown, observed.BeadID)
+	}
+	if current.ClearState != ClearStateNone {
+		if current.PendingTerminalStatus == terminalStatus && current.PendingTerminalReason == reason {
+			return cloneAssignment(current), true, nil
+		}
+		return nil, false, nil
+	}
+	if current.Status != StatusClaiming && current.Status != StatusClaimed && current.Status != StatusAssigned && current.Status != StatusWorking {
+		return nil, false, nil
+	}
+
+	startedAt := time.Now().UTC()
+	previous := cloneAssignment(current)
+	current.ClearState = ClearStateReservationReleasing
+	current.ClearStartedAt = &startedAt
+	current.ClearError = ""
+	current.PendingTerminalStatus = terminalStatus
+	current.PendingTerminalReason = reason
+	current.TerminalClaimReleased = false
+	current.PendingCompletionEventID = ""
+	current.CompletionDetectedAt = nil
+	current.CompletionConsumerToken = ""
+	current.CompletionLeaseExpiresAt = nil
+	if createCompletionEvent {
+		current.PendingCompletionEventID = terminalCompletionEventID(current, terminalStatus)
+		current.CompletionDetectedAt = cloneTimePtr(&startedAt)
+	}
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[observed.BeadID] = struct{}{}
+	if err := s.saveLocked(); err != nil {
+		var concurrentMutation *ConcurrentMutationError
+		if errors.As(err, &concurrentMutation) {
+			return nil, false, nil
+		}
+		s.Assignments[observed.BeadID] = previous
+		delete(s.replace, observed.BeadID)
+		return nil, false, err
+	}
+	return cloneAssignment(current), true, nil
+}
+
 func (s *AssignmentStore) beginClear(ctx context.Context, beadID string, startedAt time.Time, expected []AssignmentStatus) (*Assignment, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -888,7 +1234,13 @@ func (s *AssignmentStore) beginClear(ctx context.Context, beadID string, started
 	if err := s.LoadStrict(); err != nil {
 		return nil, fmt.Errorf("refresh assignment clear %s: %w", beadID, err)
 	}
+	return s.beginClearWithOperationLock(beadID, startedAt, expected)
+}
 
+// beginClearWithOperationLock mutates clear state while the caller owns the
+// bead operation lock and has refreshed the store. Atomic replacement uses it
+// to avoid recursively acquiring the same cross-process lock.
+func (s *AssignmentStore) beginClearWithOperationLock(beadID string, startedAt time.Time, expected []AssignmentStatus) (*Assignment, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	assignment := s.Assignments[beadID]
@@ -901,16 +1253,29 @@ func (s *AssignmentStore) beginClear(ctx context.Context, beadID string, started
 	if assignment.DispatchState == DispatchSending {
 		return nil, fmt.Errorf("%w: cannot clear %s while dispatch outcome is unknown", ErrDispatchOutcomeUnknown, beadID)
 	}
+	if strings.TrimSpace(assignment.PendingCompletionEventID) != "" {
+		return nil, fmt.Errorf("%w: cannot clear %s before event %s is acknowledged", ErrCompletionEventPending, beadID, assignment.PendingCompletionEventID)
+	}
 	if assignment.ClearState != ClearStateNone {
 		return cloneAssignment(assignment), nil
 	}
 	if startedAt.IsZero() {
 		startedAt = time.Now().UTC()
 	}
+	previous := cloneAssignment(assignment)
 	assignment.ClearState = ClearStateReservationReleasing
 	assignment.ClearStartedAt = &startedAt
 	assignment.ClearError = ""
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[beadID] = struct{}{}
 	if err := s.saveLocked(); err != nil {
+		var concurrentMutation *ConcurrentMutationError
+		if !errors.As(err, &concurrentMutation) {
+			s.Assignments[beadID] = previous
+			delete(s.replace, beadID)
+		}
 		return nil, err
 	}
 	return cloneAssignment(assignment), nil
@@ -946,7 +1311,12 @@ func (s *AssignmentStore) RecordClearReleaseFailed(ctx context.Context, beadID s
 	if err := s.LoadStrict(); err != nil {
 		return fmt.Errorf("refresh assignment clear failure %s: %w", beadID, err)
 	}
+	return s.recordClearReleaseFailedWithOperationLock(beadID, releaseErr)
+}
 
+// recordClearReleaseFailedWithOperationLock records a retry diagnostic while
+// the caller owns the bead operation lock and has refreshed the store.
+func (s *AssignmentStore) recordClearReleaseFailedWithOperationLock(beadID string, releaseErr error) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	assignment := s.Assignments[beadID]
@@ -956,11 +1326,24 @@ func (s *AssignmentStore) RecordClearReleaseFailed(ctx context.Context, beadID s
 	if assignment.ClearState == ClearStateNone {
 		return fmt.Errorf("assignment %s is not awaiting reservation release", beadID)
 	}
+	previous := cloneAssignment(assignment)
 	assignment.ClearError = ""
 	if releaseErr != nil {
 		assignment.ClearError = releaseErr.Error()
 	}
-	return s.saveLocked()
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[beadID] = struct{}{}
+	if err := s.saveLocked(); err != nil {
+		var concurrentMutation *ConcurrentMutationError
+		if !errors.As(err, &concurrentMutation) {
+			s.Assignments[beadID] = previous
+			delete(s.replace, beadID)
+		}
+		return err
+	}
+	return nil
 }
 
 // RecordClearLeasesReleased durably records that every matching external lease
@@ -978,7 +1361,60 @@ func (s *AssignmentStore) RecordClearLeasesReleased(ctx context.Context, beadID 
 	if err := s.LoadStrict(); err != nil {
 		return nil, fmt.Errorf("refresh assignment lease-release completion %s: %w", beadID, err)
 	}
+	return s.recordClearLeasesReleasedWithOperationLock(beadID)
+}
 
+// RecordTerminalClaimReleased durably checkpoints that the exact Beads claim
+// recorded on a pending terminal assignment is no longer externally owned.
+func (s *AssignmentStore) RecordTerminalClaimReleased(ctx context.Context, beadID string) (*Assignment, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationUnlock, err := acquireAtomicBeadOperationLock(ctx, s.path, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("lock assignment claim-release completion %s: %w", beadID, err)
+	}
+	defer operationUnlock()
+	if err := s.LoadStrict(); err != nil {
+		return nil, fmt.Errorf("refresh assignment claim-release completion %s: %w", beadID, err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	current := s.Assignments[beadID]
+	if current == nil {
+		return nil, fmt.Errorf("[ASSIGN] Assignment not found: %s", beadID)
+	}
+	if current.PendingTerminalStatus != StatusCompleted && current.PendingTerminalStatus != StatusFailed {
+		return nil, fmt.Errorf("assignment %s is not awaiting terminal reconciliation", beadID)
+	}
+	if current.ClearState != ClearStateLeasesReleased {
+		return nil, fmt.Errorf("assignment %s has not durably completed reservation release", beadID)
+	}
+	if current.TerminalClaimReleased {
+		return cloneAssignment(current), nil
+	}
+	previous := cloneAssignment(current)
+	current.TerminalClaimReleased = true
+	current.ClearError = ""
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[beadID] = struct{}{}
+	if err := s.saveLocked(); err != nil {
+		var concurrentMutation *ConcurrentMutationError
+		if !errors.As(err, &concurrentMutation) {
+			s.Assignments[beadID] = previous
+			delete(s.replace, beadID)
+		}
+		return nil, err
+	}
+	return cloneAssignment(current), nil
+}
+
+// recordClearLeasesReleasedWithOperationLock persists the release checkpoint
+// while the caller owns the bead operation lock and has refreshed the store.
+func (s *AssignmentStore) recordClearLeasesReleasedWithOperationLock(beadID string) (*Assignment, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	assignment := s.Assignments[beadID]
@@ -991,6 +1427,7 @@ func (s *AssignmentStore) RecordClearLeasesReleased(ctx context.Context, beadID 
 	if assignment.ClearState != ClearStateReservationReleasing {
 		return nil, fmt.Errorf("assignment %s is not awaiting reservation release", beadID)
 	}
+	previous := cloneAssignment(assignment)
 	assignment.ClearState = ClearStateLeasesReleased
 	assignment.ClearError = ""
 	assignment.ReservationState = ReservationReleased
@@ -999,7 +1436,16 @@ func (s *AssignmentStore) RecordClearLeasesReleased(ctx context.Context, beadID 
 	assignment.ReservationIDs = nil
 	assignment.ReservationExpiresAt = nil
 	assignment.ReservationError = ""
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[beadID] = struct{}{}
 	if err := s.saveLocked(); err != nil {
+		var concurrentMutation *ConcurrentMutationError
+		if !errors.As(err, &concurrentMutation) {
+			s.Assignments[beadID] = previous
+			delete(s.replace, beadID)
+		}
 		return nil, err
 	}
 	return cloneAssignment(assignment), nil
@@ -1026,6 +1472,9 @@ func (s *AssignmentStore) CompleteClear(ctx context.Context, beadID string) erro
 	if assignment == nil {
 		return nil
 	}
+	if strings.TrimSpace(assignment.PendingCompletionEventID) != "" {
+		return fmt.Errorf("%w: cannot complete clear for %s before event %s is acknowledged", ErrCompletionEventPending, beadID, assignment.PendingCompletionEventID)
+	}
 	if assignment.ClearState != ClearStateLeasesReleased {
 		return fmt.Errorf("assignment %s has not durably completed reservation release", beadID)
 	}
@@ -1038,8 +1487,8 @@ func (s *AssignmentStore) CompleteClear(ctx context.Context, beadID string) erro
 }
 
 // CompleteTerminalReconciliation retires tracker-terminal work only after the
-// caller has proven every external reservation released. BeginClearIfStatus
-// establishes the cross-process barrier consumed here.
+// caller has proven every external reservation and exact claim released.
+// BeginTerminalReconciliationIfCurrent establishes the barrier consumed here.
 func (s *AssignmentStore) CompleteTerminalReconciliation(ctx context.Context, beadID string, terminalStatus AssignmentStatus, reason string) error {
 	if terminalStatus != StatusCompleted && terminalStatus != StatusFailed {
 		return fmt.Errorf("terminal reconciliation status must be completed or failed, got %s", terminalStatus)
@@ -1066,6 +1515,14 @@ func (s *AssignmentStore) CompleteTerminalReconciliation(ctx context.Context, be
 		s.mutex.Unlock()
 		return fmt.Errorf("assignment %s has not durably completed reservation release", beadID)
 	}
+	if assignment.PendingTerminalStatus != terminalStatus || assignment.PendingTerminalReason != reason {
+		s.mutex.Unlock()
+		return fmt.Errorf("assignment %s terminal outcome changed: pending %s %q, requested %s %q", beadID, assignment.PendingTerminalStatus, assignment.PendingTerminalReason, terminalStatus, reason)
+	}
+	if !assignment.TerminalClaimReleased {
+		s.mutex.Unlock()
+		return fmt.Errorf("assignment %s has not durably completed claim release", beadID)
+	}
 	if assignment.DispatchState == DispatchSending {
 		s.mutex.Unlock()
 		return fmt.Errorf("%w: cannot retire %s while dispatch outcome is unknown", ErrDispatchOutcomeUnknown, beadID)
@@ -1083,6 +1540,9 @@ func (s *AssignmentStore) CompleteTerminalReconciliation(ctx context.Context, be
 	assignment.ClearState = ClearStateNone
 	assignment.ClearStartedAt = nil
 	assignment.ClearError = ""
+	assignment.PendingTerminalStatus = ""
+	assignment.PendingTerminalReason = ""
+	assignment.TerminalClaimReleased = false
 	assignment.CompletedAt = nil
 	assignment.FailedAt = nil
 	assignment.FailReason = ""
@@ -1106,6 +1566,232 @@ func (s *AssignmentStore) CompleteTerminalReconciliation(ctx context.Context, be
 		emitAgentIdle(s.SessionName, cloned, previousStatus, terminalStatus)
 	}
 	return nil
+}
+
+// ListPendingCompletionEvents returns terminal rows whose completion event has
+// not yet been acknowledged by the consumer. The durable row is an outbox:
+// enqueue may repeat after a restart, but a completion cannot be lost between
+// terminal reconciliation and in-memory delivery.
+func (s *AssignmentStore) ListPendingCompletionEvents() []*Assignment {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	result := make([]*Assignment, 0)
+	for _, current := range s.Assignments {
+		if current == nil || strings.TrimSpace(current.PendingCompletionEventID) == "" || current.ClearState != ClearStateNone {
+			continue
+		}
+		if current.Status != StatusCompleted && current.Status != StatusFailed {
+			continue
+		}
+		result = append(result, cloneAssignment(current))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left, right := result[i], result[j]
+		leftDetectedAt, rightDetectedAt := time.Time{}, time.Time{}
+		if left.CompletionDetectedAt != nil {
+			leftDetectedAt = *left.CompletionDetectedAt
+		}
+		if right.CompletionDetectedAt != nil {
+			rightDetectedAt = *right.CompletionDetectedAt
+		}
+		if !leftDetectedAt.Equal(rightDetectedAt) {
+			return leftDetectedAt.Before(rightDetectedAt)
+		}
+		if left.BeadID != right.BeadID {
+			return left.BeadID < right.BeadID
+		}
+		return left.PendingCompletionEventID < right.PendingCompletionEventID
+	})
+	return result
+}
+
+// ClaimPendingCompletionEvent acquires the durable consumer lease for one
+// exact outbox generation. A different live lease is a clean non-acquisition;
+// an expired lease may be taken over so a crashed consumer cannot strand work.
+func (s *AssignmentStore) ClaimPendingCompletionEvent(ctx context.Context, beadID, eventID, consumerToken string, leaseDuration time.Duration) (*Assignment, bool, error) {
+	beadID = strings.TrimSpace(beadID)
+	eventID = strings.TrimSpace(eventID)
+	consumerToken = strings.TrimSpace(consumerToken)
+	if beadID == "" || eventID == "" || consumerToken == "" {
+		return nil, false, errors.New("bead ID, completion event ID, and consumer token are required")
+	}
+	if leaseDuration <= 0 {
+		return nil, false, errors.New("completion lease duration must be positive")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationUnlock, err := s.acquireCompletionLeaseOperationLock(ctx, beadID)
+	if err != nil {
+		return nil, false, fmt.Errorf("lock completion event claim %s: %w", beadID, err)
+	}
+	defer operationUnlock()
+	if err := s.LoadStrict(); err != nil {
+		return nil, false, fmt.Errorf("refresh completion event claim %s: %w", beadID, err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	now, err := s.completionLeaseNow()
+	if err != nil {
+		return nil, false, err
+	}
+	current := s.Assignments[beadID]
+	if current == nil || strings.TrimSpace(current.PendingCompletionEventID) != eventID {
+		return nil, false, nil
+	}
+	if current.Status != StatusCompleted && current.Status != StatusFailed {
+		return nil, false, fmt.Errorf("assignment %s completion event is not terminal", beadID)
+	}
+	existingToken := strings.TrimSpace(current.CompletionConsumerToken)
+	if (existingToken == "") != (current.CompletionLeaseExpiresAt == nil) {
+		return nil, false, fmt.Errorf("assignment %s completion event has an incomplete consumer lease", beadID)
+	}
+	if existingToken != "" && now.Before(*current.CompletionLeaseExpiresAt) {
+		if existingToken != consumerToken {
+			return cloneAssignment(current), false, nil
+		}
+		return cloneAssignment(current), true, nil
+	}
+
+	expiresAt := now.Add(leaseDuration)
+	previous := cloneAssignment(current)
+	current.CompletionConsumerToken = consumerToken
+	current.CompletionLeaseExpiresAt = &expiresAt
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[beadID] = struct{}{}
+	if err := s.saveLocked(); err != nil {
+		s.Assignments[beadID] = previous
+		delete(s.replace, beadID)
+		return nil, false, err
+	}
+	return cloneAssignment(current), true, nil
+}
+
+// RenewPendingCompletionEventLease extends a live lease only for its exact
+// owner and event generation. Once the durable expiry passes, renewal is
+// refused so recovery consumers have an unambiguous takeover boundary.
+func (s *AssignmentStore) RenewPendingCompletionEventLease(ctx context.Context, beadID, eventID, consumerToken string, leaseDuration time.Duration) (bool, error) {
+	beadID = strings.TrimSpace(beadID)
+	eventID = strings.TrimSpace(eventID)
+	consumerToken = strings.TrimSpace(consumerToken)
+	if beadID == "" || eventID == "" || consumerToken == "" {
+		return false, errors.New("bead ID, completion event ID, and consumer token are required")
+	}
+	if leaseDuration <= 0 {
+		return false, errors.New("completion lease duration must be positive")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationUnlock, err := s.acquireCompletionLeaseOperationLock(ctx, beadID)
+	if err != nil {
+		return false, fmt.Errorf("lock completion event lease renewal %s: %w", beadID, err)
+	}
+	defer operationUnlock()
+	if err := s.LoadStrict(); err != nil {
+		return false, fmt.Errorf("refresh completion event lease renewal %s: %w", beadID, err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	now, err := s.completionLeaseNow()
+	if err != nil {
+		return false, err
+	}
+	current := s.Assignments[beadID]
+	if current == nil || strings.TrimSpace(current.PendingCompletionEventID) != eventID ||
+		strings.TrimSpace(current.CompletionConsumerToken) != consumerToken {
+		return false, nil
+	}
+	if current.CompletionLeaseExpiresAt == nil {
+		return false, fmt.Errorf("assignment %s completion event has no lease expiry", beadID)
+	}
+	if !now.Before(*current.CompletionLeaseExpiresAt) {
+		return false, nil
+	}
+
+	expiresAt := now.Add(leaseDuration)
+	previous := cloneAssignment(current)
+	current.CompletionLeaseExpiresAt = &expiresAt
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[beadID] = struct{}{}
+	if err := s.saveLocked(); err != nil {
+		s.Assignments[beadID] = previous
+		delete(s.replace, beadID)
+		return false, err
+	}
+	return true, nil
+}
+
+func ownsLiveCompletionEventLease(current *Assignment, eventID, consumerToken string, now time.Time) bool {
+	return current != nil &&
+		strings.TrimSpace(current.PendingCompletionEventID) == eventID &&
+		strings.TrimSpace(current.CompletionConsumerToken) == consumerToken &&
+		current.CompletionLeaseExpiresAt != nil &&
+		current.CompletionLeaseExpiresAt.After(now.UTC())
+}
+
+// AcknowledgeCompletionEvent clears the exact outbox generation only after its
+// lease-owning consumer finishes handling it. A stale acknowledgement cannot
+// clear a newer assignment generation's event or another consumer's lease.
+func (s *AssignmentStore) AcknowledgeCompletionEvent(ctx context.Context, beadID, eventID, consumerToken string) (bool, error) {
+	beadID = strings.TrimSpace(beadID)
+	eventID = strings.TrimSpace(eventID)
+	consumerToken = strings.TrimSpace(consumerToken)
+	if beadID == "" || eventID == "" || consumerToken == "" {
+		return false, errors.New("bead ID, completion event ID, and consumer token are required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(os.Getenv(completionAckFailOnceEnv)) == beadID {
+		failureKey := beadID + "\x00" + eventID
+		if _, alreadyFailed := completionAckFailures.LoadOrStore(failureKey, struct{}{}); !alreadyFailed {
+			return false, fmt.Errorf("injected one-shot completion acknowledgement failure for %s", beadID)
+		}
+	}
+	operationUnlock, err := s.acquireCompletionLeaseOperationLock(ctx, beadID)
+	if err != nil {
+		return false, fmt.Errorf("lock completion event acknowledgement %s: %w", beadID, err)
+	}
+	defer operationUnlock()
+	if err := s.LoadStrict(); err != nil {
+		return false, fmt.Errorf("refresh completion event acknowledgement %s: %w", beadID, err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	now, err := s.completionLeaseNow()
+	if err != nil {
+		return false, err
+	}
+	current := s.Assignments[beadID]
+	if !ownsLiveCompletionEventLease(current, eventID, consumerToken, now) {
+		return false, nil
+	}
+	if current.Status != StatusCompleted && current.Status != StatusFailed {
+		return false, fmt.Errorf("assignment %s completion event is not terminal", beadID)
+	}
+	previous := cloneAssignment(current)
+	current.PendingCompletionEventID = ""
+	current.CompletionDetectedAt = nil
+	current.CompletionConsumerToken = ""
+	current.CompletionLeaseExpiresAt = nil
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[beadID] = struct{}{}
+	if err := s.saveLocked(); err != nil {
+		s.Assignments[beadID] = previous
+		delete(s.replace, beadID)
+		return false, err
+	}
+	return true, nil
 }
 
 // Update updates mutable assignment metadata while preserving snapshot semantics
@@ -1288,6 +1974,116 @@ func (s *AssignmentStore) MarkFailed(beadID, reason string) error {
 	return nil
 }
 
+// MarkWorkingIfCurrent advances only the exact assignment generation observed
+// by the caller. A superseded, terminal, or clearing row is a stale observation
+// and returns applied=false without mutation.
+func (s *AssignmentStore) MarkWorkingIfCurrent(ctx context.Context, observed *Assignment) (bool, error) {
+	return s.transitionIfCurrent(ctx, observed, StatusWorking, "")
+}
+
+// MarkCompletedIfCurrent completes only the exact assignment generation
+// observed by the caller.
+func (s *AssignmentStore) MarkCompletedIfCurrent(ctx context.Context, observed *Assignment) (bool, error) {
+	return s.transitionIfCurrent(ctx, observed, StatusCompleted, "")
+}
+
+// MarkFailedIfCurrent fails only the exact assignment generation observed by
+// the caller.
+func (s *AssignmentStore) MarkFailedIfCurrent(ctx context.Context, observed *Assignment, reason string) (bool, error) {
+	return s.transitionIfCurrent(ctx, observed, StatusFailed, reason)
+}
+
+func (s *AssignmentStore) transitionIfCurrent(ctx context.Context, observed *Assignment, newStatus AssignmentStatus, reason string) (bool, error) {
+	if observed == nil || strings.TrimSpace(observed.BeadID) == "" {
+		return false, errors.New("observed assignment generation is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationUnlock, err := acquireAtomicBeadOperationLock(ctx, s.path, observed.BeadID)
+	if err != nil {
+		return false, fmt.Errorf("lock assignment lifecycle %s: %w", observed.BeadID, err)
+	}
+	defer operationUnlock()
+	if err := s.LoadStrict(); err != nil {
+		return false, fmt.Errorf("refresh assignment lifecycle %s: %w", observed.BeadID, err)
+	}
+
+	s.mutex.Lock()
+	current := s.Assignments[observed.BeadID]
+	if !SameAssignmentGeneration(observed, current) || current.ClearState != ClearStateNone || !isValidTransition(current.Status, newStatus) {
+		s.mutex.Unlock()
+		return false, nil
+	}
+
+	previous := cloneAssignment(current)
+	previousStatus := current.Status
+	now := time.Now().UTC()
+	current.Status = newStatus
+	switch newStatus {
+	case StatusWorking:
+		current.StartedAt = &now
+	case StatusCompleted:
+		current.CompletedAt = &now
+	case StatusFailed:
+		current.FailedAt = &now
+		current.FailReason = reason
+		current.FailureReason = ""
+	default:
+		s.mutex.Unlock()
+		return false, fmt.Errorf("unsupported guarded assignment transition to %s", newStatus)
+	}
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[observed.BeadID] = struct{}{}
+	if err := s.saveLocked(); err != nil {
+		var concurrentMutation *ConcurrentMutationError
+		if errors.As(err, &concurrentMutation) {
+			s.mutex.Unlock()
+			return false, nil
+		}
+		s.Assignments[observed.BeadID] = previous
+		delete(s.replace, observed.BeadID)
+		s.mutex.Unlock()
+		return false, err
+	}
+	emitIdle := s.shouldEmitAgentIdleLocked(current, previousStatus, newStatus)
+	cloned := cloneAssignment(current)
+	s.mutex.Unlock()
+
+	emitAssignmentStatusEvent(s.SessionName, cloned, newStatus, reason)
+	if emitIdle {
+		emitAgentIdle(s.SessionName, cloned, previousStatus, newStatus)
+	}
+	return true, nil
+}
+
+// SameAssignmentGeneration reports whether two snapshots identify the same
+// durable assignment attempt even when lifecycle metadata has advanced.
+func SameAssignmentGeneration(observed, current *Assignment) bool {
+	if observed == nil || current == nil || observed.BeadID != current.BeadID {
+		return false
+	}
+	observedKey := strings.TrimSpace(observed.IdempotencyKey)
+	currentKey := strings.TrimSpace(current.IdempotencyKey)
+	if observedKey != "" || currentKey != "" {
+		return observedKey != "" && observedKey == currentKey
+	}
+	return !observed.AssignedAt.IsZero() && observed.AssignedAt.Equal(current.AssignedAt)
+}
+
+func terminalCompletionEventID(current *Assignment, terminalStatus AssignmentStatus) string {
+	if current == nil {
+		return ""
+	}
+	generation := strings.TrimSpace(current.IdempotencyKey)
+	if generation == "" && !current.AssignedAt.IsZero() {
+		generation = current.AssignedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("%s/%s/%s", strings.TrimSpace(current.BeadID), generation, terminalStatus)
+}
+
 // Reassign moves an assignment to a different agent
 func (s *AssignmentStore) Reassign(beadID string, target ReassignmentTarget) (*Assignment, error) {
 	s.mutex.Lock()
@@ -1398,10 +2194,15 @@ func emitAssignmentStatusEvent(session string, a *Assignment, newStatus Assignme
 	if a == nil {
 		return
 	}
+	paneID, err := assignmentEventPaneID(a)
+	if err != nil {
+		return
+	}
 
 	baseDetails := map[string]string{
 		"bead_id":    a.BeadID,
 		"bead_title": a.BeadTitle,
+		"pane_id":    paneID,
 		"pane_index": fmt.Sprintf("%d", a.Pane),
 		"agent_type": a.AgentType,
 		"agent_name": a.AgentName,
@@ -1413,7 +2214,7 @@ func emitAssignmentStatusEvent(session string, a *Assignment, newStatus Assignme
 		events.DefaultEmitter().Emit(events.NewWebhookEvent(
 			events.WebhookAgentBusy,
 			session,
-			fmt.Sprintf("%d", a.Pane),
+			paneID,
 			a.AgentType,
 			fmt.Sprintf("Agent busy on %s", a.BeadID),
 			baseDetails,
@@ -1422,7 +2223,7 @@ func emitAssignmentStatusEvent(session string, a *Assignment, newStatus Assignme
 		events.DefaultEmitter().Emit(events.NewWebhookEvent(
 			events.WebhookBeadCompleted,
 			session,
-			fmt.Sprintf("%d", a.Pane),
+			paneID,
 			a.AgentType,
 			fmt.Sprintf("Bead completed: %s", a.BeadID),
 			baseDetails,
@@ -1430,7 +2231,7 @@ func emitAssignmentStatusEvent(session string, a *Assignment, newStatus Assignme
 		events.DefaultEmitter().Emit(events.NewWebhookEvent(
 			events.WebhookAgentCompleted,
 			session,
-			fmt.Sprintf("%d", a.Pane),
+			paneID,
 			a.AgentType,
 			fmt.Sprintf("Agent completed bead %s", a.BeadID),
 			baseDetails,
@@ -1452,7 +2253,7 @@ func emitAssignmentStatusEvent(session string, a *Assignment, newStatus Assignme
 		events.DefaultEmitter().Emit(events.NewWebhookEvent(
 			events.WebhookBeadFailed,
 			session,
-			fmt.Sprintf("%d", a.Pane),
+			paneID,
 			a.AgentType,
 			msg,
 			details,
@@ -1460,7 +2261,7 @@ func emitAssignmentStatusEvent(session string, a *Assignment, newStatus Assignme
 		events.DefaultEmitter().Emit(events.NewWebhookEvent(
 			events.WebhookAgentError,
 			session,
-			fmt.Sprintf("%d", a.Pane),
+			paneID,
 			a.AgentType,
 			msg,
 			details,
@@ -1478,14 +2279,21 @@ func (s *AssignmentStore) shouldEmitAgentIdleLocked(a *Assignment, prevStatus, n
 	if newStatus != StatusCompleted && newStatus != StatusFailed {
 		return false
 	}
+	paneID, err := assignmentEventPaneID(a)
+	if err != nil {
+		return false
+	}
 
 	// Only emit idle when there are no remaining "working" assignments for this pane.
 	for _, other := range s.Assignments {
 		if other == nil {
 			continue
 		}
-		if other.Pane == a.Pane && other.Status == StatusWorking {
-			return false
+		if other.Status == StatusWorking {
+			otherPaneID, identityErr := assignmentEventPaneID(other)
+			if identityErr != nil || otherPaneID == paneID {
+				return false
+			}
 		}
 	}
 
@@ -1493,15 +2301,20 @@ func (s *AssignmentStore) shouldEmitAgentIdleLocked(a *Assignment, prevStatus, n
 }
 
 func emitAgentIdle(session string, a *Assignment, prevStatus, newStatus AssignmentStatus) {
+	paneID, err := assignmentEventPaneID(a)
+	if err != nil {
+		return
+	}
 	events.DefaultEmitter().Emit(events.NewWebhookEvent(
 		events.WebhookAgentIdle,
 		session,
-		fmt.Sprintf("%d", a.Pane),
+		paneID,
 		a.AgentType,
 		"Agent idle (no active bead assignments)",
 		map[string]string{
 			"bead_id":     a.BeadID,
 			"bead_title":  a.BeadTitle,
+			"pane_id":     paneID,
 			"pane_index":  fmt.Sprintf("%d", a.Pane),
 			"agent_type":  a.AgentType,
 			"agent_name":  a.AgentName,
@@ -1509,4 +2322,8 @@ func emitAgentIdle(session string, a *Assignment, prevStatus, newStatus Assignme
 			"new_status":  string(newStatus),
 		},
 	))
+}
+
+func assignmentEventPaneID(a *Assignment) (string, error) {
+	return CanonicalPaneIdentity(a)
 }

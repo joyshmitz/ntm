@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/Dicklesworthstone/ntm/internal/audit"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
@@ -82,19 +85,203 @@ func recordLegacyRobotExit(code int) {
 }
 
 func robotInvocationFromArgs(args []string) (bool, string) {
+	fallback := ""
 	for _, arg := range args {
 		if arg == "--" {
 			break
 		}
 		flag := strings.SplitN(arg, "=", 2)[0]
 		if strings.HasPrefix(flag, "--robot-") {
-			return true, strings.TrimPrefix(flag, "--")
+			command := strings.TrimPrefix(flag, "--")
+			if fallback == "" {
+				fallback = command
+			}
+			if isRobotGlobalModifier(command) {
+				continue
+			}
+			return true, command
 		}
 	}
-	return false, ""
+	return fallback != "", fallback
+}
+
+func jsonInvocationFromArgs(args []string) bool {
+	globalJSONRequested := false
+	formatJSONRequested := false
+	formatIsOutput := hasJSONOutputFormatCommand(args)
+	shortFormatIsOutput := hasJSONShortOutputFormatCommand(args)
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		normalized := strings.ToLower(strings.TrimSpace(arg))
+		switch normalized {
+		case "--json", "--json=true":
+			globalJSONRequested = true
+		case "--json=false":
+			globalJSONRequested = false
+		case "--format":
+			if formatIsOutput && i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
+				formatJSONRequested = strings.EqualFold(strings.TrimSpace(args[i+1]), "json")
+				i++
+			}
+		case "-f":
+			if shortFormatIsOutput && i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
+				formatJSONRequested = strings.EqualFold(strings.TrimSpace(args[i+1]), "json")
+				i++
+			}
+		default:
+			if formatIsOutput && strings.HasPrefix(normalized, "--format=") {
+				formatJSONRequested = strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(normalized, "--format=")), "json")
+			} else if shortFormatIsOutput && strings.HasPrefix(normalized, "-f=") {
+				formatJSONRequested = strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(normalized, "-f=")), "json")
+			}
+		}
+	}
+	return globalJSONRequested || formatJSONRequested
+}
+
+var jsonOutputFormatCommandPaths = [][]string{
+	{"analytics"},
+	{"audit", "export"},
+	{"ensemble", "cache", "clear"},
+	{"ensemble", "cache", "stats"},
+	{"ensemble", "clean-checkpoints"},
+	{"ensemble", "compare"},
+	{"ensemble", "estimate"},
+	{"ensemble", "export-findings"},
+	{"ensemble", "list"},
+	{"ensemble", "presets"},
+	{"ensemble", "provenance"},
+	{"ensemble", "rerun-mode"},
+	{"ensemble", "resume"},
+	{"ensemble", "status"},
+	{"ensemble", "stop"},
+	{"ensemble", "suggest"},
+	{"ensemble", "synthesize"},
+	{"handoff"},
+	{"metrics", "export"},
+	{"modes", "explain"},
+	{"modes", "list"},
+	{"rebalance"},
+	{"review-queue"},
+	{"scrub"},
+	{"summary"},
+	{"work", "commit-ready"},
+	{"work", "graph"},
+	{"work", "queue-dry"},
+	{"work", "triage"},
+}
+
+var jsonShortOutputFormatCommandPaths = [][]string{
+	{"ensemble", "cache", "clear"},
+	{"ensemble", "cache", "stats"},
+	{"ensemble", "clean-checkpoints"},
+	{"ensemble", "compare"},
+	{"ensemble", "estimate"},
+	{"ensemble", "export-findings"},
+	{"ensemble", "list"},
+	{"ensemble", "presets"},
+	{"ensemble", "provenance"},
+	{"ensemble", "rerun-mode"},
+	{"ensemble", "resume"},
+	{"ensemble", "status"},
+	{"ensemble", "stop"},
+	{"ensemble", "suggest"},
+	{"ensemble", "synthesize"},
+	{"metrics", "export"},
+	{"modes", "explain"},
+	{"modes", "list"},
+}
+
+func hasJSONOutputFormatCommand(args []string) bool {
+	for _, commandPath := range jsonOutputFormatCommandPaths {
+		if argsMatchCommandPath(args, commandPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasJSONShortOutputFormatCommand(args []string) bool {
+	for _, commandPath := range jsonShortOutputFormatCommandPaths {
+		if argsMatchCommandPath(args, commandPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func argsMatchCommandPath(args, commandPath []string) bool {
+	pathIndex := 0
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "-") {
+			if !strings.Contains(arg, "=") && argumentFlagConsumesValue(arg) && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		if pathIndex >= len(commandPath) || arg != commandPath[pathIndex] {
+			return false
+		}
+		pathIndex++
+		if pathIndex == len(commandPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func argumentFlagConsumesValue(arg string) bool {
+	name := strings.TrimLeft(strings.SplitN(arg, "=", 2)[0], "-")
+	switch name {
+	case "config", "f", "format", "redact", "ssh":
+		return true
+	default:
+		return false
+	}
+}
+
+func machineJSONInvocation(cmd *cobra.Command) (bool, string) {
+	if robotInvocation, robotCommand := robotInvocationFromArgs(os.Args[1:]); robotInvocation {
+		return true, robotCommand
+	}
+	if !jsonOutput && !jsonInvocationFromArgs(os.Args[1:]) {
+		return false, ""
+	}
+	command := "cli"
+	if cmd != nil {
+		path := strings.TrimSpace(cmd.CommandPath())
+		rootName := "ntm"
+		if root := cmd.Root(); root != nil && strings.TrimSpace(root.Name()) != "" {
+			rootName = root.Name()
+		}
+		if path != "" && path != rootName {
+			command = strings.TrimSpace(strings.TrimPrefix(path, rootName))
+		}
+	}
+	return true, command
+}
+
+func isRobotGlobalModifier(command string) bool {
+	switch command {
+	case "robot-format", "robot-output-format", "robot-verbosity", "robot-limit", "robot-offset":
+		return true
+	default:
+		return false
+	}
 }
 
 func classifyRobotExecuteError(err error) (string, string) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return robot.ErrCodeTimeout, "Retry the command after cancellation"
+	}
 	message := strings.ToLower(err.Error())
 	for _, fragment := range []string{
 		"unknown flag",
@@ -184,12 +371,12 @@ Shell Integration:
 			cfg, err = startup.GetConfig()
 			endProfile()
 			if err != nil {
-				if robotInvocation, robotCommand := robotInvocationFromArgs(os.Args[1:]); robotInvocation {
+				if machineInvocation, machineCommand := machineJSONInvocation(cmd); machineInvocation {
 					return robot.EncodeErrorJSON(
 						fmt.Errorf("config load failed: %w", err),
 						robot.ErrCodeInternalError,
 						"Fix the selected TOML configuration or pass --config with a valid file",
-						robotCommand,
+						machineCommand,
 					)
 				}
 				// Config loading failed for a genuine reason (e.g. an invalid
@@ -210,12 +397,12 @@ Shell Integration:
 			// one machine-readable envelope; the human CLI retains its historical
 			// warn-and-ignore behavior for an invalid override.
 			if err := applyRedactionFlagOverrides(cfg); err != nil {
-				if robotInvocation, robotCommand := robotInvocationFromArgs(os.Args[1:]); robotInvocation {
+				if machineInvocation, machineCommand := machineJSONInvocation(cmd); machineInvocation {
 					return robot.EncodeErrorJSON(
 						err,
 						robot.ErrCodeInvalidFlag,
 						"Use --redact=off, --redact=warn, --redact=redact, or --redact=block",
-						robotCommand,
+						machineCommand,
 					)
 				}
 				fmt.Fprintf(os.Stderr, "Warning: %v, ignoring\n", err)
@@ -247,10 +434,26 @@ Shell Integration:
 				}
 				encKey, err := encryption.ResolveKey(keyCfg)
 				if err != nil {
+					if machineInvocation, machineCommand := machineJSONInvocation(cmd); machineInvocation {
+						return robot.EncodeErrorJSON(
+							fmt.Errorf("encryption key resolution failed: %w", err),
+							robot.ErrCodeInternalError,
+							"Configure a valid encryption key source before running this robot command",
+							machineCommand,
+						)
+					}
 					output.PrintWarningf("encryption key resolution failed, encryption disabled: %v", err)
 				} else {
 					allKeys, err := encryption.ResolveKeyring(keyCfg)
 					if err != nil {
+						if machineInvocation, machineCommand := machineJSONInvocation(cmd); machineInvocation {
+							return robot.EncodeErrorJSON(
+								fmt.Errorf("encryption keyring resolution failed: %w", err),
+								robot.ErrCodeInternalError,
+								"Configure a valid encryption keyring before running this robot command",
+								machineCommand,
+							)
+						}
 						output.PrintWarningf("encryption keyring resolution failed, encryption disabled: %v", err)
 					} else {
 						history.SetEncryptionConfig(&history.EncryptionConfig{
@@ -276,7 +479,7 @@ Shell Integration:
 		}
 
 		if shouldInitializeRobotPersistence(cmd) {
-			if err := initializeRobotPersistence(); err != nil {
+			if err := initializeRobotPersistence(cmd.Context()); err != nil {
 				return err
 			}
 		}
@@ -284,8 +487,11 @@ Shell Integration:
 		return nil
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		// Print profiling output if enabled
-		PrintProfilingIfEnabled()
+		// Profiling is a separate human-readable document. Appending it to a
+		// machine response would make the stdout stream impossible to decode.
+		if machineInvocation, _ := machineJSONInvocation(cmd); !machineInvocation {
+			PrintProfilingIfEnabled()
+		}
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		// Resolve robot output format and verbosity: CLI flag > env var > config > default.
@@ -1662,16 +1868,28 @@ Shell Integration:
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-assign")
 				return
 			}
+			projectDir, err := resolveExplicitProjectDirForSessionContext(cmd.Context(), session)
+			if err != nil {
+				code := robot.ErrCodeInternalError
+				hint := "Ensure the target session has a resolvable project directory"
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					code = robot.ErrCodeTimeout
+					hint = "Retry after the cancellation or timeout condition clears"
+				}
+				failRobotCommand(err, code, hint, "robot-assign")
+				return
+			}
 			var beads []string
 			if robotAssignBeads != "" {
 				beads = strings.Split(robotAssignBeads, ",")
 			}
 			opts := robot.AssignOptions{
-				Session:  session,
-				Beads:    beads,
-				Strategy: robotAssignStrategy,
+				Session:    session,
+				ProjectDir: projectDir,
+				Beads:      beads,
+				Strategy:   robotAssignStrategy,
 			}
-			if err := robot.PrintAssign(opts); err != nil {
+			if err := robot.PrintAssign(cmd.Context(), opts); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
@@ -1699,6 +1917,8 @@ Shell Integration:
 				Strategy:           strategy,
 				AllocationJSON:     robotBulkAssignAlloc,
 				DryRun:             robotDryRunEffective,
+				Parallel:           robotBulkAssignParallel,
+				Stagger:            robotBulkAssignStagger,
 				SkipPaneSelectors:  skipSelectors,
 				PromptTemplatePath: robotBulkAssignTemplate,
 				RequireReservation: robotRequireReservation,
@@ -1711,13 +1931,13 @@ Shell Integration:
 				opts.DefaultTemplate = cfg.Assign.PromptTemplate
 				opts.DefaultTemplatePath = cfg.Assign.PromptTemplateFile
 			}
-			if err := robot.PrintBulkAssign(opts); err != nil {
+			if err := robot.PrintBulkAssign(cmd.Context(), opts); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSpawn != "" {
-			// Parse spawn timeout duration (expects seconds)
+			// Preserve the parsed duration so subsecond readiness deadlines remain exact.
 			spawnTimeout, err := util.ParseDurationWithDefault(resolveRobotSpawnTimeout(cmd), time.Second, "timeout")
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration such as 30s or 500ms", "robot-spawn")
@@ -1728,27 +1948,8 @@ Shell Integration:
 				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated non-empty project-relative path globs", "robot-spawn")
 				return
 			}
-			opts := robot.SpawnOptions{
-				Session:            robotSpawn,
-				Label:              robotSpawnLabel,
-				CCCount:            robotSpawnCC,
-				CodCount:           robotSpawnCod,
-				GmiCount:           robotSpawnGmi,
-				AgyCount:           robotSpawnAgy,
-				Preset:             robotSpawnPreset,
-				NoUserPane:         robotSpawnNoUser,
-				WorkingDir:         robotSpawnDir,
-				WaitReady:          robotSpawnWait,
-				ReadyTimeout:       int(spawnTimeout.Seconds()),
-				DryRun:             robotDryRunEffective,
-				Safety:             robotSpawnSafety,
-				AssignWork:         robotSpawnAssignWork,
-				AssignStrategy:     resolveRobotSpawnStrategy(cmd),
-				CustomNames:        robot.ParseCustomNames(robotSpawnNames),
-				RequireReservation: robotRequireReservation,
-				ReservationPaths:   reservationPaths,
-			}
-			if err := robot.PrintSpawn(opts, cfg); err != nil {
+			opts := robotSpawnOptionsFromFlags(cmd, spawnTimeout, reservationPaths, robotDryRunEffective)
+			if err := robot.PrintSpawn(cmd.Context(), opts, cfg); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
@@ -1910,7 +2111,7 @@ Shell Integration:
 			}
 			opts := robot.SaveOptions{
 				Session:    session,
-				OutputFile: robotSaveOutput,
+				OutputFile: resolveRobotSaveOutput(cmd),
 			}
 			if err := robot.PrintSave(opts); err != nil {
 				recordRobotProcessExit(err)
@@ -2458,6 +2659,11 @@ func Execute() error {
 	defer closeRobotPersistence()
 	robotProcessExit = nil
 	robotInvocation, robotCommand := robotInvocationFromArgs(os.Args[1:])
+	machineInvocation := robotInvocation || jsonInvocationFromArgs(os.Args[1:])
+	if machineInvocation {
+		restoreDiagnostics := suppressRobotDiagnostics(rootCmd)
+		defer restoreDiagnostics()
+	}
 	// Install a signal-cancellable context at the root so handlers using
 	// `cmd.Context()` (diagnose, swarm, openapi, support_bundle, …) see
 	// cancellation when the user presses Ctrl-C. Without this, `cmd.Context()`
@@ -2467,9 +2673,7 @@ func Execute() error {
 	// send, …) continue to receive the OS signal directly — Go delivers it
 	// to every registered consumer — so adding a root-level consumer does
 	// not interfere with their existing shutdown logic.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	err := rootCmd.ExecuteContext(ctx)
+	err := executeRootWithSignals(rootCmd.ExecuteContext)
 	if err == nil && robotProcessExit != nil {
 		err = robotProcessExit
 	}
@@ -2484,15 +2688,19 @@ func Execute() error {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			return err
 		}
-		if robotInvocation {
-			code, hint := classifyRobotExecuteError(err)
-			return robot.EncodeErrorJSON(err, code, hint, robotCommand)
-		}
 		// errJSONFailure means the command already wrote its failure envelope
 		// to stdout; the only remaining job is to exit non-zero. Don't decorate
 		// stderr — the JSON is the contract.
 		if errors.Is(err, errJSONFailure) {
 			return err
+		}
+		if machineInvocation || jsonOutput {
+			command := robotCommand
+			if command == "" {
+				_, command = machineJSONInvocation(rootCmd)
+			}
+			code, hint := classifyRobotExecuteError(err)
+			return robot.EncodeErrorJSON(err, code, hint, command)
 		}
 		// If not in JSON mode, print the error to stderr
 		// (SilenceErrors is set to true to handle JSON mode properly)
@@ -2504,6 +2712,58 @@ func Execute() error {
 	return nil
 }
 
+func executeRootWithSignals(run func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	commandDone := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-signals:
+			// Reset process-wide handling before publishing cancellation. Reset
+			// waits for the current notification fanout, so command-local Notify
+			// channels still receive the first signal while a second signal uses
+			// the OS default and force-terminates a context-ignoring command.
+			signal.Reset(os.Interrupt, syscall.SIGTERM)
+			cancel()
+		case <-commandDone:
+		}
+	}()
+
+	err := run(ctx)
+	close(commandDone)
+	signal.Stop(signals)
+	cancel()
+	<-watcherDone
+	return err
+}
+
+func suppressRobotDiagnostics(cmd *cobra.Command) func() {
+	previousSlog := slog.Default()
+	previousLogWriter := log.Writer()
+	previousCommandErr := cmd.ErrOrStderr()
+	deprecatedFlags := make(map[*pflag.Flag]string)
+	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		if flag.Deprecated != "" {
+			deprecatedFlags[flag] = flag.Deprecated
+			flag.Deprecated = ""
+		}
+	})
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	log.SetOutput(io.Discard)
+	cmd.SetErr(io.Discard)
+	return func() {
+		for flag, message := range deprecatedFlags {
+			flag.Deprecated = message
+		}
+		slog.SetDefault(previousSlog)
+		log.SetOutput(previousLogWriter)
+		cmd.SetErr(previousCommandErr)
+	}
+}
+
 func shouldInitializeRobotPersistence(cmd *cobra.Command) bool {
 	if cmd != nil && cmd.Name() == "serve" {
 		return false
@@ -2513,8 +2773,14 @@ func shouldInitializeRobotPersistence(cmd *cobra.Command) bool {
 		if arg == "--schema" {
 			return true
 		}
-		if strings.HasPrefix(arg, "--robot-") && !robotFlagSkipsPersistence(arg) {
-			return true
+		if strings.HasPrefix(arg, "--robot-") {
+			command := strings.TrimPrefix(strings.SplitN(arg, "=", 2)[0], "--")
+			if isRobotGlobalModifier(command) {
+				continue
+			}
+			if !robotFlagSkipsPersistence(arg) {
+				return true
+			}
 		}
 	}
 
@@ -2533,7 +2799,13 @@ func robotFlagSkipsPersistence(arg string) bool {
 	}
 }
 
-func initializeRobotPersistence() error {
+func initializeRobotPersistence(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if robotStateStore != nil {
 		return nil
 	}
@@ -2554,9 +2826,12 @@ func initializeRobotPersistence() error {
 	robot.SetProjectionStore(store)
 	robotStateStore = store
 
-	refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	_ = robot.RefreshNormalizedProjection(refreshCtx, store, "", "")
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -2839,14 +3114,16 @@ var (
 	robotAssignStrategy string // assignment strategy: balanced, speed, quality, dependency
 
 	// Robot-bulk-assign flags for batch work distribution
-	robotBulkAssign         string // session name for bulk assignment
-	robotBulkAssignFromBV   bool   // use bv triage for bead selection
-	robotBulkAssignAlloc    string // explicit allocation JSON
-	robotBulkAssignStrategy string // assignment strategy: impact, ready, stale, balanced
-	robotBulkAssignSkip     string // comma-separated panes to skip
-	robotBulkAssignTemplate string // prompt template file path
-	robotRequireReservation bool   // fail closed unless assignment reservations succeed
-	robotReservationPaths   string // comma-separated reservation path globs
+	robotBulkAssign         string        // session name for bulk assignment
+	robotBulkAssignFromBV   bool          // use bv triage for bead selection
+	robotBulkAssignAlloc    string        // explicit allocation JSON
+	robotBulkAssignStrategy string        // assignment strategy: impact, ready, stale, balanced
+	robotBulkAssignSkip     string        // comma-separated panes to skip
+	robotBulkAssignTemplate string        // prompt template file path
+	robotBulkAssignParallel bool          // execute independent bulk assignments concurrently
+	robotBulkAssignStagger  time.Duration // delay between sequential bulk assignments
+	robotRequireReservation bool          // fail closed unless assignment reservations succeed
+	robotReservationPaths   string        // comma-separated reservation path globs
 
 	// Robot-health flag
 	robotHealth             string // session health or project health (empty = project)
@@ -3341,7 +3618,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotMonitorInfo, "info-threshold", "", "Context % for INFO level. Optional with --robot-monitor. Example: --info-threshold=40 (default 40)")
 	rootCmd.Flags().StringVar(&robotMonitorAlert, "alert-threshold", "", "Provider usage % for ALERT level. Optional with --robot-monitor. Example: --alert-threshold=80 (default 80)")
 	rootCmd.Flags().BoolVar(&robotMonitorIncludeCaut, "include-caut", false, "Query caut for provider usage data. Optional with --robot-monitor")
-	rootCmd.Flags().StringVar(&robotMonitorOutput, "output", "", "Output file path for JSONL. Optional with --robot-monitor. Example: --output=/tmp/monitor.jsonl")
+	rootCmd.Flags().StringVar(&robotMonitorOutput, "output", "", "Output file path. Optional with --robot-monitor and --robot-save. Example: --output=/tmp/ntm-output.json")
 
 	// Robot-support-bundle flags for diagnostic bundle generation
 	rootCmd.Flags().StringVar(&robotSupportBundle, "robot-support-bundle", "", "Generate support bundle with diagnostic info. Optional: SESSION. Example: ntm --robot-support-bundle=myproject")
@@ -3432,6 +3709,8 @@ func init() {
 	rootCmd.Flags().StringVar(&robotBulkAssignStrategy, "bulk-strategy", "impact", "Bulk assignment strategy: impact (default), ready, stale, balanced. Use with --from-bv")
 	rootCmd.Flags().StringVar(&robotBulkAssignSkip, "skip-panes", "", "Comma-separated N, W.P, or %N pane selectors to skip. Use with --robot-bulk-assign")
 	rootCmd.Flags().StringVar(&robotBulkAssignTemplate, "prompt-template", "", "Custom prompt template file. Use with --robot-bulk-assign")
+	rootCmd.Flags().BoolVar(&robotBulkAssignParallel, "bulk-parallel", false, "Execute independent bulk assignments concurrently")
+	rootCmd.Flags().DurationVar(&robotBulkAssignStagger, "bulk-stagger", 0, "Delay between sequential bulk assignments, for example 500ms")
 	rootCmd.Flags().BoolVar(&robotRequireReservation, "require-reservation", false, "Require exact Agent Mail file reservations before bulk/spawn work assignment")
 	rootCmd.Flags().StringVar(&robotReservationPaths, "reservation-paths", "", "Comma-separated project-relative file globs to reserve before bulk/spawn work assignment")
 
@@ -3539,7 +3818,7 @@ func init() {
 	rootCmd.Flags().IntVar(&robotMarkdownMaxAlerts, "md-max-alerts", 0, "Max alerts to show (0=default). Optional with --robot-markdown")
 
 	// Robot-save flags for session state persistence
-	rootCmd.Flags().StringVar(&robotSave, "robot-save", "", "Save session state for later restore. Required: SESSION. Example: ntm --robot-save=proj --save-output=backup.json")
+	rootCmd.Flags().StringVar(&robotSave, "robot-save", "", "Save session state for later restore. Required: SESSION. Example: ntm --robot-save=proj --output=backup.json")
 	rootCmd.Flags().StringVar(&robotSaveOutput, "save-output", "", "Output file path. Optional with --robot-save. Default: ntm-save-{session}-{timestamp}.json")
 
 	// Robot-restore flags for session state restoration
@@ -4311,6 +4590,10 @@ func resolveRobotSummarySince(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "summary-since", robotSummarySince, "since", robotSince)
 }
 
+func resolveRobotSaveOutput(cmd *cobra.Command) string {
+	return resolveRobotSharedFlag(cmd, "save-output", robotSaveOutput, "output", robotMonitorOutput)
+}
+
 func resolveRobotMailCheckSince(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "cass-since", cassSince, "since", robotSince)
 }
@@ -4347,6 +4630,29 @@ func resolveRobotSpawnTimeout(cmd *cobra.Command) string {
 
 func resolveRobotSpawnStrategy(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "spawn-assign-strategy", robotSpawnStrategy, "strategy", robotAssignStrategy)
+}
+
+func robotSpawnOptionsFromFlags(cmd *cobra.Command, readyTimeout time.Duration, reservationPaths []string, dryRun bool) robot.SpawnOptions {
+	return robot.SpawnOptions{
+		Session:            robotSpawn,
+		Label:              robotSpawnLabel,
+		CCCount:            robotSpawnCC,
+		CodCount:           robotSpawnCod,
+		GmiCount:           robotSpawnGmi,
+		AgyCount:           robotSpawnAgy,
+		Preset:             robotSpawnPreset,
+		NoUserPane:         robotSpawnNoUser,
+		WorkingDir:         robotSpawnDir,
+		WaitReady:          robotSpawnWait,
+		ReadyTimeout:       readyTimeout,
+		DryRun:             dryRun,
+		Safety:             robotSpawnSafety,
+		AssignWork:         robotSpawnAssignWork,
+		AssignStrategy:     resolveRobotSpawnStrategy(cmd),
+		CustomNames:        robot.ParseCustomNames(robotSpawnNames),
+		RequireReservation: robotRequireReservation,
+		ReservationPaths:   append([]string(nil), reservationPaths...),
+	}
 }
 
 func parseRobotReservationPathsArg(raw string) ([]string, error) {
@@ -4496,13 +4802,16 @@ func runVersion(short bool) error {
 	result, err := kernel.Run(context.Background(), "core.version", VersionInput{Short: short})
 	if err != nil {
 		if IsJSONOutput() {
-			_ = output.PrintJSON(output.NewError(err.Error()))
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return err
 	}
 
 	resp, err := coerceVersionResponse(result)
 	if err != nil {
+		if IsJSONOutput() {
+			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
+		}
 		return err
 	}
 

@@ -232,7 +232,7 @@ func TestBuildCommandRegistry_CanonicalPaneContracts(t *testing.T) {
 	for _, parameter := range bulk.Parameters {
 		flags[parameter.Flag] = true
 	}
-	for _, canonical := range []string{"--skip", "--template"} {
+	for _, canonical := range []string{"--skip", "--template", "--bulk-parallel", "--bulk-stagger"} {
 		if !flags[canonical] {
 			t.Errorf("bulk-assign missing canonical parameter %q", canonical)
 		}

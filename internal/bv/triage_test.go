@@ -1,11 +1,58 @@
 package bv
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestGetTriageContextCancelsWhileWaitingForRunLock(t *testing.T) {
+	triageRunMu.Lock()
+	defer triageRunMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	release, err := acquireTriageRunLock(ctx, time.Now().Add(time.Second), time.Second)
+	if release != nil {
+		release()
+		t.Fatal("canceled triage waiter acquired run lock")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("acquireTriageRunLock error=%v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("triage run-lock cancellation took %s", elapsed)
+	}
+}
+
+func TestGetTriageContextCancelsRunningSubprocess(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o700); err != nil {
+		t.Fatalf("write fake bv: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	InvalidateTriageCache()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := GetTriageContext(ctx, dir)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetTriageContext error=%v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("triage subprocess cancellation took %s", elapsed)
+	}
+}
 
 // testTriageCache caches the triage response for all tests to share.
 // GetTriage takes ~30 seconds, and many tests use the same data.

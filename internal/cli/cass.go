@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -71,20 +72,47 @@ tuned for quick lookups.`,
 }
 
 func handleCassError(err error) error {
-	if err == cass.ErrNotInstalled {
-		if IsJSONOutput() {
-			return output.PrintJSON(map[string]interface{}{
-				"error": "cass_not_installed",
-				"hint":  "Install CASS to enable this feature",
-			})
-		}
+	if err == nil {
+		return nil
+	}
+
+	if IsJSONOutput() {
+		return emitCassFailure(err, errors.Is(err, cass.ErrNotInstalled), nil)
+	}
+
+	if errors.Is(err, cass.ErrNotInstalled) {
 		fmt.Println("CASS is not installed.")
 		fmt.Println("To enable cross-agent session search:")
 		fmt.Println("  brew install nightowlai/tap/cass    # macOS")
 		fmt.Println("  cargo install cass                  # From source")
-		return nil
+		return robot.ExitResultForCode(2, err, false)
 	}
 	return err
+}
+
+func emitCassFailure(cause error, unavailable bool, fields map[string]interface{}) error {
+	code := robot.ErrCodeInternalError
+	hint := "Check the CASS index and configuration, then retry"
+	exitCode := 1
+	if unavailable {
+		code = robot.ErrCodeNotImplemented
+		hint = "Install CASS to enable this feature"
+		exitCode = 2
+	}
+
+	response := map[string]interface{}{
+		"success":    false,
+		"error":      cause.Error(),
+		"error_code": code,
+		"hint":       hint,
+	}
+	for key, value := range fields {
+		response[key] = value
+	}
+	if err := output.PrintJSON(response); err != nil {
+		return err
+	}
+	return robot.ExitResultForCode(exitCode, cause, true)
 }
 
 func newCassStatusCmd() *cobra.Command {
@@ -380,7 +408,19 @@ func runCassPreview(prompt string, maxResults, maxAgeDays int, format string, ma
 	queryResult, filterResult := robot.QueryAndFilterCASS(prompt, queryConfig, filterConfig)
 
 	if IsJSONOutput() {
+		if !queryResult.Success {
+			cause := errors.New(queryResult.Error)
+			unavailable := strings.Contains(strings.ToLower(queryResult.Error), "not found")
+			return emitCassFailure(cause, unavailable, map[string]interface{}{
+				"query":        queryResult,
+				"filter":       filterResult,
+				"keywords":     queryResult.Keywords,
+				"total_hits":   queryResult.TotalMatches,
+				"filtered_out": filterResult.RemovedByScore + filterResult.RemovedByAge,
+			})
+		}
 		return output.PrintJSON(map[string]interface{}{
+			"success":      true,
 			"query":        queryResult,
 			"filter":       filterResult,
 			"keywords":     queryResult.Keywords,
@@ -405,7 +445,13 @@ func runCassPreview(prompt string, maxResults, maxAgeDays int, format string, ma
 	// Results summary
 	if !queryResult.Success {
 		fmt.Printf("%sError:%s %s\n", colorize(t.Error), "\033[0m", queryResult.Error)
-		return nil
+		cause := errors.New(queryResult.Error)
+		unavailable := strings.Contains(strings.ToLower(queryResult.Error), "not found")
+		exitCode := 1
+		if unavailable {
+			exitCode = 2
+		}
+		return robot.ExitResultForCode(exitCode, cause, false)
 	}
 
 	fmt.Printf("%sResults:%s %d hits found, %d after filtering\n",

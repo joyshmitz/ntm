@@ -774,14 +774,14 @@ func runCoordinatorAssign(cmd *cobra.Command, args []string, dryRun bool) error 
 	}
 
 	if strings.TrimSpace(assignPane) != "" {
-		return runDirectPaneAssignment(cmd, assignOpts)
+		return runDirectPaneAssignment(cmd.Context(), assignOpts)
 	}
 
 	if IsJSONOutput() {
-		return runAssignJSON(assignOpts)
+		return runAssignJSON(cmd.Context(), assignOpts)
 	}
 
-	assignOutput, err := getAssignOutputEnhanced(assignOpts)
+	assignOutput, err := getAssignOutputEnhanced(cmd.Context(), assignOpts)
 	if err != nil {
 		return err
 	}
@@ -794,7 +794,7 @@ func runCoordinatorAssign(cmd *cobra.Command, args []string, dryRun bool) error 
 		return nil
 	}
 
-	return executeAssignmentsEnhanced(session, assignOutput, assignOpts)
+	return executeAssignmentsEnhanced(cmd.Context(), session, assignOutput, assignOpts)
 }
 
 // newCoordinatorEnableCmd enables coordinator features

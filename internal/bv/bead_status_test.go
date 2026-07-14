@@ -66,26 +66,60 @@ func TestParseBeadAssignmentDetailsOutput(t *testing.T) {
 		"id":"ntm-target",
 		"title":"Exact assignment target",
 		"status":"open",
+		"priority":2,
+		"assignee":"  ExactActor  ",
 		"labels":["operator-gated","backend","backend"],
 		"dependencies":[
 			{"id":"ntm-open-b","status":"in_progress","dependency_type":"blocks"},
 			{"id":"ntm-closed","status":"closed","dependency_type":"blocks"},
 			{"id":"ntm-parent","status":"open","dependency_type":"parent-child"},
 			{"id":"ntm-open-a","status":"open","dependency_type":"blocks"},
+			{"id":"ntm-conditional","status":"open","dependency_type":"conditional-blocks"},
+			{"id":"ntm-wait","status":"open","dependency_type":"waits-for"},
 			{"id":"ntm-open-a","status":"open","dependency_type":"blocks"}
 		]
 	}]`)
 	if err != nil {
 		t.Fatalf("parseBeadAssignmentDetailsOutput: %v", err)
 	}
-	if details.ID != "ntm-target" || details.Title != "Exact assignment target" || details.Status != "open" {
+	if details.ID != "ntm-target" || details.Title != "Exact assignment target" || details.Status != "open" || details.Priority != 2 || details.Assignee != "ExactActor" {
 		t.Fatalf("details=%+v", details)
 	}
-	if want := []string{"ntm-open-a", "ntm-open-b"}; !reflect.DeepEqual(details.BlockedBy, want) {
+	if want := []string{"ntm-conditional", "ntm-open-a", "ntm-open-b", "ntm-wait"}; !reflect.DeepEqual(details.BlockedBy, want) {
 		t.Fatalf("blocked_by=%v, want %v", details.BlockedBy, want)
 	}
 	if want := []string{"backend", "operator-gated"}; !reflect.DeepEqual(details.Labels, want) {
 		t.Fatalf("labels=%v, want %v", details.Labels, want)
+	}
+	wantDependencies := []BeadDependencyState{
+		{ID: "ntm-closed", Status: "closed"},
+		{ID: "ntm-conditional", Status: "open"},
+		{ID: "ntm-open-a", Status: "open"},
+		{ID: "ntm-open-b", Status: "in_progress"},
+		{ID: "ntm-wait", Status: "open"},
+	}
+	if !reflect.DeepEqual(details.BlockingDependencies, wantDependencies) {
+		t.Fatalf("blocking dependency snapshot=%+v, want %+v", details.BlockingDependencies, wantDependencies)
+	}
+}
+
+func TestParseBeadAssignmentDetailsOutputReadyGates(t *testing.T) {
+	t.Parallel()
+
+	details, err := parseBeadAssignmentDetailsOutput(`[{
+		"id":"ntm-wisp-ready-gates",
+		"title":"Not actually ready",
+		"status":"open",
+		"defer_until":"2099-01-01T00:00:00Z",
+		"pinned":true,
+		"ephemeral":true,
+		"is_template":true
+	}]`)
+	if err != nil {
+		t.Fatalf("parse ready gates: %v", err)
+	}
+	if details.DeferUntil == nil || details.DeferUntil.Year() != 2099 || !details.Pinned || !details.Ephemeral || !details.Template || !details.Wisp {
+		t.Fatalf("ready gates=%+v", details)
 	}
 }
 
@@ -98,12 +132,98 @@ func TestParseBeadAssignmentDetailsOutputRejectsAmbiguousOrMalformedRows(t *test
 		"missing id":            `{"status":"open"}`,
 		"missing status":        `{"id":"a"}`,
 		"missing dependency id": `{"id":"a","status":"open","dependencies":[{"status":"open","dependency_type":"blocks"}]}`,
+		"invalid defer time":    `{"id":"a","status":"open","defer_until":"tomorrow-ish"}`,
 		"invalid json":          `{`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			if _, err := parseBeadAssignmentDetailsOutput(input); err == nil {
 				t.Fatalf("parseBeadAssignmentDetailsOutput(%q) error=nil", input)
+			}
+		})
+	}
+}
+
+func TestBlockingDependencyStatesRetainsTerminalDependencies(t *testing.T) {
+	t.Parallel()
+
+	states, err := blockingDependencyStates([]beadShowDependency{
+		{ID: "ntm-open", Status: "open", DependencyType: "blocks"},
+		{ID: "ntm-closed", Status: "closed", DependencyType: "conditional-blocks"},
+		{ID: "ntm-tombstone", Status: "tombstone", DependencyType: "waits-for"},
+		{ID: "ntm-progress", Status: "in_progress", DependencyType: "blocks"},
+		{ID: "ntm-parent", Status: "open", DependencyType: "parent-child"},
+		{ID: "ntm-closed", Status: "closed", DependencyType: "blocks"},
+	})
+	if err != nil {
+		t.Fatalf("blockingDependencyStates: %v", err)
+	}
+	want := []BeadDependencyState{
+		{ID: "ntm-closed", Status: "closed"},
+		{ID: "ntm-open", Status: "open"},
+		{ID: "ntm-progress", Status: "in_progress"},
+		{ID: "ntm-tombstone", Status: "tombstone"},
+	}
+	if !reflect.DeepEqual(states, want) {
+		t.Fatalf("dependency states=%+v, want %+v", states, want)
+	}
+}
+
+func TestIsBlockingDependencyType(t *testing.T) {
+	t.Parallel()
+	for _, dependencyType := range []string{"blocks", "conditional-blocks", "waits-for", " BLOCKS "} {
+		if !IsBlockingDependencyType(dependencyType) {
+			t.Errorf("IsBlockingDependencyType(%q)=false, want true", dependencyType)
+		}
+	}
+	for _, dependencyType := range []string{"", "parent-child", "relates-to", "external"} {
+		if IsBlockingDependencyType(dependencyType) {
+			t.Errorf("IsBlockingDependencyType(%q)=true, want false", dependencyType)
+		}
+	}
+}
+
+func TestBlockingDependentStatesIsUncappedAndSkipsExternalEndpoints(t *testing.T) {
+	t.Parallel()
+	rows := make([]beadShowDependency, 0, 106)
+	for i := 0; i < 105; i++ {
+		dependencyType := []string{"blocks", "conditional-blocks", "waits-for"}[i%3]
+		rows = append(rows, beadShowDependency{
+			ID: fmt.Sprintf("ntm-dependent-%03d", i), Title: fmt.Sprintf("Dependent %d", i),
+			Status: "open", Priority: i % 5, DependencyType: dependencyType,
+		})
+	}
+	rows = append(rows,
+		beadShowDependency{ID: "external:other/repo:task", Status: "open", DependencyType: "blocks"},
+		beadShowDependency{ID: "ntm-parent", Status: "open", DependencyType: "parent-child"},
+	)
+	states, err := blockingDependentStates(rows)
+	if err != nil {
+		t.Fatalf("blockingDependentStates: %v", err)
+	}
+	if len(states) != 105 {
+		t.Fatalf("uncapped dependent count=%d, want 105", len(states))
+	}
+	if states[0].ID != "ntm-dependent-000" || states[104].ID != "ntm-dependent-104" || states[104].Priority != 4 {
+		t.Fatalf("dependent boundary rows=%+v ... %+v", states[0], states[104])
+	}
+}
+
+func TestBlockingDependencyStatesRejectsAmbiguousDependencies(t *testing.T) {
+	t.Parallel()
+
+	for name, dependencies := range map[string][]beadShowDependency{
+		"missing id":     {{Status: "open", DependencyType: "blocks"}},
+		"missing status": {{ID: "ntm-missing", DependencyType: "blocks"}},
+		"conflicting duplicate": {
+			{ID: "ntm-race", Status: "open", DependencyType: "blocks"},
+			{ID: "ntm-race", Status: "closed", DependencyType: "blocks"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if states, err := blockingDependencyStates(dependencies); err == nil {
+				t.Fatalf("blockingDependencyStates=%+v, want error", states)
 			}
 		})
 	}
@@ -148,6 +268,248 @@ func TestBeadClaimArgsUseAtomicPrimitive(t *testing.T) {
 	if got := beadClaimArgs("ntm-123", "BlueLake/ntm-key"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("beadClaimArgs=%q, want %q", got, want)
 	}
+}
+
+func TestOperatorGatedLabelsCanonicalVocabulary(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		"blocked-on-ivan",
+		"blocked-on-operator",
+		"business-input",
+		"human-gated",
+		"human-input",
+		"needs-operator",
+		"operator-action",
+		"operator-gated",
+	}
+	got := OperatorGatedLabels()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("OperatorGatedLabels()=%v, want %v", got, want)
+	}
+	for _, label := range want {
+		if !IsOperatorGatedLabel(label) || !IsOperatorGatedLabel("  "+strings.ToUpper(label)+"  ") {
+			t.Fatalf("canonical operator label %q was not recognized after normalization", label)
+		}
+	}
+	for _, label := range []string{"", "backend", "operator", "blocked"} {
+		if IsOperatorGatedLabel(label) {
+			t.Fatalf("non-gated label %q was classified as operator gated", label)
+		}
+	}
+	got[0] = "mutated"
+	if fresh := OperatorGatedLabels(); !reflect.DeepEqual(fresh, want) {
+		t.Fatalf("caller mutated canonical operator labels: %v", fresh)
+	}
+}
+
+func TestClaimBeadForAssignmentTransactionRejectsDirectStartBlockers(t *testing.T) {
+	requireRealBR(t)
+
+	for _, dependencyType := range []string{"blocks", "conditional-blocks", "waits-for"} {
+		t.Run(dependencyType, func(t *testing.T) {
+			dir := t.TempDir()
+			runRealBR(t, dir, "init", "--quiet")
+			targetID := createRealBRBead(t, dir, "assignment claim target "+dependencyType)
+			blockerID := createRealBRBead(t, dir, "assignment claim blocker "+dependencyType)
+			runRealBR(t, dir, "dep", "add", targetID, blockerID, "--type", dependencyType, "--json")
+
+			result, changed, err := claimBeadForAssignmentTransaction(
+				t.Context(), realBRDatabasePath(t, dir), targetID, "AtomicActor", OperatorGatedLabels(),
+			)
+			var eligibilityErr *AssignmentEligibilityError
+			if !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &eligibilityErr) {
+				t.Fatalf("claim result=%+v changed=%v error=%v, want typed ineligible error", result, changed, err)
+			}
+			if changed || eligibilityErr.BeadID != targetID || eligibilityErr.Status != "open" ||
+				!reflect.DeepEqual(eligibilityErr.UnresolvedBlockers, []string{blockerID}) || len(eligibilityErr.OperatorLabels) != 0 {
+				t.Fatalf("eligibility error=%+v changed=%v", eligibilityErr, changed)
+			}
+			assertRealBRStatusAndAssignee(t, dir, targetID, "open", "")
+		})
+	}
+}
+
+func TestClaimBeadForAssignmentTransactionRejectsEveryOperatorGate(t *testing.T) {
+	requireRealBR(t)
+	dir := t.TempDir()
+	runRealBR(t, dir, "init", "--quiet")
+	targetID := createRealBRBead(t, dir, "assignment operator gate target")
+	for _, label := range OperatorGatedLabels() {
+		runRealBR(t, dir, "update", targetID, "--add-label", label, "--json")
+	}
+
+	result, changed, err := claimBeadForAssignmentTransaction(
+		t.Context(), realBRDatabasePath(t, dir), targetID, "AtomicActor", OperatorGatedLabels(),
+	)
+	var eligibilityErr *AssignmentEligibilityError
+	if !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &eligibilityErr) {
+		t.Fatalf("claim result=%+v changed=%v error=%v, want typed ineligible error", result, changed, err)
+	}
+	if changed || !reflect.DeepEqual(eligibilityErr.OperatorLabels, OperatorGatedLabels()) || len(eligibilityErr.UnresolvedBlockers) != 0 {
+		t.Fatalf("eligibility error=%+v changed=%v", eligibilityErr, changed)
+	}
+	assertRealBRStatusAndAssignee(t, dir, targetID, "open", "")
+}
+
+func TestClaimBeadForAssignmentMirrorsStartBlockerSemantics(t *testing.T) {
+	requireRealBR(t)
+
+	t.Run("parent-child rollup does not block start", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		parentID := createRealBRBead(t, dir, "claimable parent")
+		childID := createRealBRBead(t, dir, "open child")
+		runRealBR(t, dir, "dep", "add", childID, parentID, "--type", "parent-child", "--json")
+		claim, err := ClaimBeadForAssignment(t.Context(), dir, parentID, "AtomicActor")
+		if err != nil || claim.ID != parentID || claim.Status != "in_progress" {
+			t.Fatalf("parent claim=%+v error=%v", claim, err)
+		}
+		assertRealBRStatusAndAssignee(t, dir, parentID, "in_progress", "AtomicActor")
+	})
+
+	t.Run("closed direct blocker does not block start", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		targetID := createRealBRBead(t, dir, "claimable after blocker closes")
+		blockerID := createRealBRBead(t, dir, "closed blocker")
+		runRealBR(t, dir, "dep", "add", targetID, blockerID, "--type", "blocks", "--json")
+		runRealBR(t, dir, "close", blockerID, "--reason", "test prerequisite complete", "--json")
+		claim, err := ClaimBeadForAssignment(t.Context(), dir, targetID, "AtomicActor")
+		if err != nil || claim.ID != targetID || claim.Status != "in_progress" {
+			t.Fatalf("unblocked claim=%+v error=%v", claim, err)
+		}
+	})
+}
+
+func TestClaimBeadForAssignmentStatusConflictAndIdempotency(t *testing.T) {
+	requireRealBR(t)
+
+	t.Run("terminal status is ineligible", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		beadID := createRealBRBead(t, dir, "terminal assignment claim")
+		runRealBR(t, dir, "close", beadID, "--reason", "terminal test", "--json")
+		_, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "AtomicActor")
+		var eligibilityErr *AssignmentEligibilityError
+		if !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &eligibilityErr) || eligibilityErr.Status != "closed" {
+			t.Fatalf("terminal claim error=%v eligibility=%+v", err, eligibilityErr)
+		}
+		assertRealBRStatusAndAssignee(t, dir, beadID, "closed", "")
+	})
+
+	t.Run("other owner is conflict", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		beadID := createRealBRBead(t, dir, "assignment owner conflict")
+		if _, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "FirstActor"); err != nil {
+			t.Fatalf("first claim: %v", err)
+		}
+		if _, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "OtherActor"); !errors.Is(err, ErrBeadAlreadyClaimed) || errors.Is(err, ErrBeadAssignmentIneligible) {
+			t.Fatalf("other-owner claim error=%v, want conflict only", err)
+		}
+	})
+
+	t.Run("same owner retry is idempotent", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		beadID := createRealBRBead(t, dir, "idempotent assignment claim")
+		first, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "StableActor")
+		if err != nil {
+			t.Fatalf("first claim: %v", err)
+		}
+		runRealBR(t, dir, "update", beadID, "--add-label", "operator-gated", "--json")
+		second, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "StableActor")
+		if err != nil || second.ID != first.ID || second.Actor != first.Actor || second.Status != "in_progress" {
+			t.Fatalf("idempotent claim=%+v first=%+v error=%v", second, first, err)
+		}
+	})
+}
+
+func TestClaimBeadForAssignmentTransactionRejectsNonReadyOpenWork(t *testing.T) {
+	requireRealBR(t)
+
+	tests := []struct {
+		name       string
+		updateSQL  string
+		wantReason func(*AssignmentEligibilityError) bool
+	}{
+		{
+			name:       "future deferred",
+			updateSQL:  "UPDATE issues SET defer_until = '2099-01-01T00:00:00Z' WHERE id = ?",
+			wantReason: func(err *AssignmentEligibilityError) bool { return err.Deferred },
+		},
+		{
+			name:       "pinned",
+			updateSQL:  "UPDATE issues SET pinned = 1 WHERE id = ?",
+			wantReason: func(err *AssignmentEligibilityError) bool { return err.Pinned },
+		},
+		{
+			name:       "ephemeral",
+			updateSQL:  "UPDATE issues SET ephemeral = 1 WHERE id = ?",
+			wantReason: func(err *AssignmentEligibilityError) bool { return err.Ephemeral },
+		},
+		{
+			name:       "template",
+			updateSQL:  "UPDATE issues SET is_template = 1 WHERE id = ?",
+			wantReason: func(err *AssignmentEligibilityError) bool { return err.Template },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			runRealBR(t, dir, "init", "--quiet")
+			beadID := createRealBRBead(t, dir, "non-ready assignment "+test.name)
+			databasePath := realBRDatabasePath(t, dir)
+			database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+			if err != nil {
+				t.Fatalf("open Beads database: %v", err)
+			}
+			if _, err := database.Exec(test.updateSQL, beadID); err != nil {
+				_ = database.Close()
+				t.Fatalf("apply readiness gate: %v", err)
+			}
+			_ = database.Close()
+
+			result, changed, err := claimBeadForAssignmentTransaction(
+				t.Context(), databasePath, beadID, "AtomicActor", OperatorGatedLabels(),
+			)
+			var eligibilityErr *AssignmentEligibilityError
+			if !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &eligibilityErr) || !test.wantReason(eligibilityErr) {
+				t.Fatalf("claim result=%+v changed=%v error=%v eligibility=%+v", result, changed, err, eligibilityErr)
+			}
+			if changed || eligibilityErr.Status != "open" || len(eligibilityErr.UnresolvedBlockers) != 0 || len(eligibilityErr.OperatorLabels) != 0 {
+				t.Fatalf("eligibility error=%+v changed=%v", eligibilityErr, changed)
+			}
+			assertAssignmentClaimDatabaseState(t, databasePath, beadID, "open", "")
+		})
+	}
+
+	t.Run("wisp", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		databasePath := realBRDatabasePath(t, dir)
+		const beadID = "unit-wisp-claim"
+		database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+		if err != nil {
+			t.Fatalf("open Beads database: %v", err)
+		}
+		if _, err := database.Exec("INSERT INTO issues (id, title, status) VALUES (?, ?, 'open')", beadID, "wisp assignment claim"); err != nil {
+			_ = database.Close()
+			t.Fatalf("insert wisp fixture: %v", err)
+		}
+		_ = database.Close()
+
+		_, changed, err := claimBeadForAssignmentTransaction(
+			t.Context(), databasePath, beadID, "AtomicActor", OperatorGatedLabels(),
+		)
+		var eligibilityErr *AssignmentEligibilityError
+		if changed || !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &eligibilityErr) || !eligibilityErr.Wisp {
+			t.Fatalf("wisp changed=%v error=%v eligibility=%+v", changed, err, eligibilityErr)
+		}
+		assertAssignmentClaimDatabaseState(t, databasePath, beadID, "open", "")
+	})
 }
 
 func TestClaimBeadNonTerminalGuardRefusesCloseAfterReopenRead(t *testing.T) {
@@ -383,7 +745,7 @@ func TestReleaseBeadClaimRetryFinalizesCommittedSQLiteMutation(t *testing.T) {
 	assertRealBRStatusAndAssignee(t, dir, beadID, "open", "")
 }
 
-func TestReleaseBeadClaimLeavesDifferentOwnerAndUnassignsTerminalOwner(t *testing.T) {
+func TestReleaseBeadClaimLeavesDifferentOwnerAndPreservesTerminalStatus(t *testing.T) {
 	requireRealBR(t)
 	dir := t.TempDir()
 	runRealBR(t, dir, "init", "--quiet")
@@ -424,6 +786,23 @@ func assertRealBRStatusAndAssignee(t *testing.T, dir, beadID, wantStatus, wantAs
 	}
 	if rows[0].Status != wantStatus || rows[0].Assignee != wantAssignee {
 		t.Fatalf("bead %s status=%q assignee=%q, want %q/%q", beadID, rows[0].Status, rows[0].Assignee, wantStatus, wantAssignee)
+	}
+}
+
+func assertAssignmentClaimDatabaseState(t *testing.T, databasePath, beadID, wantStatus, wantAssignee string) {
+	t.Helper()
+	database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+	if err != nil {
+		t.Fatalf("open Beads database: %v", err)
+	}
+	defer database.Close()
+	var status string
+	var assignee sql.NullString
+	if err := database.QueryRow("SELECT status, assignee FROM issues WHERE id = ?", beadID).Scan(&status, &assignee); err != nil {
+		t.Fatalf("read assignment claim state for %s: %v", beadID, err)
+	}
+	if status != wantStatus || strings.TrimSpace(assignee.String) != wantAssignee {
+		t.Fatalf("bead %s database status=%q assignee=%q, want %q/%q", beadID, status, assignee.String, wantStatus, wantAssignee)
 	}
 }
 

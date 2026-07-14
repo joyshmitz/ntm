@@ -1,10 +1,44 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestSpawnLifecycleContextCancellationShortCircuitsOperations(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := preflightOllamaSpawnContext(ctx, SpawnOptions{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Ollama preflight error = %v, want cancellation", err)
+	}
+	if err := preflightCodexAccountSupportContext(ctx, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Codex preflight error = %v, want cancellation", err)
+	}
+	if _, err := ResolveCassContextWithContext(ctx, "query", t.TempDir()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CASS context error = %v, want cancellation", err)
+	}
+	if err := spawnSessionLogicContext(ctx, SpawnOptions{Session: "canceled-spawn"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("spawn lifecycle error = %v, want cancellation before side effects", err)
+	}
+}
+
+func TestSpawnLifecycleComposableCancellationDoesNotEmit(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	stdout, err := captureStdout(t, func() error {
+		return spawnSessionLogicComposable(ctx, SpawnOptions{Session: "silent-canceled-spawn"})
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("composable spawn error = %v, want cancellation", err)
+	}
+	if stdout != "" {
+		t.Fatalf("composable spawn wrote stdout %q", stdout)
+	}
+}
 
 func TestNewSpawnContext(t *testing.T) {
 	ctx := NewSpawnContext(4)
@@ -229,4 +263,29 @@ func TestEnvVarsMapContent(t *testing.T) {
 			t.Errorf("expected env var %s to be present", key)
 		}
 	}
+}
+
+func TestBuildSpawnPromptSequencePreservesContextOrdering(t *testing.T) {
+	t.Run("user prompt combines cass after recovery", func(t *testing.T) {
+		steps := buildSpawnPromptSequence("cass", "recovery", "user", 250*time.Millisecond)
+		if len(steps) != 2 {
+			t.Fatalf("steps = %#v, want recovery and combined user prompt", steps)
+		}
+		if steps[0].Kind != "recovery_context" || steps[0].Message != "recovery" {
+			t.Fatalf("first step = %#v, want recovery", steps[0])
+		}
+		if steps[1].Kind != "user_prompt" || steps[1].Message != "cass\n\nuser" || steps[1].Delay != 250*time.Millisecond {
+			t.Fatalf("second step = %#v, want delayed cass+user", steps[1])
+		}
+	})
+
+	t.Run("context-only delivery keeps cass before recovery", func(t *testing.T) {
+		steps := buildSpawnPromptSequence("cass", "recovery", "", time.Second)
+		if len(steps) != 2 || steps[0].Kind != "cass_context" || steps[1].Kind != "recovery_context" {
+			t.Fatalf("steps = %#v, want cass then recovery", steps)
+		}
+		if steps[0].Delay != 0 || steps[1].Delay != 0 {
+			t.Fatalf("context-only delays = %v/%v, want zero", steps[0].Delay, steps[1].Delay)
+		}
+	})
 }

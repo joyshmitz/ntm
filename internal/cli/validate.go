@@ -37,7 +37,9 @@ type ValidationIssue struct {
 
 // ValidationReport is the complete validation output.
 type ValidationReport struct {
+	Success bool               `json:"success"`
 	Valid   bool               `json:"valid"`
+	Error   string             `json:"error,omitempty"`
 	Results []ValidationResult `json:"results"`
 	Summary ValidationSummary  `json:"summary"`
 }
@@ -173,6 +175,7 @@ func runValidation(all, fix bool) error {
 	locations := discoverConfigs(all)
 
 	report := ValidationReport{
+		Success: true,
 		Valid:   true,
 		Results: make([]ValidationResult, 0, len(locations)),
 	}
@@ -182,6 +185,7 @@ func runValidation(all, fix bool) error {
 		report.Results = append(report.Results, result)
 
 		if !result.Valid {
+			report.Success = false
 			report.Valid = false
 		}
 		report.Summary.FilesChecked++
@@ -197,20 +201,12 @@ func runValidation(all, fix bool) error {
 
 	// Output results
 	if IsJSONOutput() {
-		// Print first; only return the validation error after the
-		// JSON document has been emitted so automation can still
-		// parse the report. The root command has SilenceErrors=true
-		// (root.go:88-89), so cobra won't print this error on top
-		// of the JSON we just wrote — but it does propagate to
-		// `os.Exit(non-zero)`, which is the contract this command
-		// previously violated by always exiting 0 in JSON mode (#112).
-		if err := output.PrintJSON(report); err != nil {
-			return err
-		}
 		if !report.Valid {
-			return fmt.Errorf("validation failed with %d errors", report.Summary.ErrorCount)
+			cause := fmt.Errorf("validation failed with %d errors", report.Summary.ErrorCount)
+			report.Error = cause.Error()
+			return emitJSONFailureEnvelopeWithCause(report, cause)
 		}
-		return nil
+		return output.PrintJSON(report)
 	}
 
 	return printValidationReport(report)

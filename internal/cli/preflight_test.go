@@ -1,12 +1,61 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/lint"
 )
+
+func TestPreflightJSONBlockedReturnsOneTerminalFailure(t *testing.T) {
+	originalJSON := jsonOutput
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	tests := []struct {
+		name       string
+		globalJSON bool
+		args       []string
+	}{
+		{
+			name: "local json flag",
+			args: []string{"--strict", "--json", "rm -rf /tmp/important"},
+		},
+		{
+			name:       "global json flag is not shadowed",
+			globalJSON: true,
+			args:       []string{"--strict", "rm -rf /tmp/important"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			jsonOutput = tt.globalJSON
+			cmd := newPreflightCmd()
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetArgs(tt.args)
+
+			stdout, runErr := captureStdout(t, cmd.Execute)
+			if !errors.Is(runErr, errJSONFailure) {
+				t.Fatalf("preflight error = %v, want errJSONFailure", runErr)
+			}
+			var blocked preflightError
+			if !errors.As(runErr, &blocked) {
+				t.Fatalf("preflight error = %v, want preserved preflightError", runErr)
+			}
+
+			document := decodeSingleTerminalJSONMap(t, stdout)
+			if success, ok := document["success"].(bool); !ok || success {
+				t.Fatalf("success = %#v, want false", document["success"])
+			}
+			if document["error_code"] != "PREFLIGHT_BLOCKED" {
+				t.Fatalf("error_code = %#v, want PREFLIGHT_BLOCKED", document["error_code"])
+			}
+		})
+	}
+}
 
 // TestPreflightTableDriven covers the core preflight scenarios with table-driven tests.
 func TestPreflightTableDriven(t *testing.T) {

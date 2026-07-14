@@ -2,10 +2,108 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestPolicyValidateJSONFailuresAreTerminal(t *testing.T) {
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	tests := []struct {
+		name    string
+		prepare func(*testing.T) string
+		wantErr string
+	}{
+		{
+			name: "missing policy",
+			prepare: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing-policy.yaml")
+			},
+			wantErr: "Policy file does not exist",
+		},
+		{
+			name: "invalid policy",
+			prepare: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "invalid-policy.yaml")
+				if err := os.WriteFile(path, []byte("blocked: [\n"), 0644); err != nil {
+					t.Fatalf("write invalid policy: %v", err)
+				}
+				return path
+			},
+			wantErr: "Invalid YAML",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tt.prepare(t)
+			stdout, runErr := captureStdout(t, func() error { return runPolicyValidate(path) })
+			if !errors.Is(runErr, errJSONFailure) {
+				t.Fatalf("runPolicyValidate() error = %v, want errJSONFailure", runErr)
+			}
+			if !strings.Contains(runErr.Error(), tt.wantErr) {
+				t.Fatalf("runPolicyValidate() error = %v, want %q", runErr, tt.wantErr)
+			}
+
+			document := decodeSingleTerminalJSONMap(t, stdout)
+			if success, ok := document["success"].(bool); !ok || success {
+				t.Fatalf("success = %#v, want false", document["success"])
+			}
+			if valid, ok := document["valid"].(bool); !ok || valid {
+				t.Fatalf("valid = %#v, want false", document["valid"])
+			}
+			topLevelError, ok := document["error"].(string)
+			if !ok || !strings.Contains(topLevelError, tt.wantErr) {
+				t.Fatalf("error = %#v, want top-level error containing %q", document["error"], tt.wantErr)
+			}
+			errorsValue, ok := document["errors"].([]interface{})
+			if !ok || len(errorsValue) == 0 {
+				t.Fatalf("errors = %#v, want first error containing %q", document["errors"], tt.wantErr)
+			}
+			firstError, ok := errorsValue[0].(string)
+			if !ok || !strings.Contains(firstError, tt.wantErr) {
+				t.Fatalf("errors = %#v, want first error containing %q", document["errors"], tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPolicyValidateJSONSuccessIncludesTerminalSuccess(t *testing.T) {
+	originalJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = originalJSON })
+
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	content := `version: 1
+automation:
+  auto_commit: false
+  auto_push: false
+  force_release: approval
+blocked:
+  - pattern: "rm -rf /"
+    reason: "dangerous"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write valid policy: %v", err)
+	}
+
+	stdout, runErr := captureStdout(t, func() error { return runPolicyValidate(path) })
+	if runErr != nil {
+		t.Fatalf("runPolicyValidate() error = %v, want nil", runErr)
+	}
+	document := decodeSingleTerminalJSONMap(t, stdout)
+	if success, ok := document["success"].(bool); !ok || !success {
+		t.Fatalf("success = %#v, want true", document["success"])
+	}
+	if valid, ok := document["valid"].(bool); !ok || !valid {
+		t.Fatalf("valid = %#v, want true", document["valid"])
+	}
+}
 
 func TestPolicyCmd(t *testing.T) {
 	cmd := newPolicyCmd()

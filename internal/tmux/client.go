@@ -140,6 +140,9 @@ func BinaryPath() string {
 }
 
 func resolveTmuxBinaryPath() string {
+	if override := strings.TrimSpace(os.Getenv("NTM_TMUX_BINARY")); override != "" {
+		return override
+	}
 	candidates := []string{
 		"/usr/bin/tmux",
 		"/usr/local/bin/tmux",
@@ -239,6 +242,9 @@ func ClassifyCommandError(err error) CommandErrorClass {
 		strings.Contains(msg, "session not found") {
 		return CommandErrorClass{Kind: CommandErrorSessionNotFound}
 	}
+	if strings.Contains(msg, "permission denied") {
+		return CommandErrorClass{Kind: CommandErrorPermissionDenied, Infrastructure: true}
+	}
 	if strings.Contains(msg, "no server running") ||
 		strings.Contains(msg, "error connecting to") ||
 		strings.Contains(msg, "no sessions") {
@@ -249,10 +255,6 @@ func ClassifyCommandError(err error) CommandErrorClass {
 		strings.Contains(msg, "malformed output") {
 		return CommandErrorClass{Kind: CommandErrorMalformedOutput, Infrastructure: true, Retryable: true}
 	}
-	if strings.Contains(msg, "permission denied") {
-		return CommandErrorClass{Kind: CommandErrorPermissionDenied, Infrastructure: true}
-	}
-
 	var execErr *exec.Error
 	if errors.As(err, &execErr) {
 		switch {
@@ -265,15 +267,24 @@ func ClassifyCommandError(err error) CommandErrorClass {
 		}
 	}
 
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		if exitErr.ExitCode() == 255 {
+	if exitCode, ok := commandExitCode(err); ok {
+		if exitCode == 255 {
 			return CommandErrorClass{Kind: CommandErrorRemoteUnavailable, Infrastructure: true, Retryable: true}
 		}
 		return CommandErrorClass{Kind: CommandErrorCommandFailed}
 	}
 
 	return CommandErrorClass{Kind: CommandErrorUnknown, Infrastructure: true, Retryable: true}
+}
+
+// commandExitCode returns the process exit code carried by err, including when
+// the exec.ExitError is wrapped with command and stderr context.
+func commandExitCode(err error) (int, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return 0, false
+	}
+	return exitErr.ExitCode(), true
 }
 
 // ShellQuote returns a POSIX-shell-safe single-quoted string.

@@ -18,7 +18,9 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
-var pidmapLogger = slog.Default().With("component", "integrations.rano.pidmap")
+func pidmapLogger() *slog.Logger {
+	return slog.Default().With("component", "integrations.rano.pidmap")
+}
 
 // PaneIdentity represents a pane's identity for attribution.
 type PaneIdentity struct {
@@ -113,7 +115,7 @@ func (m *PIDMap) RefreshContext(ctx context.Context) error {
 
 		panes, err := tmux.GetPanesContext(ctx, sess.Name)
 		if err != nil {
-			pidmapLogger.Warn("failed to get panes for session",
+			pidmapLogger().Warn("failed to get panes for session",
 				"session", sess.Name,
 				"error", err,
 			)
@@ -142,7 +144,7 @@ func (m *PIDMap) RefreshContext(ctx context.Context) error {
 			// Discover and map child processes
 			children, err := getChildPIDs(pane.PID)
 			if err != nil {
-				pidmapLogger.Debug("failed to get child PIDs",
+				pidmapLogger().Debug("failed to get child PIDs",
 					"shell_pid", pane.PID,
 					"pane", pane.Title,
 					"error", err,
@@ -155,7 +157,7 @@ func (m *PIDMap) RefreshContext(ctx context.Context) error {
 				m.pidToPane[childPID] = identity
 			}
 
-			pidmapLogger.Debug("mapped pane",
+			pidmapLogger().Debug("mapped pane",
 				"pane", pane.Title,
 				"shell_pid", pane.PID,
 				"child_count", len(children),
@@ -164,7 +166,7 @@ func (m *PIDMap) RefreshContext(ctx context.Context) error {
 	}
 
 	m.lastRefresh = time.Now()
-	pidmapLogger.Info("refreshed PID map",
+	pidmapLogger().Info("refreshed PID map",
 		"pane_count", len(m.paneToShellPID),
 		"total_pids", len(m.pidToPane),
 	)

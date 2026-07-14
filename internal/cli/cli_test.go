@@ -2,6 +2,7 @@ package cli
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -13,11 +14,16 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"log"
+	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"text/template"
 	"time"
@@ -32,6 +38,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/scanner"
 	sessionpkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/startup"
 	"github.com/Dicklesworthstone/ntm/internal/status"
@@ -39,6 +46,174 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
+
+func TestExecuteRootWithSignalsSecondSignalUsesDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix signal semantics required")
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExecuteRootWithSignalsSecondSignalHelper$")
+	cmd.Env = append(os.Environ(), "NTM_TEST_ROOT_SECOND_SIGNAL_HELPER=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("helper stdout pipe: %v", err)
+	}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start signal helper: %v", err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+
+	lines := make(chan string, 8)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+		close(lines)
+	}()
+	waitForLine := func(want string) {
+		t.Helper()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case line, ok := <-lines:
+				if !ok {
+					t.Fatalf("signal helper exited before %q", want)
+				}
+				if line == want {
+					return
+				}
+			case <-timer.C:
+				t.Fatalf("timed out waiting for signal helper line %q", want)
+			}
+		}
+	}
+
+	waitForLine("READY")
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("send first interrupt: %v", err)
+	}
+	waitForLine("CANCELED_AND_LOCAL_NOTIFIED")
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("send second interrupt: %v", err)
+	}
+	err = cmd.Wait()
+	waited = true
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("second interrupt wait error = %v, want signal exit", err)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGINT {
+		t.Fatalf("second interrupt status = %v, want SIGINT", exitErr.Sys())
+	}
+}
+
+func TestClassifyRobotExecuteErrorMapsCancellationToTimeout(t *testing.T) {
+	for _, err := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		fmt.Errorf("initialize robot persistence: %w", context.Canceled),
+	} {
+		code, hint := classifyRobotExecuteError(err)
+		if code != robot.ErrCodeTimeout || !strings.Contains(strings.ToLower(hint), "cancellation") {
+			t.Fatalf("classifyRobotExecuteError(%v) = (%q, %q), want TIMEOUT cancellation guidance", err, code, hint)
+		}
+	}
+}
+
+func TestRobotInvocationFromArgsPrefersOperationOverGlobalModifiers(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantRobot   bool
+		wantCommand string
+	}{
+		{name: "format before bulk", args: []string{"--robot-format=json", "--robot-bulk-assign=proj"}, wantRobot: true, wantCommand: "robot-bulk-assign"},
+		{name: "limit before status", args: []string{"--robot-limit=10", "--robot-status"}, wantRobot: true, wantCommand: "robot-status"},
+		{name: "deprecated format before overlay", args: []string{"--robot-output-format=json", "--robot-overlay"}, wantRobot: true, wantCommand: "robot-overlay"},
+		{name: "modifier only retains fallback", args: []string{"--robot-format=json", "--robot-limit=10"}, wantRobot: true, wantCommand: "robot-format"},
+		{name: "terminator stops scan", args: []string{"--", "--robot-status"}, wantRobot: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotRobot, gotCommand := robotInvocationFromArgs(test.args)
+			if gotRobot != test.wantRobot || gotCommand != test.wantCommand {
+				t.Fatalf("robotInvocationFromArgs(%q) = (%v, %q), want (%v, %q)", test.args, gotRobot, gotCommand, test.wantRobot, test.wantCommand)
+			}
+		})
+	}
+}
+
+func TestJSONInvocationFromArgsHonorsExplicitBooleanAndTerminator(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "global true", args: []string{"--json"}, want: true},
+		{name: "global explicit true", args: []string{"replay", "--json=true"}, want: true},
+		{name: "global false", args: []string{"--json=false", "status"}, want: false},
+		{name: "global last true wins", args: []string{"--json=false", "status", "--json"}, want: true},
+		{name: "global last false wins", args: []string{"--json", "status", "--json=false"}, want: false},
+		{name: "format equals", args: []string{"ensemble", "compare", "a", "b", "--format=json"}, want: true},
+		{name: "format separate", args: []string{"ensemble", "presets", "--format", "json"}, want: true},
+		{name: "short format equals", args: []string{"ensemble", "compare", "a", "b", "-f=json"}, want: true},
+		{name: "short format separate", args: []string{"ensemble", "presets", "-f", "json"}, want: true},
+		{name: "format case insensitive", args: []string{"modes", "list", "--format=JSON"}, want: true},
+		{name: "format last non-json wins", args: []string{"ensemble", "compare", "a", "b", "--format=json", "--format", "yaml"}, want: false},
+		{name: "format last json wins", args: []string{"ensemble", "compare", "a", "b", "--format=yaml", "--format", "json"}, want: true},
+		{name: "mixed format last non-json wins", args: []string{"ensemble", "compare", "a", "b", "-f=json", "--format", "yaml"}, want: false},
+		{name: "mixed format last json wins", args: []string{"ensemble", "compare", "a", "b", "--format=yaml", "-f", "json"}, want: true},
+		{name: "global true forces yaml", args: []string{"--json=true", "ensemble", "compare", "a", "b", "--format=yaml"}, want: true},
+		{name: "global false does not negate format", args: []string{"--json=false", "ensemble", "compare", "a", "b", "--format=json"}, want: true},
+		{name: "trailing global false does not negate format", args: []string{"ensemble", "compare", "a", "b", "--format=json", "--json=false"}, want: true},
+		{name: "config value before command", args: []string{"--config", "/tmp/ntm.toml", "ensemble", "presets", "--format=json"}, want: true},
+		{name: "cass injection format is not output", args: []string{"cass", "preview", "--format=json"}, want: false},
+		{name: "cass injection short format is not output", args: []string{"cass", "preview", "-f=json"}, want: false},
+		{name: "checkpoint archive format is not output", args: []string{"checkpoint", "export", "s", "id", "--format=json"}, want: false},
+		{name: "short format requires real shorthand", args: []string{"audit", "export", "s", "-f=json"}, want: false},
+		{name: "unscoped format is not output", args: []string{"status", "--format=json"}, want: false},
+		{name: "terminator stops global scan", args: []string{"--", "--json"}, want: false},
+		{name: "terminator stops format scan", args: []string{"ensemble", "compare", "a", "b", "--", "--format=json"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := jsonInvocationFromArgs(test.args); got != test.want {
+				t.Fatalf("jsonInvocationFromArgs(%q) = %v, want %v", test.args, got, test.want)
+			}
+		})
+	}
+}
+
+func TestExecuteRootWithSignalsSecondSignalHelper(t *testing.T) {
+	if os.Getenv("NTM_TEST_ROOT_SECOND_SIGNAL_HELPER") != "1" {
+		return
+	}
+	localSignals := make(chan os.Signal, 1)
+	signal.Notify(localSignals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(localSignals)
+
+	_ = executeRootWithSignals(func(ctx context.Context) error {
+		fmt.Println("READY")
+		<-ctx.Done()
+		select {
+		case <-localSignals:
+			fmt.Println("CANCELED_AND_LOCAL_NOTIFIED")
+		case <-time.After(5 * time.Second):
+			fmt.Println("LOCAL_SIGNAL_MISSING")
+		}
+		select {}
+	})
+}
 
 // resetFlags resets global flags to default values between tests
 func resetFlags() {
@@ -68,7 +243,16 @@ func resetFlags() {
 	robotSendExclude = ""
 	robotSendDelay = 0
 	robotAssignStrategy = "balanced"
+	robotBulkAssign = ""
+	robotBulkAssignFromBV = false
+	robotBulkAssignAlloc = ""
 	robotBulkAssignStrategy = "impact"
+	robotBulkAssignSkip = ""
+	robotBulkAssignTemplate = ""
+	robotBulkAssignParallel = false
+	robotBulkAssignStagger = 0
+	robotRequireReservation = false
+	robotReservationPaths = ""
 	robotDiff = ""
 	robotDiffSince = "15m"
 	robotHistorySince = ""
@@ -85,6 +269,19 @@ func resetFlags() {
 	robotRouteExclude = ""
 	robotSpawnTimeout = "30s"
 	robotSpawnStrategy = "top-n"
+	robotSpawn = ""
+	robotSpawnCC = 0
+	robotSpawnCod = 0
+	robotSpawnGmi = 0
+	robotSpawnAgy = 0
+	robotSpawnPreset = ""
+	robotSpawnNoUser = false
+	robotSpawnWait = false
+	robotSpawnSafety = false
+	robotSpawnDir = ""
+	robotSpawnAssignWork = false
+	robotSpawnNames = ""
+	robotSpawnLabel = ""
 	robotInterruptMsg = ""
 	robotInterruptAll = false
 	robotInterruptForce = false
@@ -106,6 +303,136 @@ func resetFlags() {
 	robotSmartRestartHardKillOnly = false
 	robotFormat = ""
 	robotVerbosity = ""
+	robotMonitorOutput = ""
+	robotSaveOutput = ""
+}
+
+func TestRobotSpawnOptionsFromFlagsPreservesDurationAndCopiesInputs(t *testing.T) {
+	resetFlags()
+	t.Cleanup(resetFlags)
+
+	robotSpawn = "duration-spawn"
+	robotSpawnLabel = "goal"
+	robotSpawnCC = 1
+	robotSpawnCod = 2
+	robotSpawnGmi = 3
+	robotSpawnAgy = 4
+	robotSpawnPreset = "custom"
+	robotSpawnNoUser = true
+	robotSpawnDir = t.TempDir()
+	robotSpawnWait = true
+	robotSpawnSafety = true
+	robotSpawnAssignWork = true
+	robotSpawnStrategy = "diverse"
+	robotSpawnNames = "Alice, Bob"
+	robotRequireReservation = true
+	paths := []string{"internal/robot/**", "internal/cli/**"}
+
+	opts := robotSpawnOptionsFromFlags(nil, 500*time.Millisecond, paths, true)
+	if opts.ReadyTimeout != 500*time.Millisecond {
+		t.Fatalf("ReadyTimeout=%s, want 500ms", opts.ReadyTimeout)
+	}
+	if opts.Session != robotSpawn || opts.Label != robotSpawnLabel || opts.CCCount != 1 || opts.CodCount != 2 || opts.GmiCount != 3 || opts.AgyCount != 4 {
+		t.Fatalf("spawn identity/count options=%+v", opts)
+	}
+	if !opts.NoUserPane || !opts.WaitReady || !opts.DryRun || !opts.Safety || !opts.AssignWork || !opts.RequireReservation {
+		t.Fatalf("spawn boolean options=%+v", opts)
+	}
+	if opts.Preset != "custom" || opts.WorkingDir != robotSpawnDir || opts.AssignStrategy != "diverse" {
+		t.Fatalf("spawn value options=%+v", opts)
+	}
+	if !reflect.DeepEqual(opts.CustomNames, []string{"Alice", "Bob"}) {
+		t.Fatalf("CustomNames=%v", opts.CustomNames)
+	}
+	if !reflect.DeepEqual(opts.ReservationPaths, paths) {
+		t.Fatalf("ReservationPaths=%v, want %v", opts.ReservationPaths, paths)
+	}
+	paths[0] = "mutated"
+	if opts.ReservationPaths[0] != "internal/robot/**" {
+		t.Fatalf("ReservationPaths aliases caller input: %v", opts.ReservationPaths)
+	}
+}
+
+func TestSuppressRobotDiagnosticsRestoresWriters(t *testing.T) {
+	originalSlog := slog.Default()
+	originalLogWriter := log.Writer()
+	t.Cleanup(func() {
+		slog.SetDefault(originalSlog)
+		log.SetOutput(originalLogWriter)
+	})
+
+	var slogOutput bytes.Buffer
+	var logOutput bytes.Buffer
+	var commandErrorOutput bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&slogOutput, nil)))
+	log.SetOutput(&logOutput)
+	cmd := &cobra.Command{Use: "test"}
+	cmd.SetErr(&commandErrorOutput)
+	cmd.Flags().String("legacy", "", "")
+	if err := cmd.Flags().MarkDeprecated("legacy", "use --current instead"); err != nil {
+		t.Fatalf("mark legacy flag deprecated: %v", err)
+	}
+
+	restore := suppressRobotDiagnostics(cmd)
+	if message := cmd.Flags().Lookup("legacy").Deprecated; message != "" {
+		t.Fatalf("deprecated flag message remained active during suppression: %q", message)
+	}
+	slog.Warn("suppressed slog diagnostic")
+	log.Print("suppressed log diagnostic")
+	fmt.Fprint(cmd.ErrOrStderr(), "suppressed cobra diagnostic")
+	if slogOutput.Len() != 0 || logOutput.Len() != 0 || commandErrorOutput.Len() != 0 {
+		t.Fatalf("diagnostics escaped suppression: slog=%q log=%q cobra=%q", slogOutput.String(), logOutput.String(), commandErrorOutput.String())
+	}
+
+	restore()
+	if message := cmd.Flags().Lookup("legacy").Deprecated; message != "use --current instead" {
+		t.Fatalf("deprecated flag message was not restored: %q", message)
+	}
+	slog.Warn("restored slog diagnostic")
+	log.Print("restored log diagnostic")
+	fmt.Fprint(cmd.ErrOrStderr(), "restored cobra diagnostic")
+	if !strings.Contains(slogOutput.String(), "restored slog diagnostic") {
+		t.Fatalf("slog writer was not restored: %q", slogOutput.String())
+	}
+	if !strings.Contains(logOutput.String(), "restored log diagnostic") {
+		t.Fatalf("log writer was not restored: %q", logOutput.String())
+	}
+	if commandErrorOutput.String() != "restored cobra diagnostic" {
+		t.Fatalf("cobra error writer was not restored: %q", commandErrorOutput.String())
+	}
+}
+
+func TestMaybeRunStartupCleanupMarksOnlyCompleteSuccess(t *testing.T) {
+	originalCfgFile := cfgFile
+	t.Cleanup(func() { cfgFile = originalCfgFile })
+
+	t.Run("read failure remains retryable", func(t *testing.T) {
+		configRoot := t.TempDir()
+		cfgFile = filepath.Join(configRoot, "ntm", "config.toml")
+		t.Setenv("TMPDIR", filepath.Join(configRoot, "missing-temp-root"))
+
+		MaybeRunStartupCleanup(true, 24, false)
+
+		if _, err := os.Stat(lastCleanupFile()); !os.IsNotExist(err) {
+			t.Fatalf("failed cleanup marker stat error = %v, want not-exist", err)
+		}
+	})
+
+	t.Run("complete success records interval", func(t *testing.T) {
+		configRoot := t.TempDir()
+		tempRoot := filepath.Join(configRoot, "empty-temp-root")
+		if err := os.MkdirAll(tempRoot, 0o700); err != nil {
+			t.Fatalf("create empty temp root: %v", err)
+		}
+		cfgFile = filepath.Join(configRoot, "ntm", "config.toml")
+		t.Setenv("TMPDIR", tempRoot)
+
+		MaybeRunStartupCleanup(true, 24, false)
+
+		if _, err := os.Stat(lastCleanupFile()); err != nil {
+			t.Fatalf("successful cleanup marker: %v", err)
+		}
+	})
 }
 
 func TestShouldInitializeRobotPersistenceSkipsStatelessOverlay(t *testing.T) {
@@ -131,8 +458,23 @@ func TestShouldInitializeRobotPersistenceSkipsStatelessOverlay(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "format before overlay remains stateless",
+			args: []string{"ntm", "--robot-format=json", "--robot-overlay"},
+			want: false,
+		},
+		{
+			name: "overlay before deprecated format remains stateless",
+			args: []string{"ntm", "--robot-overlay", "--robot-output-format=json"},
+			want: false,
+		},
+		{
 			name: "stateful robot flag",
 			args: []string{"ntm", "--robot-status"},
+			want: true,
+		},
+		{
+			name: "modifier before stateful operation initializes",
+			args: []string{"ntm", "--robot-limit=10", "--robot-status"},
 			want: true,
 		},
 		{
@@ -1385,7 +1727,7 @@ func TestResolveProfileSwitchProjectDirRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestRunProfileSwitchRejectsInvalidSessionName(t *testing.T) {
-	err := runProfileSwitch("cc_1", "reviewer", "../escape", "", true, true)
+	err := runProfileSwitch(t.Context(), "cc_1", "reviewer", "../escape", "", true, true)
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1395,7 +1737,7 @@ func TestRunProfileSwitchRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestResolveScaleSessionRejectsInvalidSessionName(t *testing.T) {
-	_, err := resolveScaleSession("../escape")
+	_, err := resolveScaleSession(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1405,7 +1747,7 @@ func TestResolveScaleSessionRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestResolveAddSessionRejectsInvalidSessionName(t *testing.T) {
-	_, err := resolveAddSession("../escape")
+	_, err := resolveAddSession(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -2594,6 +2936,30 @@ func TestRunExtractRejectsInvalidSessionName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid session name") {
 		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestRunExtractJSONFailureOwnsTerminalResult(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	stdout, err := captureStdout(t, func() error {
+		return runExtract("../escape", "", "", false, 10, false, false, 0)
+	})
+	if !errors.Is(err, errJSONFailure) {
+		t.Fatalf("runExtract error = %v, want errJSONFailure", err)
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("runExtract error = %v, want preserved validation cause", err)
+	}
+
+	var envelope output.ErrorResponse
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("decode exactly one JSON failure document: %v; stdout=%q", err, stdout)
+	}
+	if !strings.Contains(envelope.Error, "invalid session name") {
+		t.Fatalf("failure envelope = %+v", envelope)
 	}
 }
 
@@ -3959,7 +4325,8 @@ func TestPaletteConfigContextDirPrefersExplicitSessionProject(t *testing.T) {
 
 	base := t.TempDir()
 	projectsBase := filepath.Join(base, "projects")
-	projectDir := filepath.Join(projectsBase, "ntm")
+	const sessionName = "palette-explicit-project"
+	projectDir := filepath.Join(projectsBase, sessionName)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(project dir) failed: %v", err)
 	}
@@ -3976,7 +4343,7 @@ func TestPaletteConfigContextDirPrefersExplicitSessionProject(t *testing.T) {
 		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
 	}
 
-	got, err := paletteConfigContextDir("ntm", true)
+	got, err := paletteConfigContextDir(sessionName, true)
 	if err != nil {
 		t.Fatalf("paletteConfigContextDir() error = %v", err)
 	}
@@ -4083,7 +4450,8 @@ func TestLoadPaletteRuntimeConfigPrefersExplicitSessionProject(t *testing.T) {
 	cfgFile = globalPath
 
 	projectsBase := filepath.Join(base, "projects")
-	projectDir := filepath.Join(projectsBase, "ntm")
+	const sessionName = "palette-runtime-project"
+	projectDir := filepath.Join(projectsBase, sessionName)
 	projectConfigPath := filepath.Join(projectDir, ".ntm", "config.toml")
 	palettePath := filepath.Join(projectDir, ".ntm", "palette.md")
 	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0o755); err != nil {
@@ -4112,7 +4480,7 @@ Use project palette.
 		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
 	}
 
-	loaded, err := loadPaletteRuntimeConfig("ntm", true)
+	loaded, err := loadPaletteRuntimeConfig(sessionName, true)
 	if err != nil {
 		t.Fatalf("loadPaletteRuntimeConfig() failed: %v", err)
 	}
@@ -4753,6 +5121,46 @@ func TestResolveRobotSharedFlagUsesCanonicalSharedValueWhenSpecificHasDefault(t 
 	}
 }
 
+func TestResolveRobotSaveOutputSupportsCanonicalAndDeprecatedFlags(t *testing.T) {
+	t.Run("canonical output", func(t *testing.T) {
+		resetFlags()
+		t.Cleanup(resetFlags)
+
+		cmd := &cobra.Command{Use: "test"}
+		cmd.Flags().String("output", "", "")
+		cmd.Flags().String("save-output", "", "")
+		robotMonitorOutput = "/tmp/canonical-save.json"
+		if err := cmd.Flags().Set("output", robotMonitorOutput); err != nil {
+			t.Fatalf("set output: %v", err)
+		}
+
+		if got := resolveRobotSaveOutput(cmd); got != robotMonitorOutput {
+			t.Fatalf("resolveRobotSaveOutput() = %q, want canonical output %q", got, robotMonitorOutput)
+		}
+	})
+
+	t.Run("explicit deprecated alias wins", func(t *testing.T) {
+		resetFlags()
+		t.Cleanup(resetFlags)
+
+		cmd := &cobra.Command{Use: "test"}
+		cmd.Flags().String("output", "", "")
+		cmd.Flags().String("save-output", "", "")
+		robotMonitorOutput = "/tmp/canonical-save.json"
+		robotSaveOutput = "/tmp/deprecated-save.json"
+		if err := cmd.Flags().Set("output", robotMonitorOutput); err != nil {
+			t.Fatalf("set output: %v", err)
+		}
+		if err := cmd.Flags().Set("save-output", robotSaveOutput); err != nil {
+			t.Fatalf("set save-output: %v", err)
+		}
+
+		if got := resolveRobotSaveOutput(cmd); got != robotSaveOutput {
+			t.Fatalf("resolveRobotSaveOutput() = %q, want deprecated explicit output %q", got, robotSaveOutput)
+		}
+	})
+}
+
 func TestResolveRobotBulkAssignStrategySupportsCanonicalAndDeprecatedFlags(t *testing.T) {
 	t.Run("canonical strategy", func(t *testing.T) {
 		resetFlags()
@@ -5360,10 +5768,11 @@ func TestRobotProcessErrorContract(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		args         []string
-		errorCode    string
-		expectedExit int
+		name            string
+		args            []string
+		errorCode       string
+		expectedExit    int
+		expectedCommand string
 	}{
 		{name: "unknown robot flag", args: []string{"--robot-status", "--not-a-real-flag"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
 		{name: "invalid pagination", args: []string{"--robot-status", "--robot-limit=-1"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
@@ -5385,6 +5794,7 @@ func TestRobotProcessErrorContract(t *testing.T) {
 		{name: "invalid robot verbosity", args: []string{"--robot-status", "--robot-verbosity=noisy"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
 		{name: "invalid robot redaction", args: []string{"--robot-status", "--redact=erase"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
 		{name: "invalid robot config", args: []string{"--config", invalidConfig, "--robot-status"}, errorCode: robot.ErrCodeInternalError, expectedExit: 1},
+		{name: "format before bulk metadata", args: []string{"--robot-format=json", "--robot-bulk-assign=proj", "--not-a-real-flag"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1, expectedCommand: "robot-bulk-assign"},
 		{name: "default ensemble spawn stub", args: []string{"--robot-ensemble-spawn=contract", "--robot-format=toon"}, errorCode: robot.ErrCodeNotImplemented, expectedExit: 2},
 		{name: "unavailable feature", args: []string{"__robot_contract_unavailable__"}, errorCode: robot.ErrCodeNotImplemented, expectedExit: 2},
 	}
@@ -5446,6 +5856,171 @@ func TestRobotProcessErrorContract(t *testing.T) {
 				if got, ok := meta["exit_code"].(float64); ok && int(got) != exitCode {
 					t.Fatalf("_meta.exit_code = %d, process exit = %d", int(got), exitCode)
 				}
+				if tt.expectedCommand != "" && meta["command"] != tt.expectedCommand {
+					t.Fatalf("_meta.command = %q, want %q; payload=%v", meta["command"], tt.expectedCommand, payload)
+				}
+			} else if tt.expectedCommand != "" {
+				t.Fatalf("missing _meta.command %q; payload=%v", tt.expectedCommand, payload)
+			}
+		})
+	}
+}
+
+func TestGlobalJSONProcessBoundaryOwnsExactlyOneDocument(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping process-level JSON contract integration in short mode")
+	}
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	configHome := filepath.Join(tmpDir, "config")
+	dataHome := filepath.Join(tmpDir, "data")
+	for _, dir := range []string{homeDir, configHome, dataHome} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create isolated directory: %v", err)
+		}
+	}
+
+	tests := []struct {
+		name          string
+		args          []string
+		wantExit      int
+		wantErrorCode string
+	}{
+		{name: "raw parse error", args: []string{"--json", "--not-a-real-flag"}, wantExit: 1, wantErrorCode: robot.ErrCodeInvalidFlag},
+		{name: "raw command error", args: []string{"--json", "replay", "--last"}, wantExit: 1, wantErrorCode: robot.ErrCodeInvalidFlag},
+		{name: "already owned failure", args: []string{"--json", "sessions", "show", "ntm-json-contract-missing"}, wantExit: 1},
+		{name: "Codex goal validation owns failure", args: []string{"--json", "send", "proj", "goal", "--codex-goal"}, wantExit: 1, wantErrorCode: robot.ErrCodeInvalidFlag},
+		{name: "profiling does not append a document", args: []string{"--json", "--profile-startup", "version"}, wantExit: 0},
+		{name: "last repeated json flag enables machine mode", args: []string{"--json=false", "--json", "--profile-startup", "version"}, wantExit: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rawArgs, err := json.Marshal(test.args)
+			if err != nil {
+				t.Fatalf("encode helper args: %v", err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRobotProcessContractHelper$")
+			cmd.Dir = tmpDir
+			cmd.Env = envWithOverrides(os.Environ(),
+				"HOME="+homeDir,
+				"XDG_CONFIG_HOME="+configHome,
+				"XDG_DATA_HOME="+dataHome,
+				"NTM_CONFIG=",
+				"NTM_NO_COLOR=1",
+				"NTM_ROBOT_CONTRACT_ARGS="+string(rawArgs),
+			)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err = cmd.Run()
+			exitCode := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("run helper: %v", err)
+				}
+				exitCode = exitErr.ExitCode()
+			}
+			if exitCode != test.wantExit {
+				t.Fatalf("exit=%d want=%d stdout=%q stderr=%q", exitCode, test.wantExit, stdout.String(), stderr.String())
+			}
+			if strings.TrimSpace(stderr.String()) != "" {
+				t.Fatalf("stderr=%q, want empty machine diagnostics", stderr.String())
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+				t.Fatalf("stdout is not exactly one JSON document: %v\nstdout=%q", err, stdout.String())
+			}
+			if test.wantErrorCode != "" && payload["error_code"] != test.wantErrorCode {
+				t.Fatalf("error_code=%v want=%s payload=%v", payload["error_code"], test.wantErrorCode, payload)
+			}
+		})
+	}
+
+	t.Run("last repeated json flag disables machine mode", func(t *testing.T) {
+		args, err := json.Marshal([]string{"--json", "--json=false", "--not-a-real-flag"})
+		if err != nil {
+			t.Fatalf("encode helper args: %v", err)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRobotProcessContractHelper$")
+		cmd.Dir = tmpDir
+		cmd.Env = envWithOverrides(os.Environ(),
+			"HOME="+homeDir,
+			"XDG_CONFIG_HOME="+configHome,
+			"XDG_DATA_HOME="+dataHome,
+			"NTM_CONFIG=",
+			"NTM_NO_COLOR=1",
+			"NTM_ROBOT_CONTRACT_ARGS="+string(args),
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err = cmd.Run()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("human repeated-json process error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+		}
+		if json.Valid(stdout.Bytes()) || !strings.Contains(stderr.String(), "unknown flag") {
+			t.Fatalf("last --json=false did not restore human diagnostics: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	})
+}
+
+func TestGlobalJSONStartupEncryptionFailuresAreSingleDocuments(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping process-level JSON contract integration in short mode")
+	}
+	tmpDir := t.TempDir()
+	missingKeyConfig := filepath.Join(tmpDir, "missing-key.toml")
+	invalidKeyringConfig := filepath.Join(tmpDir, "invalid-keyring.toml")
+	if err := os.WriteFile(missingKeyConfig, []byte("[encryption]\nenabled = true\nkey_source = \"env\"\nkey_env = \"NTM_JSON_ENCRYPTION_KEY\"\nkey_format = \"hex\"\n"), 0o600); err != nil {
+		t.Fatalf("write missing-key config: %v", err)
+	}
+	validKey := strings.Repeat("11", 32)
+	if err := os.WriteFile(invalidKeyringConfig, []byte("[encryption]\nenabled = true\nkey_source = \"env\"\nkey_env = \"NTM_JSON_ENCRYPTION_KEY\"\nkey_format = \"hex\"\nactive_key_id = \"current\"\n[encryption.keyring]\ncurrent = \""+validKey+"\"\nold = \"not-hex\"\n"), 0o600); err != nil {
+		t.Fatalf("write invalid-keyring config: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		config    string
+		key       string
+		wantError string
+	}{
+		{name: "missing key", config: missingKeyConfig, wantError: "encryption key resolution failed"},
+		{name: "invalid keyring", config: invalidKeyringConfig, key: validKey, wantError: "encryption keyring resolution failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args, err := json.Marshal([]string{"--config", test.config, "--json", "config", "show"})
+			if err != nil {
+				t.Fatalf("encode helper args: %v", err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRobotProcessContractHelper$")
+			cmd.Dir = tmpDir
+			cmd.Env = envWithOverrides(os.Environ(),
+				"HOME="+filepath.Join(tmpDir, "home"),
+				"XDG_CONFIG_HOME="+filepath.Join(tmpDir, "config-home"),
+				"NTM_JSON_ENCRYPTION_KEY="+test.key,
+				"NTM_NO_COLOR=1",
+				"NTM_ROBOT_CONTRACT_ARGS="+string(args),
+			)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err = cmd.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("exit error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			if strings.TrimSpace(stderr.String()) != "" {
+				t.Fatalf("stderr=%q, want empty", stderr.String())
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+				t.Fatalf("stdout is not exactly one JSON document: %v\nstdout=%q", err, stdout.String())
+			}
+			if payload["success"] != false || payload["error_code"] != robot.ErrCodeInternalError || !strings.Contains(fmt.Sprint(payload["error"]), test.wantError) {
+				t.Fatalf("payload=%v, want %q INTERNAL_ERROR", payload, test.wantError)
 			}
 		})
 	}
@@ -6040,4 +6615,219 @@ eval "$(ntm init bash)"
 			t.Error("Expected error for nonexistent file")
 		}
 	})
+}
+
+type scanRunnerFunc func(context.Context, string, scanner.ScanOptions) (*scanner.ScanResult, error)
+
+func (f scanRunnerFunc) Scan(ctx context.Context, path string, opts scanner.ScanOptions) (*scanner.ScanResult, error) {
+	return f(ctx, path, opts)
+}
+
+func TestRunScanJSONDependencyAndExecutionFailures(t *testing.T) {
+	oldJSONOutput := jsonOutput
+	oldScanIsAvailable := scanIsAvailable
+	oldNewScanRunner := newScanRunner
+	jsonOutput = true
+	t.Cleanup(func() {
+		jsonOutput = oldJSONOutput
+		scanIsAvailable = oldScanIsAvailable
+		newScanRunner = oldNewScanRunner
+	})
+
+	t.Run("missing UBS", func(t *testing.T) {
+		scanIsAvailable = func() bool { return false }
+		stdout, runErr := captureStdout(t, func() error {
+			return runScan("/project", scanner.ScanOptions{}, false, false, false, scanner.BridgeConfig{}, false, false, false)
+		})
+		if !errors.Is(runErr, errJSONFailure) || !errors.Is(runErr, scanner.ErrNotInstalled) {
+			t.Fatalf("error = %v, want errJSONFailure joined with ErrNotInstalled", runErr)
+		}
+		assertScanJSONResult(t, stdout, false)
+	})
+
+	t.Run("scanner construction failure", func(t *testing.T) {
+		cause := errors.New("scanner construction sentinel")
+		scanIsAvailable = func() bool { return true }
+		newScanRunner = func() (scanRunner, error) { return nil, cause }
+		stdout, runErr := captureStdout(t, func() error {
+			return runScan("/project", scanner.ScanOptions{}, false, false, false, scanner.BridgeConfig{}, false, false, false)
+		})
+		if !errors.Is(runErr, errJSONFailure) || !errors.Is(runErr, cause) {
+			t.Fatalf("error = %v, want errJSONFailure joined with construction cause", runErr)
+		}
+		assertScanJSONResult(t, stdout, false)
+	})
+
+	t.Run("UBS execution failure", func(t *testing.T) {
+		cause := errors.New("ubs execution sentinel")
+		scanIsAvailable = func() bool { return true }
+		newScanRunner = func() (scanRunner, error) {
+			return scanRunnerFunc(func(context.Context, string, scanner.ScanOptions) (*scanner.ScanResult, error) {
+				return nil, cause
+			}), nil
+		}
+		stdout, runErr := captureStdout(t, func() error {
+			return runScan("/project", scanner.ScanOptions{}, false, false, false, scanner.BridgeConfig{}, false, false, false)
+		})
+		if !errors.Is(runErr, errJSONFailure) || !errors.Is(runErr, cause) {
+			t.Fatalf("error = %v, want errJSONFailure joined with UBS cause", runErr)
+		}
+		assertScanJSONResult(t, stdout, false)
+	})
+}
+
+func TestRunScanJSONSeverityParity(t *testing.T) {
+	oldJSONOutput := jsonOutput
+	oldScanIsAvailable := scanIsAvailable
+	oldNewScanRunner := newScanRunner
+	jsonOutput = true
+	scanIsAvailable = func() bool { return true }
+	t.Cleanup(func() {
+		jsonOutput = oldJSONOutput
+		scanIsAvailable = oldScanIsAvailable
+		newScanRunner = oldNewScanRunner
+	})
+
+	tests := []struct {
+		name          string
+		totals        scanner.ScanTotals
+		failOnWarning bool
+		wantFailure   bool
+	}{
+		{name: "warning allowed", totals: scanner.ScanTotals{Warning: 1}, wantFailure: false},
+		{name: "warning blocked", totals: scanner.ScanTotals{Warning: 1}, failOnWarning: true, wantFailure: true},
+		{name: "critical always blocked", totals: scanner.ScanTotals{Critical: 1}, wantFailure: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := &scanner.ScanResult{Project: "/project", Totals: tt.totals}
+			newScanRunner = func() (scanRunner, error) {
+				return scanRunnerFunc(func(context.Context, string, scanner.ScanOptions) (*scanner.ScanResult, error) {
+					return result, nil
+				}), nil
+			}
+			stdout, runErr := captureStdout(t, func() error {
+				return runScan("/project", scanner.ScanOptions{FailOnWarning: tt.failOnWarning}, false, false, false, scanner.BridgeConfig{}, false, false, false)
+			})
+			if tt.wantFailure {
+				if !errors.Is(runErr, errJSONFailure) {
+					t.Fatalf("error = %v, want errJSONFailure", runErr)
+				}
+			} else if runErr != nil {
+				t.Fatalf("error = %v, want nil", runErr)
+			}
+			assertScanJSONResult(t, stdout, !tt.wantFailure)
+		})
+	}
+}
+
+func TestRunScanJSONRequestedIntegrationFailuresAreTerminal(t *testing.T) {
+	oldJSONOutput := jsonOutput
+	oldScanIsAvailable := scanIsAvailable
+	oldNewScanRunner := newScanRunner
+	oldCreateBeadsFromScan := createBeadsFromScan
+	oldUpdateBeadsFromScan := updateBeadsFromScan
+	oldNotifyScanResults := notifyScanResults
+	jsonOutput = true
+	scanIsAvailable = func() bool { return true }
+	result := &scanner.ScanResult{
+		Project:  "/project",
+		Totals:   scanner.ScanTotals{Warning: 1},
+		Findings: []scanner.Finding{{File: "main.go", Severity: scanner.SeverityWarning, Message: "warning"}},
+	}
+	newScanRunner = func() (scanRunner, error) {
+		return scanRunnerFunc(func(context.Context, string, scanner.ScanOptions) (*scanner.ScanResult, error) {
+			return result, nil
+		}), nil
+	}
+	t.Cleanup(func() {
+		jsonOutput = oldJSONOutput
+		scanIsAvailable = oldScanIsAvailable
+		newScanRunner = oldNewScanRunner
+		createBeadsFromScan = oldCreateBeadsFromScan
+		updateBeadsFromScan = oldUpdateBeadsFromScan
+		notifyScanResults = oldNotifyScanResults
+	})
+
+	tests := []struct {
+		name        string
+		createBeads bool
+		updateBeads bool
+		notify      bool
+		wantError   string
+		configure   func()
+	}{
+		{
+			name: "create returns error", createBeads: true, wantError: "create sentinel",
+			configure: func() {
+				createBeadsFromScan = func(*scanner.ScanResult, scanner.BridgeConfig) (*scanner.BridgeResult, error) {
+					return nil, errors.New("create sentinel")
+				}
+			},
+		},
+		{
+			name: "create reports partial errors", createBeads: true, wantError: "1 operation(s) failed",
+			configure: func() {
+				createBeadsFromScan = func(*scanner.ScanResult, scanner.BridgeConfig) (*scanner.BridgeResult, error) {
+					return &scanner.BridgeResult{Errors: 1}, nil
+				}
+			},
+		},
+		{
+			name: "update returns error", updateBeads: true, wantError: "update sentinel",
+			configure: func() {
+				updateBeadsFromScan = func(*scanner.ScanResult, scanner.BridgeConfig) (*scanner.BridgeResult, error) {
+					return nil, errors.New("update sentinel")
+				}
+			},
+		},
+		{
+			name: "update reports partial errors", updateBeads: true, wantError: "1 operation(s) failed",
+			configure: func() {
+				updateBeadsFromScan = func(*scanner.ScanResult, scanner.BridgeConfig) (*scanner.BridgeResult, error) {
+					return &scanner.BridgeResult{Errors: 1}, nil
+				}
+			},
+		},
+		{
+			name: "notify returns error", notify: true, wantError: "notify sentinel",
+			configure: func() {
+				notifyScanResults = func(context.Context, *scanner.ScanResult, string) error {
+					return errors.New("notify sentinel")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			createBeadsFromScan = oldCreateBeadsFromScan
+			updateBeadsFromScan = oldUpdateBeadsFromScan
+			notifyScanResults = oldNotifyScanResults
+			tt.configure()
+
+			stdout, runErr := captureStdout(t, func() error {
+				return runScan("/project", scanner.ScanOptions{}, tt.createBeads, tt.updateBeads, tt.notify, scanner.BridgeConfig{}, false, false, false)
+			})
+			if !errors.Is(runErr, errJSONFailure) || !strings.Contains(runErr.Error(), tt.wantError) {
+				t.Fatalf("error = %v, want errJSONFailure containing %q", runErr, tt.wantError)
+			}
+			assertScanJSONResult(t, stdout, false)
+		})
+	}
+}
+
+func assertScanJSONResult(t *testing.T, stdout string, wantSuccess bool) {
+	t.Helper()
+	var response map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("single JSON response decode failed: %v\nstdout=%s", err, stdout)
+	}
+	if response["success"] != wantSuccess {
+		t.Fatalf("success = %v, want %v", response["success"], wantSuccess)
+	}
+	if !wantSuccess && (response["error"] == nil || response["error"] == "") {
+		t.Fatalf("error = %v, want non-empty failure cause", response["error"])
+	}
 }

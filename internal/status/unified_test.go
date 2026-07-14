@@ -1565,6 +1565,72 @@ func TestSessionObserverObservePaneCaptureUsesSharedLastKnownState(t *testing.T)
 	}
 }
 
+func TestSessionObserverObservePaneCaptureClassifiesCanonicalLiveWork(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name          string
+		agentType     string
+		output        string
+		wantAgentType string
+		wantState     AgentState
+	}{
+		{
+			name:          "windsurf short alias uses parser work evidence",
+			agentType:     "ws",
+			output:        "Generating code...\nsearching for references",
+			wantAgentType: "windsurf",
+			wantState:     StateWorking,
+		},
+		{
+			name:      "codex live spinner outranks persistent input chrome",
+			agentType: " openai-codex ",
+			output: "• Working (4m 51s • esc to interrupt)\n" +
+				"› queued input\n47% context left · ? for shortcuts",
+			wantAgentType: "cod",
+			wantState:     StateWorking,
+		},
+		{
+			name:      "stale codex spinner does not force working",
+			agentType: "codex",
+			output: "• Working (10s • esc to interrupt)\n" +
+				strings.Repeat("completed output line\n", 20) +
+				"codex>",
+			wantAgentType: "cod",
+			wantState:     StateIdle,
+		},
+		{
+			name:          "parser keyword does not outrank current error",
+			agentType:     "windsurf",
+			output:        "Generating code...\nError: authentication failed",
+			wantAgentType: "windsurf",
+			wantState:     StateError,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			observer := NewSessionObserverWithDependencies(NewDetector(), SessionObserverConfig{}, SessionObserverDependencies{
+				Now: func() time.Time { return now },
+			})
+			pane := tmux.PaneActivity{
+				Pane:         tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentType(test.agentType)},
+				LastActivity: now.Add(-time.Minute),
+			}
+
+			observation := observer.ObservePaneCapture("s", pane, test.output, nil)
+			if observation.AgentType != test.wantAgentType || observation.Current.Status.AgentType != test.wantAgentType {
+				t.Fatalf("canonical agent type = pane:%q status:%q, want %q", observation.AgentType, observation.Current.Status.AgentType, test.wantAgentType)
+			}
+			if got := observation.Current.Status.State; got != test.wantState {
+				t.Fatalf("state = %q, want %q: %+v", got, test.wantState, observation.Current)
+			}
+		})
+	}
+}
+
 func TestSessionObserverConfigHasHardBounds(t *testing.T) {
 	t.Parallel()
 

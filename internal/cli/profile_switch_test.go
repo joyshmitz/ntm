@@ -1,12 +1,37 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+func TestProfileSwitchJSONFailuresUseSingleTerminalSentinel(t *testing.T) {
+	previousJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = previousJSON })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	output, runErr := captureStdout(t, func() error {
+		return runProfileSwitch(ctx, "cod_1", "reviewer", "", "", false, false)
+	})
+	if !errors.Is(runErr, errJSONFailure) || !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("profile switch error = %v, want JSON sentinel and context cancellation", runErr)
+	}
+	var result ProfileSwitchResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode profile switch failure: %v\noutput=%s", err, output)
+	}
+	if result.Success || result.AgentID != "cod_1" || result.NewProfile != "reviewer" || result.Error == "" {
+		t.Fatalf("profile switch failure = %+v", result)
+	}
+}
 
 func TestParseAgentID(t *testing.T) {
 	tests := []struct {

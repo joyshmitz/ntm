@@ -88,10 +88,10 @@ func runHooksInstall(hookType string, force bool) error {
 	mgr, err := hooks.NewManager("")
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 				"success": false,
 				"error":   err.Error(),
-			})
+			}, err)
 		}
 		return err
 	}
@@ -100,11 +100,11 @@ func runHooksInstall(hookType string, force bool) error {
 
 	if err := mgr.Install(ht, force); err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 				"success":   false,
 				"error":     err.Error(),
 				"hook_type": hookType,
-			})
+			}, err)
 		}
 		if err == hooks.ErrHookExists {
 			fmt.Printf("%s✗%s Hook already exists. Use --force to overwrite.\n",
@@ -159,10 +159,10 @@ func runHooksUninstall(hookType string, restore bool) error {
 	mgr, err := hooks.NewManager("")
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 				"success": false,
 				"error":   err.Error(),
-			})
+			}, err)
 		}
 		return err
 	}
@@ -171,11 +171,11 @@ func runHooksUninstall(hookType string, restore bool) error {
 
 	if err := mgr.Uninstall(ht, restore); err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
 				"success":   false,
 				"error":     err.Error(),
 				"hook_type": hookType,
-			})
+			}, err)
 		}
 		if err == hooks.ErrHookNotInstalled {
 			fmt.Printf("%s•%s Hook not installed\n", "\033[2m", "\033[0m")
@@ -215,9 +215,10 @@ func runHooksStatus() error {
 	mgr, err := hooks.NewManager("")
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-				"error": err.Error(),
-			})
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			}, err)
 		}
 		return err
 	}
@@ -225,9 +226,10 @@ func runHooksStatus() error {
 	infos, err := mgr.ListAll()
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-				"error": err.Error(),
-			})
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			}, err)
 		}
 		return err
 	}
@@ -324,10 +326,11 @@ func runPreCommitHook(verbose, failOnWarning bool, timeout int) error {
 	mgr, err := hooks.NewManager("")
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-				"passed": false,
-				"error":  err.Error(),
-			})
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success": false,
+				"passed":  false,
+				"error":   err.Error(),
+			}, err)
 		}
 		return err
 	}
@@ -335,21 +338,49 @@ func runPreCommitHook(verbose, failOnWarning bool, timeout int) error {
 	result, err := hooks.RunPreCommit(ctx, mgr.RepoRoot(), config)
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-				"passed": false,
-				"error":  err.Error(),
-			})
+			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+				"success": false,
+				"passed":  false,
+				"error":   err.Error(),
+			}, err)
 		}
 		return err
 	}
 
 	if jsonOutput {
-		return json.NewEncoder(os.Stdout).Encode(result)
+		return outputPreCommitHookJSON(result)
 	}
 
 	hooks.PrintPreCommitResult(result)
 	result.Exit()
 	return nil
+}
+
+func outputPreCommitHookJSON(result *hooks.PreCommitResult) error {
+	if result == nil {
+		cause := fmt.Errorf("pre-commit hook returned no result")
+		return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
+			"success": false,
+			"passed":  false,
+			"error":   cause.Error(),
+		}, cause)
+	}
+
+	payload := struct {
+		Success bool `json:"success"`
+		*hooks.PreCommitResult
+	}{
+		Success:         result.Passed,
+		PreCommitResult: result,
+	}
+	if !result.Passed {
+		cause := fmt.Errorf("pre-commit hook failed")
+		if result.BlockReason != "" {
+			cause = fmt.Errorf("pre-commit hook failed: %s", result.BlockReason)
+		}
+		return emitJSONFailureEnvelopeWithCause(payload, cause)
+	}
+	return json.NewEncoder(os.Stdout).Encode(payload)
 }
 
 func newHooksGuardCmd() *cobra.Command {

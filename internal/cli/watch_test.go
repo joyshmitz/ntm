@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,8 +11,78 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+func TestAncillaryDispatchCancellationPreventsPostReturnEnter(t *testing.T) {
+	pane := tmux.Pane{ID: "%9101", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude, Title: "cancel_cc_1"}
+	tests := []struct {
+		name     string
+		dispatch func(context.Context, *dispatchsvc.Service, string, []tmux.Pane, []tmux.Pane, string) (dispatchsvc.Result, error)
+	}{
+		{name: "file watch", dispatch: dispatchWatchCommand},
+		{name: "replay", dispatch: dispatchReplayPrompt},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			staged := make(chan struct{})
+			entered := make(chan struct{}, 1)
+			service, err := dispatchsvc.NewService(dispatchsvc.Ports{
+				Redactor:  dispatchsvc.AllowAllRedactor{},
+				Protocols: shellDispatchProtocolPlanner{},
+				Deliverer: dispatchsvc.DelivererFunc(func(ctx context.Context, delivery dispatchsvc.Delivery) error {
+					if delivery.Protocol != dispatchsvc.ProtocolDoubleEnter {
+						return errors.New("expected double-enter protocol")
+					}
+					close(staged)
+					timer := time.NewTimer(80 * time.Millisecond)
+					defer timer.Stop()
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-timer.C:
+						entered <- struct{}{}
+						return nil
+					}
+				}),
+			})
+			if err != nil {
+				t.Fatalf("NewService() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() {
+				_, dispatchErr := tc.dispatch(ctx, service, "cancel", []tmux.Pane{pane}, []tmux.Pane{pane}, "staged prompt")
+				done <- dispatchErr
+			}()
+
+			select {
+			case <-staged:
+			case <-time.After(time.Second):
+				t.Fatal("delivery never staged the prompt")
+			}
+			cancel()
+
+			select {
+			case dispatchErr := <-done:
+				if !errors.Is(dispatchErr, context.Canceled) {
+					t.Fatalf("dispatch error = %v, want context.Canceled", dispatchErr)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("dispatch did not return after cancellation")
+			}
+
+			select {
+			case <-entered:
+				t.Fatal("Enter was submitted after canceled dispatch returned")
+			case <-time.After(120 * time.Millisecond):
+			}
+		})
+	}
+}
 
 func TestParseWatchInterval(t *testing.T) {
 
@@ -106,6 +178,7 @@ func TestFilterPanesCanonicalizesAliases(t *testing.T) {
 
 func TestResolveWatchProjectDir_ExplicitUsesSavedSessionProject(t *testing.T) {
 	isolateSessionAgentStorage(t)
+	session := fmt.Sprintf("saved-watch-project-%d", time.Now().UnixNano())
 
 	origCfg := cfg
 	origDir, _ := os.Getwd()
@@ -130,9 +203,9 @@ func TestResolveWatchProjectDir_ExplicitUsesSavedSessionProject(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(actualProject, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	saveSessionAgentForTest(t, "ntm", actualProject, "GreenCastle")
+	saveSessionAgentForTest(t, session, actualProject, "GreenCastle")
 
-	got, err := resolveWatchProjectDir("ntm", false)
+	got, err := resolveWatchProjectDir(session, false)
 	if err != nil {
 		t.Fatalf("resolveWatchProjectDir() error = %v", err)
 	}
@@ -143,6 +216,7 @@ func TestResolveWatchProjectDir_ExplicitUsesSavedSessionProject(t *testing.T) {
 
 func TestResolveWatchProjectDir_ExplicitRejectsWorkspaceFallback(t *testing.T) {
 	isolateSessionAgentStorage(t)
+	session := fmt.Sprintf("missing-watch-project-%d", time.Now().UnixNano())
 
 	origCfg := cfg
 	origDir, _ := os.Getwd()
@@ -163,7 +237,7 @@ func TestResolveWatchProjectDir_ExplicitRejectsWorkspaceFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := resolveWatchProjectDir("ntm", false); err == nil {
+	if _, err := resolveWatchProjectDir(session, false); err == nil {
 		t.Fatal("expected missing project root error")
 	}
 }
@@ -215,7 +289,7 @@ func TestWatchLoop_PeriodicScanFiresWithoutCompletionEvents(t *testing.T) {
 	w.scanInterval = 20 * time.Millisecond
 
 	scanned := make(chan struct{}, 1)
-	w.scanFn = func() error {
+	w.scanFn = func(context.Context) error {
 		select {
 		case scanned <- struct{}{}:
 		default:
@@ -223,7 +297,7 @@ func TestWatchLoop_PeriodicScanFiresWithoutCompletionEvents(t *testing.T) {
 		return nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	runErr := make(chan error, 1)
@@ -252,7 +326,7 @@ func TestWatchLoop_ScanReadyWorkNilOptsIsNoop(t *testing.T) {
 	store := assignment.NewStore("fixb-nil")
 	w := NewWatchLoop("fixb-nil", store, &AutoReassignOptions{Session: "fixb-nil", Quiet: true})
 	w.scanOpts = nil
-	if err := w.scanReadyWork(); err != nil {
+	if err := w.scanReadyWork(t.Context()); err != nil {
 		t.Fatalf("scanReadyWork with nil scanOpts should be a no-op, got error: %v", err)
 	}
 }

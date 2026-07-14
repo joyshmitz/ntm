@@ -1,13 +1,137 @@
 package tmux
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 	"unicode"
 )
+
+func TestClassifySessionExistsResultUsesExactExitStatus(t *testing.T) {
+	exitOne := commandExitError(t, 1)
+	exitTwo := commandExitError(t, 2)
+	exit255 := commandExitError(t, 255)
+	wrappedExitOne := fmt.Errorf("tmux has-session -t absent: %w: can't find session: absent", exitOne)
+	wrappedExitTwo := fmt.Errorf("tmux has-session -t broken: %w: can't find session: broken", exitTwo)
+	noServer := fmt.Errorf("tmux has-session -t first: %w: no server running on /tmp/tmux-1000/default", exitOne)
+	noSocket := fmt.Errorf("tmux has-session -t first: %w: error connecting to /tmp/tmux-1000/default (No such file or directory)", exitOne)
+	permissionSocket := fmt.Errorf("tmux has-session -t private: %w: error connecting to /tmp/tmux-1000/default (Permission denied)", exitOne)
+	staleSocket := fmt.Errorf("tmux has-session -t stale: %w: error connecting to /tmp/tmux-1000/default (Connection refused)", exitOne)
+	remoteFailure := fmt.Errorf("ssh -- host tmux has-session -t absent: %w: can't find session: absent", exit255)
+	binaryMissing := &exec.Error{Name: "missing-tmux", Err: exec.ErrNotFound}
+	permissionDenied := fmt.Errorf("tmux: %w", os.ErrPermission)
+	unknown := errors.New("unexpected transport failure")
+
+	for _, test := range []struct {
+		name       string
+		err        error
+		wantExists bool
+		wantErr    bool
+	}{
+		{name: "exists", wantExists: true},
+		{name: "bare exit one is ambiguous", err: exitOne, wantErr: true},
+		{name: "wrapped has-session exit one", err: wrappedExitOne},
+		{name: "first session without server", err: noServer},
+		{name: "first session without socket", err: noSocket},
+		{name: "socket permission denied", err: permissionSocket, wantErr: true},
+		{name: "stale socket connection refused", err: staleSocket, wantErr: true},
+		{name: "exit two", err: exitTwo, wantErr: true},
+		{name: "wrapped exit two", err: wrappedExitTwo, wantErr: true},
+		{name: "remote exit 255", err: remoteFailure, wantErr: true},
+		{name: "text-only named session absent", err: errors.New("can't find session: absent"), wantErr: true},
+		{name: "text-only no server", err: errors.New("no server running on /tmp/tmux.sock"), wantErr: true},
+		{name: "binary unavailable", err: binaryMissing, wantErr: true},
+		{name: "permission denied", err: permissionDenied, wantErr: true},
+		{name: "canceled", err: context.Canceled, wantErr: true},
+		{name: "deadline", err: context.DeadlineExceeded, wantErr: true},
+		{name: "unknown", err: unknown, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			exists, err := classifySessionExistsResult(test.err)
+			if exists != test.wantExists || (err != nil) != test.wantErr {
+				t.Fatalf("classifySessionExistsResult(%v) = (%v, %v), want exists=%v error=%v", test.err, exists, err, test.wantExists, test.wantErr)
+			}
+			if test.wantErr && err != test.err {
+				t.Fatalf("infrastructure error identity changed: got %v want %v", err, test.err)
+			}
+		})
+	}
+}
+
+func TestSendBufferCancellationRunsBoundedCleanupWithoutEnter(t *testing.T) {
+	if os.Getenv("NTM_TEST_BUFFER_CLEANUP_HELPER") == "1" {
+		root := os.Getenv("NTM_TEST_BUFFER_CLEANUP_ROOT")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- NewClient("").SendBufferWithDelayContext(ctx, "%1", "first\nsecond", true, time.Hour)
+		}()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(filepath.Join(root, "paste-started")); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("fake tmux never entered paste-buffer")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("buffer send error = %v, want context.Canceled", err)
+		}
+		logData, err := os.ReadFile(filepath.Join(root, "tmux.log"))
+		if err != nil {
+			t.Fatalf("read fake tmux log: %v", err)
+		}
+		logText := string(logData)
+		if !strings.Contains(logText, "load-buffer") || !strings.Contains(logText, "paste-buffer") ||
+			!strings.Contains(logText, "delete-buffer") || strings.Contains(logText, "send-keys") {
+			t.Fatalf("fake tmux calls = %q, want load/paste/delete and no Enter", logText)
+		}
+		return
+	}
+
+	root := t.TempDir()
+	scriptPath := filepath.Join(root, "tmux")
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$1" >> "$NTM_TEST_BUFFER_CLEANUP_ROOT/tmux.log"
+case "$1" in
+  load-buffer)
+    cat >/dev/null
+    ;;
+  paste-buffer)
+    : > "$NTM_TEST_BUFFER_CLEANUP_ROOT/paste-started"
+    exec /bin/sleep 30
+    ;;
+  delete-buffer)
+    : > "$NTM_TEST_BUFFER_CLEANUP_ROOT/delete-called"
+    ;;
+  send-keys)
+    : > "$NTM_TEST_BUFFER_CLEANUP_ROOT/enter-called"
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSendBufferCancellationRunsBoundedCleanupWithoutEnter$")
+	cmd.Env = append(os.Environ(),
+		"NTM_TEST_BUFFER_CLEANUP_HELPER=1",
+		"NTM_TEST_BUFFER_CLEANUP_ROOT="+root,
+		"NTM_TMUX_BINARY="+scriptPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("buffer cleanup helper failed: %v output=%s", err, output)
+	}
+}
 
 // createTestSession creates a unique test session with cleanup
 func createTestSession(t *testing.T) string {
@@ -76,6 +200,179 @@ func TestCreateSessionRejectsInvalidNameBeforeInvokingTmux(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid session name") {
 		t.Fatalf("CreateSessionWithHistoryLimit() error = %v, want invalid session name", err)
+	}
+}
+
+func TestSessionCreationAndSplitHonorPreCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := NewClient("")
+
+	if err := client.CreateSessionWithHistoryLimitContext(ctx, "cancel_test", t.TempDir(), DefaultHistoryLimit); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CreateSessionWithHistoryLimitContext() error = %v, want context.Canceled", err)
+	}
+	if _, err := client.SplitWindowContext(ctx, "cancel_test", t.TempDir()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SplitWindowContext() error = %v, want context.Canceled", err)
+	}
+	if err := client.ApplyTiledLayoutContext(ctx, "cancel_test"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ApplyTiledLayoutContext() error = %v, want context.Canceled", err)
+	}
+	if err := client.KillPaneContext(ctx, "%999"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("KillPaneContext() error = %v, want context.Canceled", err)
+	}
+	if _, err := client.CapturePaneVisibleContext(ctx, "%999"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CapturePaneVisibleContext() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSessionCreationAndSplitRejectNilContext(t *testing.T) {
+	client := NewClient("")
+
+	if err := client.CreateSessionWithHistoryLimitContext(nil, "nil_context_test", t.TempDir(), DefaultHistoryLimit); err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("CreateSessionWithHistoryLimitContext(nil) error = %v, want required-context error", err)
+	}
+	if _, err := client.SplitWindowContext(nil, "nil_context_test", t.TempDir()); err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("SplitWindowContext(nil) error = %v, want required-context error", err)
+	}
+	if err := client.ApplyTiledLayoutContext(nil, "nil_context_test"); err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("ApplyTiledLayoutContext(nil) error = %v, want required-context error", err)
+	}
+	if err := client.KillPaneContext(nil, "%999"); err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("KillPaneContext(nil) error = %v, want required-context error", err)
+	}
+}
+
+func TestApplyTiledLayoutContextFailureHelper(t *testing.T) {
+	failCommand := os.Getenv("NTM_LAYOUT_FAIL_COMMAND")
+	if failCommand == "" {
+		return
+	}
+
+	err := NewClient("").ApplyTiledLayoutContext(context.Background(), "layout-test")
+	if err == nil {
+		t.Fatalf("ApplyTiledLayoutContext() error = nil, want %s failure", failCommand)
+	}
+	if !strings.Contains(err.Error(), failCommand) || !strings.Contains(err.Error(), "layout-test:0") {
+		t.Fatalf("ApplyTiledLayoutContext() error = %v, want command %q and window target", err, failCommand)
+	}
+}
+
+func TestApplyTiledLayoutContextReturnsActuationFailures(t *testing.T) {
+	root := t.TempDir()
+	tmuxPath := filepath.Join(root, "tmux")
+	script := `#!/bin/sh
+case "${1:-}" in
+  list-windows)
+    printf '0\n'
+    ;;
+  display-message)
+    if [ "${NTM_LAYOUT_FAIL_COMMAND:-}" = "display-message" ]; then exit 71; fi
+    if [ "${NTM_LAYOUT_FAIL_COMMAND:-}" = "resize-pane" ]; then printf '1\n'; else printf '0\n'; fi
+    ;;
+  resize-pane)
+    if [ "${NTM_LAYOUT_FAIL_COMMAND:-}" = "resize-pane" ]; then exit 72; fi
+    ;;
+  select-layout)
+    if [ "${NTM_LAYOUT_FAIL_COMMAND:-}" = "select-layout" ]; then exit 73; fi
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+`
+	if err := os.WriteFile(tmuxPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write layout tmux: %v", err)
+	}
+
+	for _, failCommand := range []string{"display-message", "resize-pane", "select-layout"} {
+		t.Run(failCommand, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestApplyTiledLayoutContextFailureHelper$")
+			cmd.Env = append(os.Environ(),
+				"NTM_TMUX_BINARY="+tmuxPath,
+				"NTM_LAYOUT_FAIL_COMMAND="+failCommand,
+			)
+			output, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("layout failure helper timed out: %v output=%s", ctx.Err(), output)
+			}
+			if err != nil {
+				t.Fatalf("layout failure helper failed: %v output=%s", err, output)
+			}
+		})
+	}
+}
+
+func TestSessionPostCreationFailureHelper(t *testing.T) {
+	mutation := os.Getenv("NTM_SESSION_MUTATION_FAILURE")
+	if mutation == "" {
+		return
+	}
+
+	client := NewClient("")
+	switch mutation {
+	case "history-limit":
+		err := client.CreateSessionWithHistoryLimitContext(context.Background(), "created-session", t.TempDir(), 50000)
+		if err == nil || !strings.Contains(err.Error(), "created-session") || !strings.Contains(err.Error(), "setting history limit failed") {
+			t.Fatalf("CreateSessionWithHistoryLimitContext() error = %v, want truthful post-create failure", err)
+		}
+	case "split-layout":
+		paneID, err := client.SplitWindowContext(context.Background(), "created-session", t.TempDir())
+		if paneID != "%42" || err == nil || !strings.Contains(err.Error(), paneID) || !strings.Contains(err.Error(), "applying tiled layout failed") {
+			t.Fatalf("SplitWindowContext() = (%q, %v), want created pane and truthful layout failure", paneID, err)
+		}
+	default:
+		t.Fatalf("unknown mutation failure %q", mutation)
+	}
+}
+
+func TestSessionCreationAndSplitReturnPostCreationFailures(t *testing.T) {
+	root := t.TempDir()
+	tmuxPath := filepath.Join(root, "tmux")
+	script := `#!/bin/sh
+case "${1:-}" in
+  new-session)
+	exit 0
+	;;
+  set-option)
+	exit 81
+	;;
+  list-windows)
+	printf '0\n'
+	;;
+  split-window)
+	printf '%%42\n'
+	;;
+  select-layout)
+	exit 82
+	;;
+  *)
+	exit 64
+	;;
+esac
+`
+	if err := os.WriteFile(tmuxPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write post-creation tmux: %v", err)
+	}
+
+	for _, mutation := range []string{"history-limit", "split-layout"} {
+		t.Run(mutation, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSessionPostCreationFailureHelper$")
+			cmd.Env = append(os.Environ(),
+				"NTM_TMUX_BINARY="+tmuxPath,
+				"NTM_SESSION_MUTATION_FAILURE="+mutation,
+			)
+			output, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("post-creation helper timed out: %v output=%s", ctx.Err(), output)
+			}
+			if err != nil {
+				t.Fatalf("post-creation helper failed: %v output=%s", err, output)
+			}
+		})
 	}
 }
 
@@ -697,6 +994,16 @@ func TestGetCurrentSession(t *testing.T) {
 	t.Logf("GetCurrentSession returned: %q", session)
 }
 
+func TestGetCurrentSessionContextRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := DefaultClient.GetCurrentSessionContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetCurrentSessionContext() error = %v, want context.Canceled", err)
+	}
+}
+
 // ============== Additional Tests for Coverage ==============
 
 func TestEnsureInstalled(t *testing.T) {
@@ -937,6 +1244,14 @@ func TestBinaryPathConsistency(t *testing.T) {
 
 	if path1 != path2 || path2 != path3 {
 		t.Errorf("BinaryPath() inconsistent: %q, %q, %q", path1, path2, path3)
+	}
+}
+
+func TestResolveTmuxBinaryPathUsesExplicitOverride(t *testing.T) {
+	override := filepath.Join(t.TempDir(), "custom-tmux")
+	t.Setenv("NTM_TMUX_BINARY", "  "+override+"  ")
+	if got := resolveTmuxBinaryPath(); got != override {
+		t.Fatalf("resolveTmuxBinaryPath() = %q, want override %q", got, override)
 	}
 }
 

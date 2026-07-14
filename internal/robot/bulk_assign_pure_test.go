@@ -1,6 +1,9 @@
 package robot
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -12,27 +15,49 @@ import (
 func TestNormalizeBulkAssignStrategy(t *testing.T) {
 
 	tests := []struct {
-		name  string
-		input string
-		want  string
+		name    string
+		input   string
+		want    string
+		wantErr bool
 	}{
-		{"empty string", "", "impact"},
-		{"impact", "impact", "impact"},
-		{"ready", "ready", "ready"},
-		{"stale", "stale", "stale"},
-		{"balanced", "balanced", "balanced"},
-		{"unknown", "foobar", "impact"},
-		{"uppercase", "IMPACT", "impact"},
-		{"mixed case", "Ready", "ready"},
-		{"with spaces", "  stale  ", "stale"},
-		{"with tabs", "\tbalanced\t", "balanced"},
+		{"empty string", "", "impact", false},
+		{"impact", "impact", "impact", false},
+		{"ready", "ready", "ready", false},
+		{"stale", "stale", "stale", false},
+		{"balanced", "balanced", "balanced", false},
+		{"unknown", "foobar", "", true},
+		{"uppercase", "IMPACT", "impact", false},
+		{"mixed case", "Ready", "ready", false},
+		{"with spaces", "  stale  ", "stale", false},
+		{"with tabs", "\tbalanced\t", "balanced", false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := normalizeBulkAssignStrategy(tc.input)
-			if got != tc.want {
-				t.Errorf("normalizeBulkAssignStrategy(%q) = %q, want %q", tc.input, got, tc.want)
+			got, err := normalizeBulkAssignStrategy(tc.input)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Errorf("normalizeBulkAssignStrategy(%q) = (%q, %v), want (%q, error=%v)", tc.input, got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestBulkAssignFailureClassPreservesTypedCausePriority(t *testing.T) {
+	tests := []struct {
+		name        string
+		assignments []BulkAssignAssignment
+		want        string
+	}{
+		{name: "operational", assignments: []BulkAssignAssignment{{Status: "failed", failureCause: errors.New("dispatch failed")}}, want: "ASSIGNMENT_FAILED"},
+		{name: "pane", assignments: []BulkAssignAssignment{{Status: "failed", failureCode: ErrCodePaneNotFound}}, want: ErrCodePaneNotFound},
+		{name: "invalid", assignments: []BulkAssignAssignment{{Status: "failed", failureCode: ErrCodeInvalidFlag}}, want: ErrCodeInvalidFlag},
+		{name: "deadline beats invalid", assignments: []BulkAssignAssignment{{Status: "failed", failureCode: ErrCodeInvalidFlag}, {Status: "failed", failureCause: fmt.Errorf("title fetch: %w", context.DeadlineExceeded)}}, want: ErrCodeTimeout},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			code, _ := bulkAssignFailureClass(test.assignments)
+			if code != test.want {
+				t.Fatalf("bulkAssignFailureClass() = %q, want %q", code, test.want)
 			}
 		})
 	}

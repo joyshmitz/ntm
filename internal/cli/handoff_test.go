@@ -2,7 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,8 +16,157 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
+
+func TestOutputResumeCommandErrorOwnsSingleFailureEnvelope(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{name: "ordinary failure", err: errors.New("spawn failed"), wantCode: resumeErrorCodeFailed},
+		{name: "cancellation", err: fmt.Errorf("resume canceled: %w", context.Canceled), wantCode: robot.ErrCodeTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&stdout)
+
+			err := outputResumeCommandError(cmd, "spawn", true, tt.err)
+			if !errors.Is(err, errJSONFailure) || !errors.Is(err, tt.err) {
+				t.Fatalf("outputResumeCommandError() error = %v, want JSON sentinel joined with %v", err, tt.err)
+			}
+
+			decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+			var result ResumeResult
+			if err := decoder.Decode(&result); err != nil {
+				t.Fatalf("decode resume failure: %v raw=%s", err, stdout.String())
+			}
+			var extra any
+			if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+				t.Fatalf("resume failure emitted multiple JSON documents: err=%v extra=%v raw=%s", err, extra, stdout.String())
+			}
+			if result.Success || result.Action != "spawn" || result.ErrorCode != tt.wantCode || result.Error == "" {
+				t.Fatalf("resume failure result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestOutputResumeCommandErrorDoesNotDuplicateWrittenFailure(t *testing.T) {
+	var stdout bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+
+	if err := outputResumeCommandError(cmd, "spawn", true, errJSONFailure); !errors.Is(err, errJSONFailure) {
+		t.Fatalf("outputResumeCommandError() error = %v, want existing JSON sentinel", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("existing failure sentinel produced duplicate output %q", stdout.String())
+	}
+}
+
+func TestResumeGlobalJSONOwnsSingleSuccessEnvelope(t *testing.T) {
+	oldJSONOutput := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSONOutput })
+
+	writer := handoff.NewWriter(t.TempDir())
+	h := handoff.New("global-json-resume")
+	h.Goal = "Preserve one resume document"
+	h.Now = "Verify global JSON composition"
+	h.Status = handoff.StatusComplete
+	h.Outcome = handoff.OutcomeSucceeded
+	path, err := writer.Write(h, "global-json")
+	if err != nil {
+		t.Fatalf("write handoff: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	cmd := newResumeCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--from", path, "--dry-run"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute global-JSON resume: %v; stdout=%s", err, stdout.String())
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	var result ResumeResult
+	if err := decoder.Decode(&result); err != nil {
+		t.Fatalf("decode global-JSON resume: %v; raw=%s", err, stdout.String())
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		t.Fatalf("global-JSON resume emitted multiple documents: err=%v extra=%v raw=%s", err, extra, stdout.String())
+	}
+	if !result.Success || result.Action != "display" || result.Handoff == nil || result.Handoff.Session != h.Session {
+		t.Fatalf("global-JSON resume result = %+v", result)
+	}
+}
+
+func TestResumeGlobalJSONSelectsComposableSpawnLifecycle(t *testing.T) {
+	oldJSONOutput := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSONOutput })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	effectiveJSON := false || IsJSONOutput()
+	stdout, err := captureStdout(t, func() error {
+		return resumeSpawnLifecycle(effectiveJSON)(ctx, SpawnOptions{Session: "global-json-spawn"})
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("global-JSON resume spawn error = %v, want cancellation", err)
+	}
+	if stdout != "" {
+		t.Fatalf("global-JSON resume spawn lifecycle claimed stdout: %q", stdout)
+	}
+}
+
+func TestFinalizeResumeActionReportsPartialDispatchFailure(t *testing.T) {
+	var stdout bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+
+	cause := resumeDispatchError("injecting handoff context", dispatchsvc.Result{
+		Delivered: 1,
+		Failed:    1,
+	}, errors.New("pane delivery failed"))
+	result := &ResumeResult{
+		Action: "inject",
+		InjectInfo: &ResumeInjectInfo{
+			Session:     "partial-resume",
+			PanesSent:   1,
+			PanesFailed: 1,
+		},
+	}
+	err := finalizeResumeAction(cmd, result, true, cause)
+	if !errors.Is(err, errJSONFailure) {
+		t.Fatalf("partial resume dispatch error = %v, want JSON failure sentinel", err)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	var output ResumeResult
+	if err := decoder.Decode(&output); err != nil {
+		t.Fatalf("decode partial resume dispatch: %v; raw=%s", err, stdout.String())
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		t.Fatalf("partial resume dispatch emitted multiple documents: err=%v extra=%v raw=%s", err, extra, stdout.String())
+	}
+	if output.Success || output.ErrorCode != resumeErrorCodeFailed || output.Error == "" || output.InjectInfo == nil {
+		t.Fatalf("partial resume dispatch result = %+v", output)
+	}
+	if output.InjectInfo.PanesSent != 1 || output.InjectInfo.PanesFailed != 1 {
+		t.Fatalf("partial resume dispatch counts = %+v", output.InjectInfo)
+	}
+}
 
 func TestNewHandoffCmd(t *testing.T) {
 	cmd := newHandoffCmd()

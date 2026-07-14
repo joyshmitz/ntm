@@ -188,16 +188,27 @@ func (c *BVClient) GetRecommendations(opts RecommendationOpts) ([]Recommendation
 
 // GetInsights returns graph analysis insights.
 func (c *BVClient) GetInsights() (*Insights, error) {
+	return c.GetInsightsContext(context.Background())
+}
+
+// GetInsightsContext returns graph insights with caller cancellation.
+func (c *BVClient) GetInsightsContext(ctx context.Context) (*Insights, error) {
+	if ctx == nil {
+		return nil, errors.New("insights context is required")
+	}
 	// Try to get insights from bv -robot-insights
 	workDir, err := c.workDir()
 	if err != nil {
 		return nil, err
 	}
 
-	insightsResp, err := GetInsights(workDir)
+	insightsResp, err := GetInsightsContext(ctx, workDir)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		// Fall back to triage data if insights fail
-		triage, triageErr := c.getTriage()
+		triage, triageErr := GetTriageContext(ctx, workDir)
 		if triageErr != nil {
 			// Return original error with context about fallback failure
 			return nil, fmt.Errorf("%w (fallback also failed: %v)", err, triageErr)

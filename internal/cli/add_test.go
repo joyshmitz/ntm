@@ -1,13 +1,84 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/persona"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
+
+func TestNewAgentLifecycleFailureResponseClassifiesPromptFailureAndMutation(t *testing.T) {
+	underlying := errors.New("injected prompt send failure")
+	response := newAgentLifecycleFailureResponse(
+		newPromptSendFailure(underlying),
+		"truthful-session",
+		true,
+		true,
+		[]string{"%7", "%7", "", " %8 "},
+	)
+
+	if response.Success || response.ErrorCode != robot.ErrCodePromptSendFailed || response.Code != robot.ErrCodePromptSendFailed {
+		t.Fatalf("prompt failure response = %+v", response)
+	}
+	if !response.PartialMutation || !response.SessionMayExist || response.Session != "truthful-session" {
+		t.Fatalf("prompt failure mutation state = %+v", response)
+	}
+	if len(response.AffectedPaneIDs) != 2 || response.AffectedPaneIDs[0] != "%7" || response.AffectedPaneIDs[1] != "%8" {
+		t.Fatalf("affected pane IDs = %v, want deduplicated [%%7 %%8]", response.AffectedPaneIDs)
+	}
+	if !strings.Contains(response.Error, underlying.Error()) || response.GeneratedAt.IsZero() {
+		t.Fatalf("prompt failure error/timestamp = %+v", response)
+	}
+}
+
+func TestNewAgentLifecycleFailureResponseCancellationTakesPrecedence(t *testing.T) {
+	err := newPromptSendFailure(errors.Join(errors.New("dispatch interrupted"), context.Canceled))
+	response := newAgentLifecycleFailureResponse(err, "cancel-session", true, true, nil)
+	if response.Success || response.ErrorCode != robot.ErrCodeTimeout || response.Code != robot.ErrCodeTimeout {
+		t.Fatalf("canceled prompt response = %+v, want TIMEOUT", response)
+	}
+	if response.AffectedPaneIDs == nil || len(response.AffectedPaneIDs) != 0 {
+		t.Fatalf("canceled prompt affected panes = %v, want checked-empty []", response.AffectedPaneIDs)
+	}
+}
+
+func TestPrepareRequiredPersonaSystemPromptFailsClosed(t *testing.T) {
+	t.Run("malformed persona name", func(t *testing.T) {
+		_, err := prepareRequiredPersonaSystemPrompt(&persona.Persona{
+			Name:         "../reviewer",
+			SystemPrompt: "review carefully",
+		}, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "invalid characters") {
+			t.Fatalf("malformed persona prompt error = %v", err)
+		}
+	})
+
+	t.Run("prompt destination is not a directory", func(t *testing.T) {
+		projectDir := t.TempDir()
+		ntmDir := filepath.Join(projectDir, ".ntm")
+		if err := os.MkdirAll(ntmDir, 0o700); err != nil {
+			t.Fatalf("create .ntm directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(ntmDir, "prompts"), []byte("collision"), 0o600); err != nil {
+			t.Fatalf("create prompt path collision: %v", err)
+		}
+		_, err := prepareRequiredPersonaSystemPrompt(&persona.Persona{
+			Name:         "reviewer",
+			SystemPrompt: "review carefully",
+		}, projectDir)
+		if err == nil || !strings.Contains(err.Error(), "prompts path is not a directory") {
+			t.Fatalf("prompt path collision error = %v", err)
+		}
+	})
+}
 
 func TestResolveAddAgentCommandTemplate_Ollama(t *testing.T) {
 

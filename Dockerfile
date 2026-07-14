@@ -1,12 +1,15 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.24.0@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 
 # Build stage
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.5-alpine3.24@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 
 WORKDIR /app
 
 # Install build dependencies
-RUN apk add --no-cache git ca-certificates tzdata
+RUN apk add --no-cache \
+    git=2.54.0-r0 \
+    ca-certificates=20260611-r0 \
+    tzdata=2026b-r0
 
 # Copy module metadata first for better caching.
 # This repo uses a local replace for Bubble Tea, so its module files must be
@@ -33,15 +36,15 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o /ntm ./cmd/ntm
 
 # Runtime stage
-FROM alpine:3.19
+FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 # Install runtime dependencies
 RUN apk add --no-cache \
-    tmux \
-    ca-certificates \
-    tzdata \
-    bash \
-    zsh
+    tmux=3.6b-r0 \
+    ca-certificates=20260611-r0 \
+    tzdata=2026b-r0 \
+    bash=5.3.9-r1 \
+    zsh=5.9-r7
 
 # Create non-root user
 RUN adduser -D -g '' ntm

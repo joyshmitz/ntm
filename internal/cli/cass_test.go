@@ -1,8 +1,14 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
 	"testing"
 	"unicode/utf8"
+
+	casspkg "github.com/Dicklesworthstone/ntm/internal/cass"
+	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
 
 func TestTruncateCassText(t *testing.T) {
@@ -449,5 +455,58 @@ func TestNewCassClient(t *testing.T) {
 	client := newCassClient()
 	if client == nil {
 		t.Error("newCassClient() returned nil with nil config")
+	}
+}
+
+func TestCassMissingBinaryJSONCommandsReturnUnavailable(t *testing.T) {
+	oldCfg := cfg
+	oldJSONOutput := jsonOutput
+	cfg = &config.Config{}
+	cfg.CASS.BinaryPath = "/definitely/missing/ntm-test-cass"
+	jsonOutput = true
+	t.Cleanup(func() {
+		cfg = oldCfg
+		jsonOutput = oldJSONOutput
+	})
+
+	tests := []struct {
+		name             string
+		run              func() error
+		wantNotInstalled bool
+	}{
+		{name: "status", run: runCassStatus, wantNotInstalled: true},
+		{name: "search", run: func() error { return runCassSearch("terminal contracts", "", "", "", 5, 0) }, wantNotInstalled: true},
+		{name: "timeline", run: func() error { return runCassTimeline("24h", "hour") }, wantNotInstalled: true},
+		{name: "preview", run: func() error { return runCassPreview("terminal contract history", 5, 30, "markdown", 500) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, runErr := captureStdout(t, tt.run)
+			var exitErr *robot.ProcessExitError
+			if !errors.As(runErr, &exitErr) {
+				t.Fatalf("error = %v, want ProcessExitError", runErr)
+			}
+			if exitErr.ExitCode() != 2 || !exitErr.JSONWritten() {
+				t.Fatalf("exit result = code %d, json_written %v; want 2, true", exitErr.ExitCode(), exitErr.JSONWritten())
+			}
+			if tt.wantNotInstalled && !errors.Is(runErr, casspkg.ErrNotInstalled) {
+				t.Fatalf("error = %v, want preserved cass.ErrNotInstalled cause", runErr)
+			}
+
+			var response map[string]interface{}
+			if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+				t.Fatalf("single JSON response decode failed: %v\nstdout=%s", err, stdout)
+			}
+			if response["success"] != false {
+				t.Fatalf("success = %v, want false", response["success"])
+			}
+			if response["error_code"] != robot.ErrCodeNotImplemented {
+				t.Fatalf("error_code = %v, want %s", response["error_code"], robot.ErrCodeNotImplemented)
+			}
+			if response["error"] == "" || response["error"] == nil {
+				t.Fatalf("error = %v, want non-empty cause", response["error"])
+			}
+		})
 	}
 }

@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,8 +20,11 @@ import (
 	assignpkg "github.com/Dicklesworthstone/ntm/internal/assign"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/completion"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
@@ -359,6 +364,10 @@ func TestReleaseFileReservationsWithIDsUsesResolvedProjectDir(t *testing.T) {
 	stub := newMailStub(t, nil)
 	defer stub.Close()
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+	stub.reservations = []agentmail.FileReservation{{
+		ID: 42, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/release.go", Exclusive: true,
+		Reason: "bead assignment: bd-123", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+	}}
 
 	oldWd, _ := os.Getwd()
 	if err := os.Chdir(nested); err != nil {
@@ -366,7 +375,10 @@ func TestReleaseFileReservationsWithIDsUsesResolvedProjectDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	if _, err := releaseFileReservationsWithIDs("demo", "bd-123", "BlueLake", []int{42}); err != nil {
+	barrier := &assignment.Assignment{
+		BeadID: "bd-123", AgentName: "BlueLake", ClearState: assignment.ClearStateReservationReleasing,
+	}
+	if _, err := releaseFileReservationsWithIDs(t.Context(), "demo", barrier, []int{42}, []string{"internal/cli/release.go"}); err != nil {
 		t.Fatalf("releaseFileReservationsWithIDs() error = %v", err)
 	}
 
@@ -375,6 +387,30 @@ func TestReleaseFileReservationsWithIDsUsesResolvedProjectDir(t *testing.T) {
 	}
 	if got := stub.releaseCalls[0].Project; got != root {
 		t.Fatalf("release project = %q, want %q", got, root)
+	}
+}
+
+func TestCLIWorkingReplacementReleaseReceiptProvesFullDurableSurface(t *testing.T) {
+	current := &assignment.Assignment{
+		ReservedPaths:         []string{" internal/old.go ", "internal/shared.go"},
+		ReservationRequested:  []string{"internal/shared.go", "internal/requested.go"},
+		ReservationInputPaths: []string{"internal/input.go", ""},
+		ReservationIDs:        []int{41, 42, 41},
+	}
+	receipt := cliWorkingReplacementReleaseReceipt(current, nil, nil)
+	if !reflect.DeepEqual(receipt.ReleasedPaths, []string{
+		"internal/old.go", "internal/shared.go", "internal/requested.go", "internal/input.go",
+	}) {
+		t.Fatalf("released paths=%v", receipt.ReleasedPaths)
+	}
+	if !reflect.DeepEqual(receipt.ReleasedReservationIDs, []int{41, 42}) {
+		t.Fatalf("released reservation IDs=%v", receipt.ReleasedReservationIDs)
+	}
+
+	releaseErr := errors.New("release failed")
+	failed := cliWorkingReplacementReleaseReceipt(current, []string{" internal/old.go ", "internal/old.go"}, releaseErr)
+	if !reflect.DeepEqual(failed.ReleasedPaths, []string{"internal/old.go"}) || len(failed.ReleasedReservationIDs) != 0 {
+		t.Fatalf("failed release receipt=%+v", failed)
 	}
 }
 
@@ -415,7 +451,7 @@ func TestClearStoredAssignmentRetainsBarrierUntilLeaseReleaseConfirmed(t *testin
 		}
 		return true, nil
 	}
-	releaseAssignmentLeases = func(_ string, current *assignment.Assignment) ([]string, error) {
+	releaseAssignmentLeases = func(_ context.Context, _ string, current *assignment.Assignment) ([]string, error) {
 		releaseCalls++
 		if current.ClearState != assignment.ClearStateReservationReleasing || !reflect.DeepEqual(current.ReservationIDs, []int{41, 42}) {
 			t.Fatalf("release input lost clear barrier metadata: %+v", current)
@@ -435,7 +471,7 @@ func TestClearStoredAssignmentRetainsBarrierUntilLeaseReleaseConfirmed(t *testin
 		t.Fatalf("tracker claim released before reservation proof: calls=%d", claimReleaseCalls)
 	}
 
-	releaseAssignmentLeases = func(_ string, current *assignment.Assignment) ([]string, error) {
+	releaseAssignmentLeases = func(_ context.Context, _ string, current *assignment.Assignment) ([]string, error) {
 		releaseCalls++
 		if current.ClearState != assignment.ClearStateReservationReleasing || !reflect.DeepEqual(current.ReservationIDs, []int{41, 42}) {
 			t.Fatalf("retry input lost clear barrier metadata: %+v", current)
@@ -471,7 +507,7 @@ func TestReleaseAssignmentReservationsForClearSkipsDiscoveryForAtomicNoLeaseInte
 	originalRelease := releaseReservations
 	t.Cleanup(func() { releaseReservations = originalRelease })
 	discoveryCalls := 0
-	releaseReservations = func(_, _, _ string) ([]string, error) {
+	releaseReservations = func(_ context.Context, _ string, _ *assignment.Assignment) ([]string, error) {
 		discoveryCalls++
 		return []string{"legacy"}, nil
 	}
@@ -481,8 +517,9 @@ func TestReleaseAssignmentReservationsForClearSkipsDiscoveryForAtomicNoLeaseInte
 		AgentName:        "BlueLake",
 		IdempotencyKey:   "intent-1",
 		ReservationState: assignment.ReservationPending,
+		ClearState:       assignment.ClearStateReservationReleasing,
 	}
-	released, err := releaseAssignmentReservationsForClear("demo", atomicNoLease)
+	released, err := releaseAssignmentReservationsForClear(t.Context(), "demo", atomicNoLease)
 	if err != nil {
 		t.Fatalf("atomic no-lease clear: %v", err)
 	}
@@ -490,8 +527,10 @@ func TestReleaseAssignmentReservationsForClearSkipsDiscoveryForAtomicNoLeaseInte
 		t.Fatalf("atomic no-lease clear released=%v discoveryCalls=%d, want local-only clear", released, discoveryCalls)
 	}
 
-	legacyUnknown := &assignment.Assignment{BeadID: "ntm-legacy", AgentName: "BlueLake"}
-	released, err = releaseAssignmentReservationsForClear("demo", legacyUnknown)
+	legacyUnknown := &assignment.Assignment{
+		BeadID: "ntm-legacy", AgentName: "BlueLake", ClearState: assignment.ClearStateReservationReleasing,
+	}
+	released, err = releaseAssignmentReservationsForClear(t.Context(), "demo", legacyUnknown)
 	if err != nil {
 		t.Fatalf("legacy reservation discovery: %v", err)
 	}
@@ -579,16 +618,17 @@ func TestReleaseAssignmentReservationsForClearReconcilesUnknownLease(t *testing.
 		IdempotencyKey: "intent-unknown", ReservationRequired: true,
 		ReservationState: assignment.ReservationUnknown, ReservationAttempts: 1,
 		ReservationRequested: []string{"internal/cli/reconcile.go"},
+		ClearState:           assignment.ClearStateReservationReleasing,
 	}
 
-	released, err := releaseAssignmentReservationsForClear("demo", current)
+	released, err := releaseAssignmentReservationsForClear(t.Context(), "demo", current)
 	if err != nil {
 		t.Fatalf("releaseAssignmentReservationsForClear() error = %v", err)
 	}
 	if len(stub.releaseCalls) != 1 || !reflect.DeepEqual(stub.releaseCalls[0].IDs, []int{61}) {
 		t.Fatalf("release calls = %+v", stub.releaseCalls)
 	}
-	if len(released) != 1 || released[0] != "1 reservations" {
+	if !reflect.DeepEqual(released, []string{"internal/cli/reconcile.go"}) {
 		t.Fatalf("released = %v", released)
 	}
 }
@@ -610,9 +650,10 @@ func TestReleaseAssignmentReservationsForClearProvesUnknownLeaseAbsent(t *testin
 		IdempotencyKey: "intent-absent", ReservationRequired: true,
 		ReservationState: assignment.ReservationUnknown, ReservationAttempts: 1,
 		ReservationRequested: []string{"internal/cli/absent.go"},
+		ClearState:           assignment.ClearStateReservationReleasing,
 	}
 
-	released, err := releaseAssignmentReservationsForClear("demo", current)
+	released, err := releaseAssignmentReservationsForClear(t.Context(), "demo", current)
 	if err != nil {
 		t.Fatalf("releaseAssignmentReservationsForClear() error = %v", err)
 	}
@@ -643,13 +684,142 @@ func TestReleaseAssignmentReservationsForClearRetainsUnknownLeaseOnReleaseFailur
 		IdempotencyKey: "intent-release-fail", ReservationRequired: true,
 		ReservationState: assignment.ReservationUnknown, ReservationAttempts: 1,
 		ReservationRequested: []string{"internal/cli/fail.go"},
+		ClearState:           assignment.ClearStateReservationReleasing,
 	}
 
-	if _, err := releaseAssignmentReservationsForClear("demo", current); err == nil || !strings.Contains(err.Error(), "released 0 of 1") {
+	if _, err := releaseAssignmentReservationsForClear(t.Context(), "demo", current); err == nil || !strings.Contains(err.Error(), "remain active") {
 		t.Fatalf("releaseAssignmentReservationsForClear() error = %v", err)
 	}
-	if len(stub.releaseCalls) != 1 || !reflect.DeepEqual(stub.releaseCalls[0].IDs, []int{71}) {
+	if len(stub.releaseCalls) != 3 || !reflect.DeepEqual(stub.releaseCalls[0].IDs, []int{71}) {
 		t.Fatalf("release failure calls = %+v", stub.releaseCalls)
+	}
+}
+
+func TestReleaseAssignmentReservationsForClearRejectsUnverifiedSuccessCount(t *testing.T) {
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project marker: %v", err)
+	}
+	previousRepo := assignRepoPath
+	assignRepoPath = project
+	t.Cleanup(func() { assignRepoPath = previousRepo })
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+	stub.keepOnRelease = true
+	stub.releaseResult = agentmail.ReleaseReservationsResult{Released: 1}
+	stub.reservations = []agentmail.FileReservation{{
+		ID: 72, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/proof.go", Exclusive: true,
+		Reason: "bead assignment: ntm-release-proof", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+	}}
+	current := &assignment.Assignment{
+		BeadID: "ntm-release-proof", AgentName: "BlueLake", IdempotencyKey: "release-proof-key",
+		ReservationRequired: true, ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservationIDs: []int{72}, ReservedPaths: []string{"internal/cli/proof.go"}, ClearState: assignment.ClearStateReservationReleasing,
+	}
+	if _, err := releaseAssignmentReservationsForClear(t.Context(), "demo", current); err == nil || !strings.Contains(err.Error(), "remain active") {
+		t.Fatalf("unverified release count error=%v", err)
+	}
+	if len(stub.releaseCalls) != 3 || !reflect.DeepEqual(stub.releaseCalls[0].IDs, []int{72}) {
+		t.Fatalf("release calls=%+v", stub.releaseCalls)
+	}
+}
+
+func TestReleaseAssignmentReservationsForClearDoesNotReleaseNewerBeadOnSamePath(t *testing.T) {
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project marker: %v", err)
+	}
+	previousRepo := assignRepoPath
+	assignRepoPath = project
+	t.Cleanup(func() { assignRepoPath = previousRepo })
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+	expires := agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)}
+	stub.reservations = []agentmail.FileReservation{
+		{ID: 73, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/shared.go", Exclusive: true, Reason: "bead assignment: ntm-old", ExpiresTS: expires},
+		{ID: 74, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/shared.go", Exclusive: true, Reason: "bead assignment: ntm-new", ExpiresTS: expires},
+	}
+	current := &assignment.Assignment{
+		BeadID: "ntm-old", AgentName: "BlueLake", IdempotencyKey: "old-key",
+		ReservationRequired: true, ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservedPaths: []string{"internal/cli/shared.go"}, ClearState: assignment.ClearStateReservationReleasing,
+	}
+	released, err := releaseAssignmentReservationsForClear(t.Context(), "demo", current)
+	if err != nil {
+		t.Fatalf("release old reservation: %v", err)
+	}
+	if !reflect.DeepEqual(released, []string{"internal/cli/shared.go"}) || len(stub.releaseCalls) != 1 || !reflect.DeepEqual(stub.releaseCalls[0].IDs, []int{73}) {
+		t.Fatalf("released=%v calls=%+v", released, stub.releaseCalls)
+	}
+	if len(stub.reservations) != 1 || stub.reservations[0].ID != 74 {
+		t.Fatalf("newer reservation changed: %+v", stub.reservations)
+	}
+}
+
+func TestReleaseAssignmentReservationsForClearByIDPreservesNewerGenerationForSameBead(t *testing.T) {
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project marker: %v", err)
+	}
+	previousRepo := assignRepoPath
+	assignRepoPath = project
+	t.Cleanup(func() { assignRepoPath = previousRepo })
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+	expires := agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)}
+	stub.reservations = []agentmail.FileReservation{
+		{ID: 75, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/old.go", Exclusive: true, Reason: "bead assignment: ntm-same", ExpiresTS: expires},
+		{ID: 76, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/new.go", Exclusive: true, Reason: "bead assignment: ntm-same", ExpiresTS: expires},
+	}
+	current := &assignment.Assignment{
+		BeadID: "ntm-same", AgentName: "BlueLake", IdempotencyKey: "old-generation",
+		ReservationRequired: true, ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservationIDs: []int{75}, ReservedPaths: []string{"internal/cli/old.go"}, ClearState: assignment.ClearStateReservationReleasing,
+	}
+	released, err := releaseAssignmentReservationsForClear(t.Context(), "demo", current)
+	if err != nil {
+		t.Fatalf("release prior generation: %v", err)
+	}
+	if !reflect.DeepEqual(released, []string{"internal/cli/old.go"}) || len(stub.releaseCalls) != 1 || !reflect.DeepEqual(stub.releaseCalls[0].IDs, []int{75}) {
+		t.Fatalf("released=%v calls=%+v", released, stub.releaseCalls)
+	}
+	if len(stub.reservations) != 1 || stub.reservations[0].ID != 76 {
+		t.Fatalf("newer same-bead reservation changed: %+v", stub.reservations)
+	}
+}
+
+func TestReleaseAssignmentReservationsForClearRejectsIDPathBindingMismatch(t *testing.T) {
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project marker: %v", err)
+	}
+	previousRepo := assignRepoPath
+	assignRepoPath = project
+	t.Cleanup(func() { assignRepoPath = previousRepo })
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+	stub.reservations = []agentmail.FileReservation{{
+		ID: 77, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/new.go", Exclusive: true,
+		Reason: "bead assignment: ntm-mismatch", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+	}}
+	current := &assignment.Assignment{
+		BeadID: "ntm-mismatch", AgentName: "BlueLake", IdempotencyKey: "stale-generation",
+		ReservationRequired: true, ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservationIDs: []int{77}, ReservedPaths: []string{"internal/cli/old.go"}, ClearState: assignment.ClearStateReservationReleasing,
+	}
+	if _, err := releaseAssignmentReservationsForClear(t.Context(), "demo", current); err == nil || !strings.Contains(err.Error(), "path") {
+		t.Fatalf("binding mismatch error=%v", err)
+	}
+	if len(stub.releaseCalls) != 0 || len(stub.reservations) != 1 || stub.reservations[0].ID != 77 {
+		t.Fatalf("mismatched reservation was changed: calls=%+v reservations=%+v", stub.releaseCalls, stub.reservations)
 	}
 }
 
@@ -670,7 +840,7 @@ func TestReserveFilesForBeadUsesResolvedProjectDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	result := reserveFilesForBead("demo", "bd-123", "Update internal/cli/assign.go", "claude", false, time.Second)
+	result := reserveFilesForBead(t.Context(), "demo", "bd-123", "Update internal/cli/assign.go", "claude", false, time.Second)
 	if result == nil {
 		t.Fatal("reserveFilesForBead() returned nil result")
 	}
@@ -787,6 +957,88 @@ func TestDependencyAwareResultStructure(t *testing.T) {
 	}
 	if len(result.Errors) != 1 {
 		t.Errorf("Expected 1 error, got %d", len(result.Errors))
+	}
+}
+
+func TestNewlyUnblockedCandidateUsesAuthoritativeDependencyState(t *testing.T) {
+	const completed = "bd-completed"
+	ready := bv.BeadDependentState{ID: "bd-ready", Title: "stale title", Priority: 1}
+	readyDetails := &bv.BeadAssignmentDetails{
+		ID: "bd-ready", Title: "Live ready title", Status: "open", Priority: 4,
+		BlockingDependencies: []bv.BeadDependencyState{{ID: completed, Status: "closed"}},
+	}
+	candidate, reason, unresolved := newlyUnblockedCandidate(completed, ready, readyDetails)
+	if reason != "" || len(unresolved) != 0 || candidate == nil {
+		t.Fatalf("sole completed blocker candidate = %+v reason=%q unresolved=%v", candidate, reason, unresolved)
+	}
+	if candidate.ID != ready.ID || candidate.Title != readyDetails.Title || candidate.Priority != readyDetails.Priority || candidate.UnblockedByID != completed ||
+		!reflect.DeepEqual(candidate.PrevBlockers, []string{completed}) {
+		t.Fatalf("authoritative unblocked candidate = %+v", candidate)
+	}
+
+	blocked := bv.BeadDependentState{ID: "bd-sibling", Title: "Sibling", Priority: 2}
+	candidate, reason, unresolved = newlyUnblockedCandidate(completed, blocked, &bv.BeadAssignmentDetails{
+		ID: blocked.ID, Title: blocked.Title, Status: "open", BlockedBy: []string{"bd-still-open"},
+		BlockingDependencies: []bv.BeadDependencyState{
+			{ID: completed, Status: "closed"},
+			{ID: "bd-still-open", Status: "open"},
+		},
+	})
+	if candidate != nil || reason != "blocked_by_dependency" || !reflect.DeepEqual(unresolved, []string{"bd-still-open"}) {
+		t.Fatalf("sibling blocker candidate = %+v reason=%q unresolved=%v", candidate, reason, unresolved)
+	}
+
+	gatedDetails := &bv.BeadAssignmentDetails{
+		ID: ready.ID, Title: ready.Title, Status: "open", Labels: []string{"operator-gated"},
+		BlockingDependencies: []bv.BeadDependencyState{{ID: completed, Status: "closed"}},
+	}
+	candidate, reason, unresolved = newlyUnblockedCandidate(completed, ready, gatedDetails)
+	if candidate != nil || reason != "operator_gated" || len(unresolved) != 0 {
+		t.Fatalf("operator-gated candidate = %+v reason=%q unresolved=%v", candidate, reason, unresolved)
+	}
+
+	for _, nonterminalStatus := range []string{"resolved", "done", "unknown"} {
+		details := *readyDetails
+		details.BlockingDependencies = []bv.BeadDependencyState{
+			{ID: completed, Status: "closed"},
+			{ID: "bd-nonterminal", Status: nonterminalStatus},
+		}
+		candidate, reason, unresolved = newlyUnblockedCandidate(completed, ready, &details)
+		if candidate != nil || reason != "blocked_by_dependency" || !reflect.DeepEqual(unresolved, []string{"bd-nonterminal"}) {
+			t.Fatalf("status %q treated as terminal: candidate=%+v reason=%q unresolved=%v", nonterminalStatus, candidate, reason, unresolved)
+		}
+	}
+}
+
+func TestClassifyLiveAssignmentDetailsRejectsEveryReadyGate(t *testing.T) {
+	t.Parallel()
+	future := time.Now().Add(time.Hour)
+	tests := []struct {
+		name       string
+		details    bv.BeadAssignmentDetails
+		wantReason string
+	}{
+		{name: "future deferred", details: bv.BeadAssignmentDetails{ID: "bd-deferred", Status: "open", DeferUntil: &future}, wantReason: "deferred"},
+		{name: "pinned", details: bv.BeadAssignmentDetails{ID: "bd-pinned", Status: "open", Pinned: true}, wantReason: "pinned"},
+		{name: "ephemeral", details: bv.BeadAssignmentDetails{ID: "bd-ephemeral", Status: "open", Ephemeral: true}, wantReason: "ephemeral"},
+		{name: "template", details: bv.BeadAssignmentDetails{ID: "bd-template", Status: "open", Template: true}, wantReason: "template"},
+		{name: "wisp field", details: bv.BeadAssignmentDetails{ID: "bd-work", Status: "open", Wisp: true}, wantReason: "wisp"},
+		{name: "wisp id", details: bv.BeadAssignmentDetails{ID: "bd-wisp-123", Status: "open"}, wantReason: "wisp"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyLiveAssignmentDetails(&test.details, nil)
+			if got == nil || got.Reason != test.wantReason {
+				t.Fatalf("live gate classification=%+v, want reason %q", got, test.wantReason)
+			}
+		})
+	}
+
+	past := time.Now().Add(-time.Hour)
+	if skipped := classifyLiveAssignmentDetails(&bv.BeadAssignmentDetails{ID: "bd-ready", Status: "open", DeferUntil: &past}, nil); skipped != nil {
+		t.Fatalf("past defer incorrectly rejected: %+v", skipped)
 	}
 }
 
@@ -1025,6 +1277,83 @@ func TestReassignErrorCodes(t *testing.T) {
 		if envelope.Error.Code != code {
 			t.Errorf("Error code %q not preserved in envelope", code)
 		}
+	}
+}
+
+func TestClassifyReassignErrorReportsDurableReleaseBarrier(t *testing.T) {
+	durable := &assignment.Assignment{
+		ClearState: assignment.ClearStateReservationReleasing,
+		ClearError: "Agent Mail release verification failed",
+	}
+	if got := classifyReassignError(errors.New("replacement failed"), durable); got != "RESERVATION_RELEASE_FAILED" {
+		t.Fatalf("classifyReassignError()=%q", got)
+	}
+	if got := classifyReassignError(context.Canceled, nil); got != robot.ErrCodeTimeout {
+		t.Fatalf("classifyReassignError(context.Canceled)=%q", got)
+	}
+}
+
+func TestRetryAndReassignPreCanceledJSONEnvelopes(t *testing.T) {
+	previousJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = previousJSON })
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name       string
+		run        func() error
+		subcommand string
+		wantCode   string
+		wantCause  error
+	}{
+		{name: "retry nil context", run: func() error { return runRetryAssignments(nil, "retry-json") }, subcommand: "retry", wantCode: robot.ErrCodeInternalError},
+		{name: "retry canceled context", run: func() error { return runRetryAssignments(canceled, "retry-json") }, subcommand: "retry", wantCode: robot.ErrCodeTimeout, wantCause: context.Canceled},
+		{name: "reassign nil context", run: func() error { return runReassignment(nil, "reassign-json") }, subcommand: "reassign", wantCode: robot.ErrCodeInternalError},
+		{name: "reassign canceled context", run: func() error { return runReassignment(canceled, "reassign-json") }, subcommand: "reassign", wantCode: robot.ErrCodeTimeout, wantCause: context.Canceled},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			oldStdout := os.Stdout
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("create stdout pipe: %v", err)
+			}
+			os.Stdout = writer
+			runErr := test.run()
+			_ = writer.Close()
+			os.Stdout = oldStdout
+			raw, readErr := io.ReadAll(reader)
+			_ = reader.Close()
+			if readErr != nil {
+				t.Fatalf("read JSON envelope: %v", readErr)
+			}
+			if !errors.Is(runErr, errJSONFailure) {
+				t.Fatalf("command error=%v, want errJSONFailure", runErr)
+			}
+			if test.wantCause != nil && !errors.Is(runErr, test.wantCause) {
+				t.Fatalf("command error=%v, want wrapped cause %v", runErr, test.wantCause)
+			}
+			var envelope AssignEnvelope[json.RawMessage]
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatalf("decode JSON envelope: %v raw=%s", err, raw)
+			}
+			if envelope.Success || envelope.Subcommand != test.subcommand || envelope.Error == nil || envelope.Error.Code != test.wantCode {
+				t.Fatalf("envelope=%+v, want subcommand=%s code=%s", envelope, test.subcommand, test.wantCode)
+			}
+		})
+	}
+}
+
+func TestMatchingReassignmentDurableResultRejectsForeignTargetOwner(t *testing.T) {
+	foreign := &assignment.Assignment{BeadID: "ntm-foreign", IdempotencyKey: "foreign-secret-key", BeadTitle: "foreign-secret-title"}
+	if got := matchingReassignmentDurableResult(foreign, "ntm-requested", "requested-key"); got != nil {
+		t.Fatalf("foreign target owner projected as requested durable row: %+v", got)
+	}
+	requested := &assignment.Assignment{BeadID: "ntm-requested", IdempotencyKey: "requested-key", BeadTitle: "safe durable title"}
+	if got := matchingReassignmentDurableResult(requested, "ntm-requested", "requested-key"); got != requested {
+		t.Fatalf("matching durable row=%+v", got)
 	}
 }
 
@@ -1281,7 +1610,15 @@ func TestDetectModelFromTitle(t *testing.T) {
 	}
 }
 
-func TestDetermineAgentState_NormalizesAliasHints(t *testing.T) {
+func observeAssignmentFixture(t *testing.T, agentType, output string) statuspkg.PaneObservation {
+	t.Helper()
+	observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
+	return observer.ObservePaneCapture("fixture", tmux.PaneActivity{
+		Pane: tmux.Pane{ID: "%1", WindowIndex: 0, Index: 1, Type: tmux.AgentType(agentType)},
+	}, output, nil)
+}
+
+func TestAssignSessionObserverClassifiesCanonicalAliases(t *testing.T) {
 
 	tests := []struct {
 		name       string
@@ -1299,8 +1636,8 @@ func TestDetermineAgentState_NormalizesAliasHints(t *testing.T) {
 			want: "idle",
 		},
 		{
-			name:       "cursor added event suffix",
-			agentType:  "cursor_added",
+			name:       "cursor canonical type",
+			agentType:  "cursor",
 			scrollback: "Done editing.\ncursor> ",
 			want:       "idle",
 		},
@@ -1314,9 +1651,9 @@ func TestDetermineAgentState_NormalizesAliasHints(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-
-			if got := determineAgentState(tc.scrollback, tc.agentType); got != tc.want {
-				t.Fatalf("determineAgentState(%q, %q) = %q, want %q", tc.scrollback, tc.agentType, got, tc.want)
+			observation := observeAssignmentFixture(t, tc.agentType, tc.scrollback)
+			if got := string(observation.Current.Status.State); got != tc.want {
+				t.Fatalf("session observation for %q = %q, want %q: %+v", tc.agentType, got, tc.want, observation.Current)
 			}
 		})
 	}
@@ -1423,6 +1760,23 @@ func TestClassifyTriageRecForAssignment(t *testing.T) {
 	}
 }
 
+func TestClassifyTriageRecForAssignmentUsesCanonicalOperatorGates(t *testing.T) {
+	t.Parallel()
+
+	for _, label := range bv.OperatorGatedLabels() {
+		label := label
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			skipped := classifyTriageRecForAssignment(bv.TriageRecommendation{
+				ID: "bd-operator", Status: "open", Labels: []string{"  " + strings.ToUpper(label) + "  "},
+			}, nil)
+			if skipped == nil || skipped.Reason != "operator_gated" {
+				t.Fatalf("label %q classification=%+v", label, skipped)
+			}
+		})
+	}
+}
+
 func TestCountSkippedByReason(t *testing.T) {
 	items := []SkippedItem{
 		{BeadID: "a", Reason: "blocked_by_dependency"},
@@ -1521,29 +1875,29 @@ func TestParsePriorityString(t *testing.T) {
 	}
 }
 
-// TestDetermineAgentStateLiveBusyOverride verifies the #124 fix: when the
+// TestAssignSessionObserverLiveBusyOverride verifies the #124 fix: when the
 // pane scrollback's trailing live-window contains a THINKING-category pattern
 // (e.g. codex's "• Working (4m 51s • esc to interrupt)") the verdict must be
 // "working" regardless of what the legacy parser concludes — the pane is
 // busy and watch-mode autonomous dispatch must not target it.
-func TestDetermineAgentStateLiveBusyOverride(t *testing.T) {
+func TestAssignSessionObserverLiveBusyOverride(t *testing.T) {
 	// A scrollback that ends with a codex working bullet inside the
 	// live-window. Without the override, the legacy parser sometimes
 	// classifies this as idle when there's no fresh prompt yet.
 	scrollback := strings.Repeat("filler line\n", 200) +
 		"\n• Working (4m 51s • esc to interrupt)\n"
 
-	got := determineAgentState(scrollback, "codex")
+	got := string(observeAssignmentFixture(t, "codex", scrollback).Current.Status.State)
 	if got != "working" {
-		t.Errorf("determineAgentState(busy codex pane) = %q, want \"working\"", got)
+		t.Errorf("session observer (busy codex pane) = %q, want \"working\"", got)
 	}
 }
 
-// TestDetermineAgentStateIgnoresStaleThinking verifies the override does NOT
+// TestAssignSessionObserverIgnoresStaleThinking verifies the override does NOT
 // trigger when a thinking pattern only exists deep in the scrollback (outside
 // the live-window). That historical bullet is from a completed tool call and
 // must not lock the agent in "working" forever.
-func TestDetermineAgentStateIgnoresStaleThinking(t *testing.T) {
+func TestAssignSessionObserverIgnoresStaleThinking(t *testing.T) {
 	// Thinking pattern early in the buffer, then enough trailing content to
 	// push it outside the live-window (15 trailing lines).
 	scrollback := "• Working (10s • esc to interrupt)\n" +
@@ -1553,9 +1907,9 @@ func TestDetermineAgentStateIgnoresStaleThinking(t *testing.T) {
 	// We don't assert "idle" here (that depends on the legacy parser's
 	// agent-specific prompt detection), but we must NOT see "working" be
 	// forced by the override path on stale scrollback content.
-	got := determineAgentState(scrollback, "codex")
+	got := string(observeAssignmentFixture(t, "codex", scrollback).Current.Status.State)
 	if got == "working" {
-		t.Errorf("determineAgentState(stale thinking pattern) = %q, must not be forced to working", got)
+		t.Errorf("session observer (stale thinking pattern) = %q, must not be forced to working", got)
 	}
 }
 
@@ -1582,10 +1936,14 @@ func TestLoadActiveAssignmentPanes_ExcludesBetweenTurnsPane(t *testing.T) {
 	if err := store.MarkWorking("bd-A"); err != nil {
 		t.Fatalf("mark working bd-A: %v", err)
 	}
+	store.Assignments["bd-A"].OccupancyKey = "%41"
+	store.Assignments["bd-A"].DispatchTarget = "%41"
 	// Pane 2: freshly assigned, status Assigned.
 	if _, err := store.Assign("bd-B", "Task B", 2, "codex", "fixc_codex_2", "do B"); err != nil {
 		t.Fatalf("assign bd-B: %v", err)
 	}
+	store.Assignments["bd-B"].OccupancyKey = "%42"
+	store.Assignments["bd-B"].DispatchTarget = "%42"
 	// Pane 3: a completed assignment — NOT active, must NOT be excluded.
 	if _, err := store.Assign("bd-C", "Task C", 3, "claude", "fixc_claude_3", "do C"); err != nil {
 		t.Fatalf("assign bd-C: %v", err)
@@ -1597,15 +1955,18 @@ func TestLoadActiveAssignmentPanes_ExcludesBetweenTurnsPane(t *testing.T) {
 		t.Fatalf("save store: %v", err)
 	}
 
-	active := loadActiveAssignmentPanes(session)
+	active, err := loadActiveAssignmentPanes(session)
+	if err != nil {
+		t.Fatalf("load active panes: %v", err)
+	}
 
-	if _, ok := active["legacy-index:1"]; !ok {
+	if _, ok := active["%41"]; !ok {
 		t.Errorf("pane 1 (StatusWorking) must be in the active set — it is mid-flight and not dispatchable")
 	}
-	if _, ok := active["legacy-index:2"]; !ok {
+	if _, ok := active["%42"]; !ok {
 		t.Errorf("pane 2 (StatusAssigned) must be in the active set — it holds an active assignment")
 	}
-	if _, ok := active["legacy-index:3"]; ok {
+	if _, ok := active["%43"]; ok {
 		t.Errorf("pane 3 (StatusCompleted) must NOT be in the active set — completed work frees the pane")
 	}
 	if len(active) != 2 {
@@ -1618,9 +1979,32 @@ func TestLoadActiveAssignmentPanes_ExcludesBetweenTurnsPane(t *testing.T) {
 // with no exclusions.
 func TestLoadActiveAssignmentPanes_EmptyStore(t *testing.T) {
 	isolateSessionAgentStorage(t)
-	active := loadActiveAssignmentPanes("no-such-session")
+	active, err := loadActiveAssignmentPanes("no-such-session")
+	if err != nil {
+		t.Fatalf("load empty active panes: %v", err)
+	}
 	if len(active) != 0 {
 		t.Errorf("expected empty active set for missing store, got %d entries", len(active))
+	}
+}
+
+func TestLoadActiveAssignmentPanesRejectsLegacyIndexOnlyRow(t *testing.T) {
+	isolateSessionAgentStorage(t)
+	const session = "legacy-active-pane"
+	store := assignment.NewStore(session)
+	legacy, err := store.Assign("bd-legacy", "Legacy", 1, "codex", "LegacyAgent", "work")
+	if err != nil {
+		t.Fatalf("seed legacy assignment: %v", err)
+	}
+	before := store.Get(legacy.BeadID)
+
+	active, err := loadActiveAssignmentPanes(session)
+	var migrationErr *assignment.PaneIdentityMigrationError
+	if !errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) || !errors.As(err, &migrationErr) {
+		t.Fatalf("active=%v error=%v, want typed migration error", active, err)
+	}
+	if len(active) != 0 || migrationErr.BeadID != legacy.BeadID || !reflect.DeepEqual(store.Get(legacy.BeadID), before) {
+		t.Fatalf("migration rejection changed state: active=%v migration=%+v stored=%+v", active, migrationErr, store.Get(legacy.BeadID))
 	}
 }
 
@@ -1643,8 +2027,8 @@ func TestResolveAssignmentItemPaneCanonicalMultiWindow(t *testing.T) {
 		}
 	}
 
-	if _, err := resolveAssignmentItemPane(panes, AssignmentItem{Pane: 1}); err == nil || !strings.Contains(err.Error(), "resolves to 2 panes") {
-		t.Fatalf("ambiguous legacy pane resolved without a useful error: %v", err)
+	if _, err := resolveAssignmentItemPane(panes, AssignmentItem{BeadID: "ntm-plan-legacy", Pane: 1}); !errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) {
+		t.Fatalf("legacy plan resolved without migration error: %v", err)
 	}
 	if _, err := resolveAssignmentItemPane(panes, AssignmentItem{PaneTarget: "0.1", PaneID: "%41"}); err == nil {
 		t.Fatal("inconsistent pane target and ID must fail closed")
@@ -1672,9 +2056,22 @@ func TestResolvePendingAssignmentPaneNeverFallsBackToReusedLocalIndex(t *testing
 		t.Fatalf("resolved pane ID = %q, want %%40", resolved.ID)
 	}
 
+	pending.OccupancyKey = "malformed-pane"
+	pending.DispatchTarget = "%40"
+	if _, err := resolvePendingAssignmentPane(originalTopology, pending); !errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) {
+		t.Fatalf("malformed occupancy key fell back to dispatch target: %v", err)
+	}
+
+	pending.OccupancyKey = ""
+	pending.DispatchTarget = "%40"
+	resolved, err = resolvePendingAssignmentPane(originalTopology, pending)
+	if err != nil || resolved.ID != "%40" {
+		t.Fatalf("empty occupancy key did not use canonical dispatch target: pane=%+v error=%v", resolved, err)
+	}
+
 	pending.OccupancyKey = ""
 	pending.DispatchTarget = "0.1"
-	if _, err := resolvePendingAssignmentPane(originalTopology, pending); err == nil || !strings.Contains(err.Error(), "no canonical physical pane ID") {
+	if _, err := resolvePendingAssignmentPane(originalTopology, pending); !errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) {
 		t.Fatalf("index-only pending retry did not fail closed: %v", err)
 	}
 }
@@ -1703,6 +2100,815 @@ func TestPendingCLIRecoveryIdentityErrorRejectsReusedPaneIdentity(t *testing.T) 
 type fixedAssignSessionObserver struct {
 	observation statuspkg.SessionObservation
 	err         error
+}
+
+func TestCurrentAssignPaneObservationRequiresFreshCanonicalEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	observation := statuspkg.SessionObservation{
+		Session: "demo", ObservedAt: now, Complete: true,
+		Panes: []statuspkg.PaneObservation{{
+			Pane: tmux.PaneRef{ID: "%42", WindowIndex: 0, PaneIndex: 1},
+			Current: statuspkg.StateObservation{
+				Status: statuspkg.AgentStatus{State: statuspkg.StateIdle}, Freshness: statuspkg.FreshnessFresh, Confidence: 0.99,
+			},
+			RawOutput: "ready",
+		}},
+	}
+	pane, err := currentAssignPaneObservation(observation, "%42", now.Add(time.Second))
+	if err != nil || !pane.SafeToDispatch() || pane.RawOutput != "ready" {
+		t.Fatalf("current observation=%+v error=%v", pane, err)
+	}
+
+	captureFailed := observation
+	captureFailed.Panes = append([]statuspkg.PaneObservation(nil), observation.Panes...)
+	captureFailed.Panes[0].Current.Error = "capture unavailable"
+	if _, err := currentAssignPaneObservation(captureFailed, "%42", now.Add(time.Second)); err == nil || !strings.Contains(err.Error(), "capture unavailable") {
+		t.Fatalf("capture failure error=%v", err)
+	}
+	if _, err := currentAssignPaneObservation(observation, "%99", now.Add(time.Second)); err == nil || !strings.Contains(err.Error(), "no unique pane") {
+		t.Fatalf("missing pane error=%v", err)
+	}
+	if _, err := currentAssignPaneObservation(observation, "%42", now.Add(statuspkg.DispatchObservationMaxAge+time.Second)); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("stale observation error=%v", err)
+	}
+}
+
+func TestObserveAssignSessionPropagatesObserverError(t *testing.T) {
+	original := newAssignSessionObserver
+	newAssignSessionObserver = func() assignSessionObserver {
+		return fixedAssignSessionObserver{err: errors.New("topology unavailable")}
+	}
+	t.Cleanup(func() { newAssignSessionObserver = original })
+
+	if _, err := observeAssignSession(t.Context(), "demo"); err == nil || !strings.Contains(err.Error(), "topology unavailable") {
+		t.Fatalf("observeAssignSession error=%v", err)
+	}
+}
+
+func TestCompleteTriggeredAssignmentGenerationUsesExactCAS(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "trigger-completion-cas"
+	store := assignment.NewStore(session)
+	observed, err := store.Assign("ntm-trigger", "Original", 1, "codex", "CodexOne", "original work")
+	if err != nil {
+		t.Fatalf("assign original generation: %v", err)
+	}
+	winner, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load replacement store: %v", err)
+	}
+	replacement, err := winner.Assign("ntm-trigger", "Replacement", 2, "codex", "CodexTwo", "replacement work")
+	if err != nil {
+		t.Fatalf("assign replacement generation: %v", err)
+	}
+	originalLeaseRelease := releaseAssignmentLeases
+	originalClaimRelease := releaseBeadClaimForAssignment
+	leaseReleaseCalls := 0
+	claimReleaseCalls := 0
+	releaseAssignmentLeases = func(context.Context, string, *assignment.Assignment) ([]string, error) {
+		leaseReleaseCalls++
+		return nil, errors.New("stale completion reached lease release")
+	}
+	releaseBeadClaimForAssignment = func(context.Context, string, string, string) (bool, error) {
+		claimReleaseCalls++
+		return false, errors.New("stale completion reached claim release")
+	}
+	t.Cleanup(func() {
+		releaseAssignmentLeases = originalLeaseRelease
+		releaseBeadClaimForAssignment = originalClaimRelease
+	})
+
+	applied, err := completeTriggeredAssignmentGeneration(t.Context(), store, observed)
+	if err == nil || applied || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("stale completion applied=%v error=%v", applied, err)
+	}
+	current, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload replacement: %v", err)
+	}
+	stored := current.Get(replacement.BeadID)
+	if stored == nil || stored.AgentName != replacement.AgentName || stored.Status != assignment.StatusAssigned || stored.CompletedAt != nil {
+		t.Fatalf("stale completion mutated replacement: %+v", stored)
+	}
+	if leaseReleaseCalls != 0 || claimReleaseCalls != 0 {
+		t.Fatalf("stale completion external side effects lease=%d claim=%d", leaseReleaseCalls, claimReleaseCalls)
+	}
+}
+
+func TestCompleteTriggeredAssignmentReleasesExactHandlesOnceBeforeTerminal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "trigger-completion-terminal-release"
+	const beadID = "ntm-trigger-terminal-release"
+	projectDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectDir, ".git"), 0o700); err != nil {
+		t.Fatalf("create project marker: %v", err)
+	}
+	originalRepo := assignRepoPath
+	originalLeaseRelease := releaseAssignmentLeases
+	originalClaimRelease := releaseBeadClaimForAssignment
+	assignRepoPath = projectDir
+	leaseReleaseCalls := 0
+	claimReleaseCalls := 0
+	releaseAssignmentLeases = func(_ context.Context, gotSession string, current *assignment.Assignment) ([]string, error) {
+		leaseReleaseCalls++
+		if gotSession != session || current.BeadID != beadID || !reflect.DeepEqual(current.ReservationIDs, []int{971}) {
+			t.Fatalf("lease release session=%q assignment=%+v", gotSession, current)
+		}
+		return []string{"internal/cli/terminal.go"}, nil
+	}
+	releaseBeadClaimForAssignment = func(_ context.Context, gotProject, gotBeadID, actor string) (bool, error) {
+		claimReleaseCalls++
+		if gotProject != projectDir || gotBeadID != beadID || actor != "CodexOne/trigger-terminal-key" {
+			t.Fatalf("claim release project=%q bead=%q actor=%q", gotProject, gotBeadID, actor)
+		}
+		return true, nil
+	}
+	t.Cleanup(func() {
+		assignRepoPath = originalRepo
+		releaseAssignmentLeases = originalLeaseRelease
+		releaseBeadClaimForAssignment = originalClaimRelease
+	})
+
+	store := assignment.NewStore(session)
+	store.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Reserved trigger", Pane: 1, AgentType: "codex", AgentName: "CodexOne",
+		Status: assignment.StatusAssigned, AssignedAt: time.Now().UTC(), IdempotencyKey: "trigger-terminal-key",
+		ClaimActor: "CodexOne/trigger-terminal-key", DispatchTarget: "%97", OccupancyKey: "%97",
+		DispatchState: assignment.DispatchSent, DispatchReceiptID: "mail-97", ReservationRequired: true,
+		ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservedPaths: []string{"internal/cli/terminal.go"}, ReservationIDs: []int{971},
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed reserved trigger assignment: %v", err)
+	}
+	observed := store.Get(beadID)
+	applied, err := completeTriggeredAssignmentGeneration(t.Context(), store, observed)
+	if err != nil || !applied {
+		t.Fatalf("complete trigger applied=%v error=%v", applied, err)
+	}
+	if leaseReleaseCalls != 1 || claimReleaseCalls != 1 {
+		t.Fatalf("completion side effects lease=%d claim=%d", leaseReleaseCalls, claimReleaseCalls)
+	}
+	terminal := store.Get(beadID)
+	if terminal == nil || terminal.Status != assignment.StatusCompleted || terminal.CompletedAt == nil ||
+		terminal.ReservationState != assignment.ReservationReleased || terminal.ReservationCompleted ||
+		len(terminal.ReservationIDs) != 0 || len(terminal.ReservedPaths) != 0 || terminal.ClearState != assignment.ClearStateNone {
+		t.Fatalf("terminal trigger assignment=%+v", terminal)
+	}
+
+	applied, err = completeTriggeredAssignmentGeneration(t.Context(), store, observed)
+	if err == nil || applied || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("repeat completion applied=%v error=%v", applied, err)
+	}
+	if leaseReleaseCalls != 1 || claimReleaseCalls != 1 {
+		t.Fatalf("repeat completion side effects lease=%d claim=%d", leaseReleaseCalls, claimReleaseCalls)
+	}
+}
+
+func TestTerminalReconciliationSerializesExternalCleanupAcrossStores(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "terminal-reconciliation-cleanup-lock"
+		beadID  = "ntm-terminal-cleanup-lock"
+	)
+	projectDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectDir, ".git"), 0o700); err != nil {
+		t.Fatalf("create project marker: %v", err)
+	}
+	originalRepo := assignRepoPath
+	originalLeaseRelease := releaseAssignmentLeases
+	originalClaimRelease := releaseBeadClaimForAssignment
+	assignRepoPath = projectDir
+	var leaseReleaseCalls atomic.Int32
+	var claimReleaseCalls atomic.Int32
+	releaseStarted := make(chan struct{})
+	allowRelease := make(chan struct{})
+	releaseAssignmentLeases = func(ctx context.Context, _ string, _ *assignment.Assignment) ([]string, error) {
+		if leaseReleaseCalls.Add(1) == 1 {
+			close(releaseStarted)
+			select {
+			case <-allowRelease:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return []string{"internal/cli/concurrent-terminal.go"}, nil
+	}
+	releaseBeadClaimForAssignment = func(context.Context, string, string, string) (bool, error) {
+		claimReleaseCalls.Add(1)
+		return true, nil
+	}
+	t.Cleanup(func() {
+		assignRepoPath = originalRepo
+		releaseAssignmentLeases = originalLeaseRelease
+		releaseBeadClaimForAssignment = originalClaimRelease
+	})
+
+	seed := assignment.NewStore(session)
+	seed.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Concurrent terminal cleanup", Pane: 1,
+		AgentType: "codex", AgentName: "CodexOne", Status: assignment.StatusAssigned,
+		AssignedAt: time.Now().UTC(), IdempotencyKey: "terminal-cleanup-generation",
+		ClaimActor: "CodexOne/terminal-cleanup-generation", DispatchTarget: "%98", OccupancyKey: "%98",
+		DispatchState: assignment.DispatchSent, DispatchReceiptID: "mail-98", ReservationRequired: true,
+		ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservedPaths: []string{"internal/cli/concurrent-terminal.go"}, ReservationIDs: []int{981},
+	}
+	if err := seed.Save(); err != nil {
+		t.Fatalf("seed terminal cleanup assignment: %v", err)
+	}
+	barrier, applied, err := seed.BeginTerminalReconciliationIfCurrent(t.Context(), seed.Get(beadID), assignment.StatusCompleted, "")
+	if err != nil || !applied || barrier == nil {
+		t.Fatalf("begin terminal cleanup barrier=%+v applied=%v error=%v", barrier, applied, err)
+	}
+	stores := make([]*assignment.AssignmentStore, 2)
+	for index := range stores {
+		stores[index], err = assignment.LoadStoreStrict(session)
+		if err != nil {
+			t.Fatalf("load terminal cleanup store %d: %v", index, err)
+		}
+	}
+
+	type reconciliationResult struct {
+		applied bool
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan reconciliationResult, len(stores))
+	for _, store := range stores {
+		go func(store *assignment.AssignmentStore) {
+			<-start
+			applied, err := reconcilePendingTerminalAssignment(t.Context(), store, session, barrier)
+			results <- reconciliationResult{applied: applied, err: err}
+		}(store)
+	}
+	close(start)
+	select {
+	case <-releaseStarted:
+	case <-time.After(5 * time.Second):
+		close(allowRelease)
+		t.Fatal("terminal cleanup did not reach external release")
+	}
+	close(allowRelease)
+	for range stores {
+		select {
+		case result := <-results:
+			if result.err != nil || !result.applied {
+				t.Fatalf("terminal reconciliation applied=%v error=%v", result.applied, result.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("terminal reconciliation remained blocked")
+		}
+	}
+	if got := leaseReleaseCalls.Load(); got != 1 {
+		t.Fatalf("terminal lease release calls=%d, want 1", got)
+	}
+	if got := claimReleaseCalls.Load(); got != 1 {
+		t.Fatalf("terminal claim release calls=%d, want 1", got)
+	}
+	terminal, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload terminal cleanup result: %v", err)
+	}
+	current := terminal.Get(beadID)
+	if current == nil || current.Status != assignment.StatusCompleted || current.ClearState != assignment.ClearStateNone {
+		t.Fatalf("terminal cleanup result=%+v", current)
+	}
+}
+
+func TestClearAndTerminalReconciliationShareExternalCleanupLock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "clear-terminal-cleanup-lock"
+		beadID  = "ntm-clear-terminal-cleanup-lock"
+	)
+	projectDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectDir, ".git"), 0o700); err != nil {
+		t.Fatalf("create project marker: %v", err)
+	}
+	originalRepo := assignRepoPath
+	originalLeaseRelease := releaseAssignmentLeases
+	originalClaimRelease := releaseBeadClaimForAssignment
+	assignRepoPath = projectDir
+	var leaseReleaseCalls atomic.Int32
+	var claimReleaseCalls atomic.Int32
+	releaseStarted := make(chan struct{})
+	allowRelease := make(chan struct{})
+	releaseAssignmentLeases = func(ctx context.Context, _ string, _ *assignment.Assignment) ([]string, error) {
+		if leaseReleaseCalls.Add(1) == 1 {
+			close(releaseStarted)
+			select {
+			case <-allowRelease:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return []string{"internal/cli/clear-terminal.go"}, nil
+	}
+	releaseBeadClaimForAssignment = func(context.Context, string, string, string) (bool, error) {
+		claimReleaseCalls.Add(1)
+		return true, nil
+	}
+	t.Cleanup(func() {
+		assignRepoPath = originalRepo
+		releaseAssignmentLeases = originalLeaseRelease
+		releaseBeadClaimForAssignment = originalClaimRelease
+	})
+
+	seed := assignment.NewStore(session)
+	seed.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Clear versus terminal", Pane: 1,
+		AgentType: "codex", AgentName: "CodexOne", Status: assignment.StatusAssigned,
+		AssignedAt: time.Now().UTC(), IdempotencyKey: "clear-terminal-generation",
+		ClaimActor: "CodexOne/clear-terminal-generation", DispatchTarget: "%99", OccupancyKey: "%99",
+		DispatchState: assignment.DispatchSent, DispatchReceiptID: "mail-99", ReservationRequired: true,
+		ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservedPaths: []string{"internal/cli/clear-terminal.go"}, ReservationIDs: []int{991},
+	}
+	if err := seed.Save(); err != nil {
+		t.Fatalf("seed clear-terminal assignment: %v", err)
+	}
+	clearObserved := seed.Get(beadID)
+	barrier, applied, err := seed.BeginTerminalReconciliationIfCurrent(t.Context(), clearObserved, assignment.StatusCompleted, "")
+	if err != nil || !applied || barrier == nil {
+		t.Fatalf("begin clear-terminal barrier=%+v applied=%v error=%v", barrier, applied, err)
+	}
+	terminalStore, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load terminal store: %v", err)
+	}
+	clearStore, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load clear store: %v", err)
+	}
+
+	terminalResult := make(chan error, 1)
+	go func() {
+		applied, err := reconcilePendingTerminalAssignment(t.Context(), terminalStore, session, barrier)
+		if err == nil && !applied {
+			err = errors.New("terminal reconciliation was not applied")
+		}
+		terminalResult <- err
+	}()
+	select {
+	case <-releaseStarted:
+	case <-time.After(5 * time.Second):
+		close(allowRelease)
+		t.Fatal("terminal cleanup did not reach external release")
+	}
+	clearResult := make(chan error, 1)
+	go func() {
+		_, err := clearStoredAssignment(t.Context(), clearStore, session, clearObserved)
+		clearResult <- err
+	}()
+	close(allowRelease)
+	select {
+	case err := <-terminalResult:
+		if err != nil {
+			t.Fatalf("terminal reconciliation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal reconciliation remained blocked")
+	}
+	select {
+	case err := <-clearResult:
+		if err == nil || !strings.Contains(err.Error(), "reached terminal status") {
+			t.Fatalf("concurrent clear error=%v, want terminal transition rejection", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent clear remained blocked")
+	}
+	if got := leaseReleaseCalls.Load(); got != 1 {
+		t.Fatalf("clear-terminal lease release calls=%d, want 1", got)
+	}
+	if got := claimReleaseCalls.Load(); got != 1 {
+		t.Fatalf("clear-terminal claim release calls=%d, want 1", got)
+	}
+	terminal, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload clear-terminal result: %v", err)
+	}
+	current := terminal.Get(beadID)
+	if current == nil || current.Status != assignment.StatusCompleted || current.ClearState != assignment.ClearStateNone {
+		t.Fatalf("clear-terminal result=%+v", current)
+	}
+}
+
+func TestTerminalReconciliationTreatsRemovedGenerationAsFinished(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "terminal-reconciliation-removed"
+		beadID  = "ntm-terminal-reconciliation-removed"
+	)
+	store := assignment.NewStore(session)
+	observed, err := store.Assign(beadID, "Removed terminal", 1, "codex", "CodexOne", "work")
+	if err != nil {
+		t.Fatalf("assign removed terminal: %v", err)
+	}
+	barrier, applied, err := store.BeginTerminalReconciliationIfCurrent(t.Context(), observed, assignment.StatusCompleted, "")
+	if err != nil || !applied || barrier == nil {
+		t.Fatalf("begin removed terminal barrier=%+v applied=%v error=%v", barrier, applied, err)
+	}
+	if err := store.Remove(beadID); err != nil {
+		t.Fatalf("remove terminal generation: %v", err)
+	}
+	waiter, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load removed terminal waiter: %v", err)
+	}
+	if applied, err := reconcilePendingTerminalAssignment(t.Context(), waiter, session, barrier); err != nil || !applied {
+		t.Fatalf("removed terminal reconciliation applied=%v error=%v", applied, err)
+	}
+}
+
+func TestWatchLoopCompletionAckRetryDoesNotRepeatConsumerEffects(t *testing.T) {
+	loop := &WatchLoop{handledCompletionEvents: make(map[string]struct{})}
+	handleCalls := 0
+	ackCalls := 0
+	renewCalls := 0
+	loop.renewCompletionEventFn = func(context.Context, string, string, string, time.Duration) (bool, error) {
+		renewCalls++
+		return true, nil
+	}
+	loop.handleCompletionFn = func(_ context.Context, event completion.CompletionEvent) error {
+		handleCalls++
+		if event.EventID != "event-1" {
+			t.Fatalf("handled event=%+v", event)
+		}
+		return nil
+	}
+	loop.ackCompletionEventFn = func(context.Context, string, string, string) (bool, error) {
+		ackCalls++
+		if ackCalls == 1 {
+			return false, errors.New("injected acknowledgement save failure")
+		}
+		return true, nil
+	}
+	event := completion.CompletionEvent{EventID: "event-1", ConsumerToken: "consumer-1", LeaseDuration: time.Minute, BeadID: "ntm-event-1"}
+	if err := loop.consumeCompletionEvent(t.Context(), event); err == nil || !strings.Contains(err.Error(), "injected acknowledgement") {
+		t.Fatalf("first consume error=%v", err)
+	}
+	if err := loop.consumeCompletionEvent(t.Context(), event); err != nil {
+		t.Fatalf("ack retry: %v", err)
+	}
+	if handleCalls != 1 || ackCalls != 2 || renewCalls != 1 {
+		t.Fatalf("consumer calls=%d ack calls=%d renew calls=%d, want 1/2/1", handleCalls, ackCalls, renewCalls)
+	}
+}
+
+func TestWatchLoopRenewsCompletionLeaseAcrossSlowHandler(t *testing.T) {
+	const (
+		beadID        = "ntm-completion-heartbeat"
+		eventID       = "completion-heartbeat-event"
+		consumerToken = "completion-heartbeat-owner"
+		leaseDuration = 300 * time.Millisecond
+	)
+	loop := &WatchLoop{handledCompletionEvents: make(map[string]struct{})}
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	heartbeatObserved := make(chan struct{})
+	handlerCalls := 0
+	var renewCalls atomic.Int32
+	loop.renewCompletionEventFn = func(context.Context, string, string, string, time.Duration) (bool, error) {
+		if renewCalls.Add(1) == 2 {
+			close(heartbeatObserved)
+		}
+		return true, nil
+	}
+	loop.handleCompletionFn = func(ctx context.Context, _ completion.CompletionEvent) error {
+		handlerCalls++
+		close(handlerStarted)
+		select {
+		case <-releaseHandler:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	ackCalls := 0
+	loop.ackCompletionEventFn = func(context.Context, string, string, string) (bool, error) {
+		ackCalls++
+		return true, nil
+	}
+	event := completion.CompletionEvent{
+		EventID: eventID, ConsumerToken: consumerToken, LeaseDuration: leaseDuration, BeadID: beadID,
+	}
+	consumeResult := make(chan error, 1)
+	go func() { consumeResult <- loop.consumeCompletionEvent(t.Context(), event) }()
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("slow completion handler did not start")
+	}
+	select {
+	case <-heartbeatObserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion lease heartbeat did not run while the handler was blocked")
+	}
+	close(releaseHandler)
+	select {
+	case err := <-consumeResult:
+		if err != nil {
+			t.Fatalf("consume slow completion event: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("slow completion handler did not finish")
+	}
+	if handlerCalls != 1 {
+		t.Fatalf("slow completion handler calls=%d, want 1", handlerCalls)
+	}
+	if renewCalls.Load() < 2 || ackCalls != 1 {
+		t.Fatalf("completion lease renewals=%d acknowledgements=%d, want at least 2/1", renewCalls.Load(), ackCalls)
+	}
+}
+
+func TestWatchLoopLostCompletionLeaseCancelsHandlerWithoutAck(t *testing.T) {
+	loop := &WatchLoop{handledCompletionEvents: make(map[string]struct{})}
+	handlerCanceled := false
+	ackCalls := 0
+	renewCalls := 0
+	loop.handleCompletionFn = func(ctx context.Context, _ completion.CompletionEvent) error {
+		<-ctx.Done()
+		handlerCanceled = true
+		return ctx.Err()
+	}
+	loop.renewCompletionEventFn = func(context.Context, string, string, string, time.Duration) (bool, error) {
+		renewCalls++
+		return renewCalls == 1, nil
+	}
+	loop.ackCompletionEventFn = func(context.Context, string, string, string) (bool, error) {
+		ackCalls++
+		return true, nil
+	}
+	err := loop.consumeCompletionEvent(t.Context(), completion.CompletionEvent{
+		EventID: "event-lost", ConsumerToken: "consumer-lost", LeaseDuration: 30 * time.Millisecond, BeadID: "bd-lost",
+	})
+	if err == nil || !strings.Contains(err.Error(), "consumer lease was lost") {
+		t.Fatalf("lost lease consume error=%v", err)
+	}
+	if !handlerCanceled || ackCalls != 0 {
+		t.Fatalf("lost lease handler_canceled=%v acknowledgements=%d, want true/0", handlerCanceled, ackCalls)
+	}
+}
+
+func TestWatchLoopCancellationDoesNotAcknowledgeUnhandledCompletion(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	loop := &WatchLoop{handledCompletionEvents: make(map[string]struct{})}
+	ackCalls := 0
+	loop.renewCompletionEventFn = func(context.Context, string, string, string, time.Duration) (bool, error) {
+		return true, nil
+	}
+	loop.handleCompletionFn = func(handlerCtx context.Context, _ completion.CompletionEvent) error {
+		cancel()
+		<-handlerCtx.Done()
+		return handlerCtx.Err()
+	}
+	loop.ackCompletionEventFn = func(context.Context, string, string, string) (bool, error) {
+		ackCalls++
+		return true, nil
+	}
+	err := loop.consumeCompletionEvent(ctx, completion.CompletionEvent{EventID: "event-canceled", ConsumerToken: "consumer-canceled", LeaseDuration: time.Minute, BeadID: "bd-canceled"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("consume error = %v, want context.Canceled", err)
+	}
+	if ackCalls != 0 {
+		t.Fatalf("completion acknowledgements after canceled handling = %d", ackCalls)
+	}
+}
+
+func TestPreserveCommandContextErrorRetainsCancellationClassification(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	transportErr := errors.New("agentmail: resources/read failed: request timed out")
+
+	joined := preserveCommandContextError(ctx, transportErr)
+	if !errors.Is(joined, context.Canceled) || !errors.Is(joined, transportErr) {
+		t.Fatalf("preserved command error = %v, want transport and context cancellation", joined)
+	}
+	if code := classifyReassignError(joined, nil); code != "TIMEOUT" {
+		t.Fatalf("classifyReassignError() = %q, want TIMEOUT", code)
+	}
+	if code := classifyRebalanceError(joined); code != "TIMEOUT" {
+		t.Fatalf("classifyRebalanceError() = %q, want TIMEOUT", code)
+	}
+}
+
+func TestEmitContextAwareReassignFailureOverridesFallbackWithCancellation(t *testing.T) {
+	previousJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = previousJSON })
+
+	for _, fallbackCode := range []string{"TMUX_ERROR", "OBSERVATION_ERROR", "BEAD_LOOKUP_FAILED"} {
+		t.Run(fallbackCode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			transportErr := errors.New("dependency transport stopped")
+			output, runErr := captureStdout(t, func() error {
+				return emitContextAwareReassignFailure(ctx, "reassign-context-error", fallbackCode, transportErr, nil)
+			})
+			if !errors.Is(runErr, context.Canceled) || !errors.Is(runErr, transportErr) {
+				t.Fatalf("context-aware reassign error = %v, want cancellation and transport causes", runErr)
+			}
+			var envelope ReassignEnvelope
+			if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+				t.Fatalf("decode context-aware reassign envelope: %v\noutput=%s", err, output)
+			}
+			if envelope.Success || envelope.Error == nil || envelope.Error.Code != robot.ErrCodeTimeout {
+				t.Fatalf("context-aware reassign envelope = %+v", envelope)
+			}
+		})
+	}
+}
+
+func TestWatchLoopRejectsExpiredQueuedEventAfterTakeoverBeforeSideEffects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session       = "watch-completion-queued-takeover"
+		firstBead     = "ntm-completion-queued-first"
+		firstEvent    = "completion-queued-first-event"
+		secondBead    = "ntm-completion-queued-second"
+		secondEvent   = "completion-queued-second-event"
+		originalToken = "completion-queued-original"
+		takeoverToken = "completion-queued-takeover"
+		activeLease   = 5 * time.Second
+		queuedLease   = 500 * time.Millisecond
+	)
+	detectedAt := time.Now().UTC()
+	store := assignment.NewStore(session)
+	store.Assignments[firstBead] = &assignment.Assignment{
+		BeadID: firstBead, Status: assignment.StatusCompleted, AssignedAt: detectedAt,
+		DispatchTarget: "%101", OccupancyKey: "%101",
+		PendingCompletionEventID: firstEvent, CompletionDetectedAt: &detectedAt,
+	}
+	store.Assignments[secondBead] = &assignment.Assignment{
+		BeadID: secondBead, Status: assignment.StatusCompleted, AssignedAt: detectedAt,
+		DispatchTarget: "%102", OccupancyKey: "%102",
+		PendingCompletionEventID: secondEvent, CompletionDetectedAt: &detectedAt,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed queued completion events: %v", err)
+	}
+	for _, event := range []struct {
+		beadID, eventID string
+		leaseDuration   time.Duration
+	}{{firstBead, firstEvent, activeLease}, {secondBead, secondEvent, queuedLease}} {
+		if _, acquired, err := store.ClaimPendingCompletionEvent(t.Context(), event.beadID, event.eventID, originalToken, event.leaseDuration); err != nil || !acquired {
+			t.Fatalf("claim queued completion event %s acquired=%v error=%v", event.eventID, acquired, err)
+		}
+	}
+
+	firstHandlerStarted := make(chan struct{})
+	releaseFirstHandler := make(chan struct{})
+	originalHandleCalls := 0
+	originalAckCalls := 0
+	original := &WatchLoop{store: store, handledCompletionEvents: make(map[string]struct{})}
+	original.handleCompletionFn = func(ctx context.Context, event completion.CompletionEvent) error {
+		originalHandleCalls++
+		if event.EventID != firstEvent {
+			return fmt.Errorf("stale queued consumer handled event %q", event.EventID)
+		}
+		close(firstHandlerStarted)
+		select {
+		case <-releaseFirstHandler:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	original.ackCompletionEventFn = func(ctx context.Context, beadID, eventID, token string) (bool, error) {
+		originalAckCalls++
+		return store.AcknowledgeCompletionEvent(ctx, beadID, eventID, token)
+	}
+	firstResult := make(chan error, 1)
+	go func() {
+		firstResult <- original.consumeCompletionEvent(t.Context(), completion.CompletionEvent{
+			EventID: firstEvent, ConsumerToken: originalToken, LeaseDuration: activeLease, BeadID: firstBead,
+		})
+	}()
+	select {
+	case <-firstHandlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first queued completion handler did not start")
+	}
+
+	time.Sleep(2 * queuedLease)
+	takeoverStore, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load takeover completion consumer: %v", err)
+	}
+	if _, acquired, err := takeoverStore.ClaimPendingCompletionEvent(t.Context(), secondBead, secondEvent, takeoverToken, activeLease); err != nil || !acquired {
+		t.Fatalf("take over expired queued completion event acquired=%v error=%v", acquired, err)
+	}
+
+	close(releaseFirstHandler)
+	select {
+	case err := <-firstResult:
+		if err != nil {
+			t.Fatalf("complete first queued event: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first queued completion handler did not finish")
+	}
+	staleErr := original.consumeCompletionEvent(t.Context(), completion.CompletionEvent{
+		EventID: secondEvent, ConsumerToken: originalToken, LeaseDuration: queuedLease, BeadID: secondBead,
+	})
+	if staleErr == nil || !strings.Contains(staleErr.Error(), "lost before handling") {
+		t.Fatalf("stale queued consume error=%v", staleErr)
+	}
+	if originalHandleCalls != 1 || originalAckCalls != 1 {
+		t.Fatalf("original consumer handlers=%d acknowledgements=%d, want 1/1", originalHandleCalls, originalAckCalls)
+	}
+	current := takeoverStore.Get(secondBead)
+	if current == nil || current.PendingCompletionEventID != secondEvent || current.CompletionConsumerToken != takeoverToken {
+		t.Fatalf("stale consumer changed takeover event: %+v", current)
+	}
+
+	takeoverHandleCalls := 0
+	takeover := &WatchLoop{store: takeoverStore, handledCompletionEvents: make(map[string]struct{})}
+	takeover.handleCompletionFn = func(context.Context, completion.CompletionEvent) error {
+		takeoverHandleCalls++
+		return nil
+	}
+	if err := takeover.consumeCompletionEvent(t.Context(), completion.CompletionEvent{
+		EventID: secondEvent, ConsumerToken: takeoverToken, LeaseDuration: activeLease, BeadID: secondBead,
+	}); err != nil {
+		t.Fatalf("takeover consume queued event: %v", err)
+	}
+	if takeoverHandleCalls != 1 {
+		t.Fatalf("takeover handler calls=%d, want 1", takeoverHandleCalls)
+	}
+	if current := takeoverStore.Get(secondBead); current == nil || current.PendingCompletionEventID != "" || current.CompletionConsumerToken != "" || current.CompletionLeaseExpiresAt != nil {
+		t.Fatalf("takeover completion event was not acknowledged: %+v", current)
+	}
+}
+
+func TestAssignmentReservationReleaseRejectsCanceledContextBeforeExternalCall(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	current := &assignment.Assignment{
+		BeadID: "bd-release-cancel", ClearState: assignment.ClearStateReservationReleasing,
+		ReservationRequired: true, ReservationState: assignment.ReservationReserved,
+		ReservationIDs: []int{77}, ReservedPaths: []string{"internal/cli/**"},
+	}
+	if _, err := releaseAssignmentReservationsForClear(ctx, "unused", current); !errors.Is(err, context.Canceled) {
+		t.Fatalf("release error = %v, want context.Canceled", err)
+	}
+}
+
+func TestTriggerCompletionCheckStopsBeforeReassignmentOnStrictLoadError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "trigger-completion-corrupt"
+	storePath := filepath.Join(assignment.StorageDir(), session, "assignments.json")
+	if err := os.MkdirAll(filepath.Dir(storePath), 0o700); err != nil {
+		t.Fatalf("create store directory: %v", err)
+	}
+	if err := os.WriteFile(storePath, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("write corrupt store fixture: %v", err)
+	}
+	original := performAutoReassignmentForTrigger
+	var calls int
+	performAutoReassignmentForTrigger = func(context.Context, string, *AutoReassignOptions) (*AutoReassignResult, error) {
+		calls++
+		return &AutoReassignResult{}, nil
+	}
+	t.Cleanup(func() { performAutoReassignmentForTrigger = original })
+
+	result, err := TriggerCompletionCheck(t.Context(), session, "ntm-trigger", &AutoReassignOptions{})
+	if err == nil || !strings.Contains(err.Error(), "refresh completion assignment store") || result != nil {
+		t.Fatalf("TriggerCompletionCheck result=%+v error=%v", result, err)
+	}
+	if calls != 0 {
+		t.Fatalf("auto-reassignment ran %d times after strict load failure", calls)
+	}
+}
+
+func TestTriggerCompletionCheckCompletesExactGenerationBeforeReassignment(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "trigger-completion-exact"
+	store := assignment.NewStore(session)
+	observed, err := store.Assign("ntm-trigger", "Exact", 1, "codex", "CodexOne", "work")
+	if err != nil {
+		t.Fatalf("assign exact generation: %v", err)
+	}
+	original := performAutoReassignmentForTrigger
+	var calls int
+	performAutoReassignmentForTrigger = func(_ context.Context, beadID string, opts *AutoReassignOptions) (*AutoReassignResult, error) {
+		calls++
+		current, loadErr := assignment.LoadStoreStrict(session)
+		if loadErr != nil {
+			t.Fatalf("load completed assignment in callback: %v", loadErr)
+		}
+		if stored := current.Get(beadID); stored == nil || stored.Status != assignment.StatusCompleted {
+			t.Fatalf("callback observed incomplete assignment: %+v", stored)
+		}
+		return &AutoReassignResult{TriggerBeadID: beadID}, nil
+	}
+	t.Cleanup(func() { performAutoReassignmentForTrigger = original })
+
+	result, err := TriggerCompletionCheck(t.Context(), session, observed.BeadID, &AutoReassignOptions{})
+	if err != nil || result == nil || result.TriggerBeadID != observed.BeadID || calls != 1 {
+		t.Fatalf("TriggerCompletionCheck result=%+v error=%v calls=%d", result, err, calls)
+	}
 }
 
 func (o fixedAssignSessionObserver) Observe(context.Context, string) (statuspkg.SessionObservation, error) {
@@ -1736,6 +2942,18 @@ func TestCLIAtomicDispatchReobservesAndRejectsBusyPaneBeforeActuation(t *testing
 	}
 	if receipt.DeliveryID != "" {
 		t.Fatalf("busy actuation boundary produced delivery ID %q", receipt.DeliveryID)
+	}
+}
+
+func TestCLIAtomicPreflightBlocksSensitiveReservationPathBeforeTopologyLookup(t *testing.T) {
+	port := &cliAtomicPaneDispatchPort{redactionConfig: redaction.DefaultConfig()}
+	_, err := port.Preflight(t.Context(), assignment.DispatchRequest{
+		BeadID: "ntm-sensitive-path", BeadTitle: "Safe title", Target: "%42", Prompt: "safe prompt",
+		RequestedPaths: []string{"internal/" + "sk-proj-FAKEtestkey1234567890123456789012345678901234" + ".txt"},
+	})
+	var dispatchErr *dispatchsvc.Error
+	if !errors.As(err, &dispatchErr) || dispatchErr.Code != dispatchsvc.ErrRedactionBlocked || !strings.Contains(err.Error(), "reservation path") {
+		t.Fatalf("sensitive path preflight error=%v", err)
 	}
 }
 
@@ -1927,6 +3145,52 @@ func TestDirectAssignCLIProcessHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestRunDirectPaneAssignmentPreCanceledJSONEnvelope(t *testing.T) {
+	previousJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = previousJSON })
+
+	for _, test := range []struct {
+		name     string
+		ctx      context.Context
+		wantCode string
+	}{
+		{name: "nil context", ctx: nil, wantCode: "INTERNAL_ERROR"},
+		{name: "canceled context", ctx: func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}(), wantCode: "TIMEOUT"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			oldStdout := os.Stdout
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("create stdout pipe: %v", err)
+			}
+			os.Stdout = writer
+			err = runDirectPaneAssignment(test.ctx, &AssignCommandOptions{Session: "cancel-test"})
+			_ = writer.Close()
+			os.Stdout = oldStdout
+			output, readErr := io.ReadAll(reader)
+			_ = reader.Close()
+			if readErr != nil {
+				t.Fatalf("read direct assignment JSON: %v", readErr)
+			}
+			if !errors.Is(err, errJSONFailure) {
+				t.Fatalf("runDirectPaneAssignment error = %v, want errJSONFailure", err)
+			}
+			var envelope AssignEnvelope[DirectAssignData]
+			if decodeErr := json.Unmarshal(output, &envelope); decodeErr != nil {
+				t.Fatalf("decode direct assignment JSON: %v raw=%s", decodeErr, output)
+			}
+			if envelope.Success || envelope.Error == nil || envelope.Error.Code != test.wantCode {
+				t.Fatalf("direct assignment envelope = %+v, want code %s", envelope, test.wantCode)
+			}
+		})
+	}
+}
+
 func TestDirectAssignCLIReplayIsDurableAndBypassesChangedPreflight(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
@@ -2022,8 +3286,10 @@ sleep 300
 	}
 	waitForDirectAssignFileLines(t, dispatchLog, 1)
 	waitForDirectAssignFixture(t, paneID, "Working")
-	if output, captureErr := tmux.CapturePaneOutput(paneID, 20); captureErr != nil || determineAgentState(output, "claude") != "working" {
-		t.Fatalf("fixture did not become a changed busy preflight: state=%q err=%v output=%q", determineAgentState(output, "claude"), captureErr, output)
+	if output, captureErr := tmux.CapturePaneOutput(paneID, 20); captureErr != nil {
+		t.Fatalf("capture changed busy preflight: %v", captureErr)
+	} else if state := string(observeAssignmentFixture(t, "claude", output).Current.Status.State); state != "working" {
+		t.Fatalf("fixture did not become a changed busy preflight: state=%q output=%q", state, output)
 	}
 
 	second, secondCode, secondStderr := runDirectAssignCLIProcess(t, baseArgs)
@@ -2152,4 +3418,27 @@ func countDirectAssignLogLines(t *testing.T, path string) int {
 		}
 	}
 	return count
+}
+
+func TestClassifyRetryOutcomeTreatsEverySkipAsFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		retried   []RetryItem
+		skipped   []RetrySkippedItem
+		wantCode  string
+		wantError bool
+	}{
+		{name: "complete success", retried: []RetryItem{{BeadID: "ntm-ok"}}},
+		{name: "single skipped", skipped: []RetrySkippedItem{{BeadID: "ntm-skip", Reason: "no idle pane"}}, wantCode: "RETRY_SKIPPED", wantError: true},
+		{name: "all skipped", skipped: []RetrySkippedItem{{BeadID: "ntm-a"}, {BeadID: "ntm-b"}}, wantCode: "RETRY_SKIPPED", wantError: true},
+		{name: "partial", retried: []RetryItem{{BeadID: "ntm-ok"}}, skipped: []RetrySkippedItem{{BeadID: "ntm-skip"}}, wantCode: "RETRY_PARTIAL", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			code, err := classifyRetryOutcome(test.retried, test.skipped)
+			if code != test.wantCode || (err != nil) != test.wantError {
+				t.Fatalf("classifyRetryOutcome() = (%q, %v), want code=%q error=%v", code, err, test.wantCode, test.wantError)
+			}
+		})
+	}
 }

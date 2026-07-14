@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/webhook"
 )
@@ -37,6 +39,94 @@ type AddOptions struct {
 	CassContextQuery string
 	NoCassContext    bool
 	Prompt           string
+}
+
+// promptSendFailure distinguishes a requested prompt delivery failure from
+// unrelated lifecycle errors so JSON callers can make a reliable retry
+// decision without parsing human-readable text.
+type promptSendFailure struct {
+	err error
+}
+
+func (e *promptSendFailure) Error() string {
+	if e == nil || e.err == nil {
+		return "prompt delivery failed"
+	}
+	return e.err.Error()
+}
+
+func (e *promptSendFailure) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func newPromptSendFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &promptSendFailure{err: err}
+}
+
+type agentLifecycleFailureResponse struct {
+	output.TimestampedResponse
+	Success         bool     `json:"success"`
+	Session         string   `json:"session,omitempty"`
+	Error           string   `json:"error"`
+	ErrorCode       string   `json:"error_code"`
+	Code            string   `json:"code"`
+	PartialMutation bool     `json:"partial_mutation"`
+	SessionMayExist bool     `json:"session_may_exist"`
+	AffectedPaneIDs []string `json:"affected_pane_ids"`
+}
+
+func newAgentLifecycleFailureResponse(err error, session string, partialMutation, sessionMayExist bool, affectedPaneIDs []string) agentLifecycleFailureResponse {
+	code := robot.ErrCodeInternalError
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		code = robot.ErrCodeTimeout
+	} else {
+		var promptErr *promptSendFailure
+		if errors.As(err, &promptErr) {
+			code = robot.ErrCodePromptSendFailed
+		}
+	}
+	normalizedPaneIDs := make([]string, 0, len(affectedPaneIDs))
+	seenPaneIDs := make(map[string]struct{}, len(affectedPaneIDs))
+	for _, paneID := range affectedPaneIDs {
+		paneID = strings.TrimSpace(paneID)
+		if paneID == "" {
+			continue
+		}
+		if _, seen := seenPaneIDs[paneID]; seen {
+			continue
+		}
+		seenPaneIDs[paneID] = struct{}{}
+		normalizedPaneIDs = append(normalizedPaneIDs, paneID)
+	}
+	return agentLifecycleFailureResponse{
+		TimestampedResponse: output.NewTimestamped(),
+		Success:             false,
+		Session:             session,
+		Error:               err.Error(),
+		ErrorCode:           code,
+		Code:                code,
+		PartialMutation:     partialMutation,
+		SessionMayExist:     sessionMayExist,
+		AffectedPaneIDs:     normalizedPaneIDs,
+	}
+}
+
+func prepareRequiredPersonaSystemPrompt(p *persona.Persona, projectDir string) (string, error) {
+	promptFile, err := persona.PrepareSystemPrompt(p, projectDir)
+	if err != nil {
+		name := "<unknown>"
+		if p != nil && strings.TrimSpace(p.Name) != "" {
+			name = p.Name
+		}
+		return "", fmt.Errorf("prepare required system prompt for %s: %w", name, err)
+	}
+	return promptFile, nil
 }
 
 // opencodeCommandOrDefault returns the configured [agents] oc launch command,
@@ -197,7 +287,7 @@ func newAddCmd() *cobra.Command {
 				Prompt:           prompt,
 			}
 
-			return runAdd(opts)
+			return runAdd(cmd.Context(), opts)
 		},
 	}
 
@@ -260,32 +350,60 @@ func paneTitleTypeAndIndex(title string) (string, int, bool) {
 	return "", 0, false
 }
 
-func runAdd(opts AddOptions) error {
-	totalAgents := opts.Agents.TotalCount()
-	session := opts.Session
+func runAdd(ctx context.Context, opts AddOptions) error {
+	return executeAdd(ctx, opts, true)
+}
 
-	// Helper for JSON error output
+// executeAdd performs the add workflow. Composing commands such as scale pass
+// emitResult=false so the outer command remains the sole owner of terminal
+// JSON output while add still returns the underlying execution error.
+func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
+	session := opts.Session
+	sessionMayExist := false
+	partialMutation := false
+	affectedPaneIDs := []string{}
+	// Install the terminal-output policy before any validation so a direct JSON
+	// invocation cannot fail without an envelope, while composed callers still
+	// receive the underlying error without nested output.
 	outputError := func(err error) error {
-		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(err.Error()))
+		if IsJSONOutput() && emitResult {
+			response := newAgentLifecycleFailureResponse(
+				err, session, partialMutation, sessionMayExist, affectedPaneIDs,
+			)
+			if encodeErr := output.PrintJSON(response); encodeErr != nil {
+				return errors.Join(fmt.Errorf("encode add error response: %w", encodeErr), err)
+			}
+			return errors.Join(jsonFailureExit(), err)
 		}
 		return err
 	}
+	if ctx == nil {
+		return outputError(errors.New("add requires a command context"))
+	}
+	if err := ctx.Err(); err != nil {
+		return outputError(fmt.Errorf("add canceled: %w", err))
+	}
+	totalAgents := opts.Agents.TotalCount()
 
 	if err := tmux.EnsureInstalled(); err != nil {
 		return outputError(err)
 	}
 
-	resolvedSession, err := resolveAddSession(session)
+	resolvedSession, err := resolveAddSession(ctx, session)
 	if err != nil {
 		return outputError(err)
 	}
 	session = resolvedSession
 	opts.Session = session
 
-	if !tmux.SessionExists(session) {
+	exists, err := tmux.SessionExistsContext(ctx, session)
+	if err != nil {
+		return outputError(fmt.Errorf("checking session %q before add: %w", session, err))
+	}
+	if !exists {
 		return outputError(fmt.Errorf("session '%s' does not exist (use 'ntm spawn' to create)", session))
 	}
+	sessionMayExist = true
 
 	if totalAgents == 0 {
 		return outputError(fmt.Errorf("no agents specified"))
@@ -317,7 +435,6 @@ func runAdd(opts AddOptions) error {
 		hookExec = hooks.NewExecutor(nil)
 	}
 
-	ctx := context.Background()
 	hookCtx := hooks.ExecutionContext{
 		SessionName: session,
 		ProjectDir:  dir,
@@ -369,7 +486,7 @@ func runAdd(opts AddOptions) error {
 	var newPanes []output.PaneResponse
 
 	// Get existing panes to determine next indices
-	panes, err := tmux.GetPanes(session)
+	panes, err := tmux.GetPanesContext(ctx, session)
 	if err != nil {
 		return outputError(err)
 	}
@@ -399,11 +516,23 @@ func runAdd(opts AddOptions) error {
 		// unless we assume context from session name? No, that's risky.
 
 		if query != "" {
-			ctx, err := ResolveCassContext(query, dir)
+			cassResult, err := ResolveCassContextWithContext(ctx, query, dir)
 			if err == nil {
-				cassContext = ctx
+				cassContext = cassResult
 			}
 		}
+	}
+
+	promptObserver := newSpawnSessionObserver()
+	promptDispatcher := newCanonicalSpawnPromptDispatcher(session, promptObserver)
+	dispatchAddedAgentPrompt := func(paneID, message string) error {
+		if err := waitForSpawnPaneReady(
+			ctx, session, paneID, spawnPromptReadyTimeout, spawnReadyPollInterval, promptObserver,
+		); err != nil {
+			return fmt.Errorf("waiting for added pane %s readiness: %w", paneID, err)
+		}
+		_, err := promptDispatcher.Dispatch(ctx, paneID, message)
+		return err
 	}
 
 	// Add agents
@@ -447,15 +576,24 @@ func runAdd(opts AddOptions) error {
 
 	for _, agent := range flatAgents {
 		agentTypeStr := string(agent.Type)
+		if err := ctx.Err(); err != nil {
+			return outputError(fmt.Errorf("add canceled before creating %s pane: %w", agentTypeStr, err))
+		}
 
-		paneID, err := tmux.SplitWindow(session, dir)
+		paneID, err := tmux.SplitWindowContext(ctx, session, dir)
+		if paneID != "" {
+			partialMutation = true
+			affectedPaneIDs = append(affectedPaneIDs, paneID)
+		}
 		if err != nil {
 			return outputError(fmt.Errorf("creating pane: %w", err))
 		}
 
 		// Wait for pane to initialize before sending commands (fixes #37)
 		if paneInitDelay > 0 {
-			time.Sleep(paneInitDelay)
+			if err := waitContextDelay(ctx, paneInitDelay); err != nil {
+				return outputError(fmt.Errorf("added pane initialization canceled: %w", err))
+			}
 		}
 
 		// Increment index for this type
@@ -463,7 +601,7 @@ func runAdd(opts AddOptions) error {
 		num := maxIndices[agentTypeStr]
 
 		title := tmux.FormatPaneName(session, agentTypeStr, num, agent.Model)
-		if err := tmux.SetPaneTitle(paneID, title); err != nil {
+		if err := tmux.SetPaneTitleContext(ctx, paneID, title); err != nil {
 			return outputError(fmt.Errorf("setting pane title: %w", err))
 		}
 
@@ -574,14 +712,14 @@ func runAdd(opts AddOptions) error {
 					resolvedReasoningEffort = p.ReasoningEffort
 				}
 				// Prepare system prompt file
-				promptFile, err := persona.PrepareSystemPrompt(p, dir)
+				promptFile, err := prepareRequiredPersonaSystemPrompt(p, dir)
 				if err != nil {
-					if !IsJSONOutput() {
-						fmt.Printf("⚠ Warning: could not prepare system prompt for %s: %v\n", p.Name, err)
-					}
-				} else {
-					systemPromptFile = promptFile
+					return outputError(fmt.Errorf(
+						"preparing system prompt for persona %s after creating pane %s: %w; the pane still exists",
+						p.Name, paneID, err,
+					))
 				}
+				systemPromptFile = promptFile
 				// For persona agents, resolve the model from the persona config
 				resolvedModel = resolveAgentModel(agent.Type, p.Model, opts.PluginMap)
 			}
@@ -624,8 +762,13 @@ func runAdd(opts AddOptions) error {
 				if !IsJSONOutput() {
 					output.PrintWarningf("Codex cooldown active; waiting %s before launching", ratelimit.FormatDelay(cooldown))
 				}
-				time.Sleep(cooldown)
+				if err := waitContextDelay(ctx, cooldown); err != nil {
+					return outputError(fmt.Errorf("codex cooldown canceled before added-agent launch: %w", err))
+				}
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			return outputError(fmt.Errorf("add canceled before launching agent: %w", err))
 		}
 
 		cmd, err := tmux.BuildPaneCommand(dir, safeCmd)
@@ -633,8 +776,12 @@ func runAdd(opts AddOptions) error {
 			return outputError(fmt.Errorf("building agent command: %w", err))
 		}
 
-		if err := tmux.SendKeys(paneID, cmd, true); err != nil {
-			return outputError(fmt.Errorf("launching agent: %w", err))
+		if err := tmux.SendKeysContext(ctx, paneID, cmd, true); err != nil {
+			launchErr := fmt.Errorf("launching agent in pane %s: %w; the pane still exists", paneID, err)
+			if personaName != "" {
+				launchErr = newPromptSendFailure(fmt.Errorf("sending persona %s launch prompt: %w", personaName, launchErr))
+			}
+			return outputError(launchErr)
 		}
 		if rateLimitTracker != nil && agent.Type == AgentTypeCodex {
 			rateLimitTracker.RecordSuccess("openai")
@@ -652,7 +799,7 @@ func runAdd(opts AddOptions) error {
 				PollInterval:       500 * time.Millisecond,
 				Verbose:            cfg.GeminiSetup.Verbose,
 			}
-			setupCtx, setupCancel := context.WithTimeout(context.Background(), geminiCfg.ReadyTimeout+geminiCfg.ModelSelectTimeout+10*time.Second)
+			setupCtx, setupCancel := context.WithTimeout(ctx, geminiCfg.ReadyTimeout+geminiCfg.ModelSelectTimeout+10*time.Second)
 			// Defer cancel is safer here, but since we are in a loop, defer runs at function exit.
 			// So we must cancel manually or wrap in func.
 			func() {
@@ -674,8 +821,13 @@ func runAdd(opts AddOptions) error {
 		// Inject CASS context if available
 		if cassContext != "" {
 			// Wait a bit for agent to start
-			time.Sleep(500 * time.Millisecond)
-			if err := sendPromptWithDoubleEnter(paneID, cassContext); err != nil {
+			if err := waitContextDelay(ctx, 500*time.Millisecond); err != nil {
+				return outputError(fmt.Errorf("CASS context injection canceled: %w", err))
+			}
+			if err := dispatchAddedAgentPrompt(paneID, cassContext); err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return outputError(fmt.Errorf("CASS context injection canceled: %w", ctxErr))
+				}
 				if !IsJSONOutput() {
 					fmt.Printf("⚠ Warning: failed to inject context: %v\n", err)
 				}
@@ -684,11 +836,17 @@ func runAdd(opts AddOptions) error {
 
 		// Inject user prompt if provided
 		if opts.Prompt != "" {
-			time.Sleep(200 * time.Millisecond)
-			if err := sendPromptWithDoubleEnter(paneID, opts.Prompt); err != nil {
-				if !IsJSONOutput() {
-					fmt.Printf("⚠ Warning: failed to send prompt: %v\n", err)
+			if err := waitContextDelay(ctx, 200*time.Millisecond); err != nil {
+				return outputError(fmt.Errorf("added-agent prompt canceled: %w", err))
+			}
+			if err := dispatchAddedAgentPrompt(paneID, opts.Prompt); err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return outputError(fmt.Errorf("added-agent prompt canceled: %w", ctxErr))
 				}
+				return outputError(newPromptSendFailure(fmt.Errorf(
+					"sending explicit prompt to added pane %s: %w; the pane and launched agent still exist",
+					paneID, err,
+				)))
 			}
 		}
 
@@ -717,6 +875,7 @@ func runAdd(opts AddOptions) error {
 
 		// Track for JSON output
 		newPanes = append(newPanes, output.PaneResponse{
+			PaneID:  paneID,
 			Title:   title,
 			Type:    agentTypeStr,
 			Variant: agent.Model,
@@ -735,6 +894,28 @@ func runAdd(opts AddOptions) error {
 
 	// JSON output mode
 	if IsJSONOutput() {
+		if !emitResult {
+			return nil
+		}
+		livePanes, err := tmux.GetPanesContext(ctx, session)
+		if err != nil {
+			return outputError(fmt.Errorf("refreshing added panes for JSON output: %w", err))
+		}
+		liveByID := make(map[string]tmux.Pane, len(livePanes))
+		for _, pane := range livePanes {
+			liveByID[pane.ID] = pane
+		}
+		for i := range newPanes {
+			pane, ok := liveByID[newPanes[i].PaneID]
+			if !ok {
+				return outputError(fmt.Errorf("added pane %s disappeared before JSON output", newPanes[i].PaneID))
+			}
+			command := newPanes[i].Command
+			variant := newPanes[i].Variant
+			newPanes[i] = paneResponseFromTMUX(pane)
+			newPanes[i].Command = command
+			newPanes[i].Variant = variant
+		}
 		return output.PrintJSON(output.AddResponse{
 			TimestampedResponse: output.NewTimestamped(),
 			Session:             session,
@@ -759,7 +940,13 @@ func runAdd(opts AddOptions) error {
 	return nil
 }
 
-func resolveAddSession(session string) (string, error) {
+func resolveAddSession(ctx context.Context, session string) (string, error) {
+	if ctx == nil {
+		return "", errors.New("add session resolution context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	session = strings.TrimSpace(session)
 	if session != "" {
 		if err := tmux.ValidateSessionName(session); err != nil {
@@ -767,7 +954,7 @@ func resolveAddSession(session string) (string, error) {
 		}
 	}
 
-	res, err := ResolveSessionWithOptions(session, nil, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+	res, err := ResolveSessionWithOptionsContext(ctx, session, nil, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
 	if err != nil {
 		return "", err
 	}

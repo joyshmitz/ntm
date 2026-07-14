@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -18,11 +19,30 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/palette"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	sessionPkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	utilpkg "github.com/Dicklesworthstone/ntm/internal/util"
 )
+
+func paneResponseFromTMUX(pane tmux.Pane) output.PaneResponse {
+	ref := pane.Ref()
+	return output.PaneResponse{
+		PaneID:      ref.ID,
+		PaneTarget:  ref.Physical(),
+		WindowIndex: ref.WindowIndex,
+		Index:       ref.PaneIndex,
+		Title:       pane.Title,
+		Type:        agentTypeToString(pane.Type),
+		Variant:     pane.Variant,
+		Active:      pane.Active,
+		Width:       pane.Width,
+		Height:      pane.Height,
+		Command:     pane.Command,
+	}
+}
 
 // parseEditorCommand splits the editor string into command and arguments.
 // It honors basic shell-style quoting so editor paths with spaces still work.
@@ -167,11 +187,23 @@ func ResolveSession(session string, w io.Writer) (SessionResolution, error) {
 }
 
 func ResolveSessionWithOptions(session string, w io.Writer, opts SessionResolveOptions) (SessionResolution, error) {
+	return ResolveSessionWithOptionsContext(context.Background(), session, w, opts)
+}
+
+// ResolveSessionWithOptionsContext resolves a session while keeping every tmux
+// lookup under the caller's cancellation boundary.
+func ResolveSessionWithOptionsContext(ctx context.Context, session string, w io.Writer, opts SessionResolveOptions) (SessionResolution, error) {
+	if ctx == nil {
+		return SessionResolution{}, errors.New("session resolution context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return SessionResolution{}, err
+	}
 	if session != "" {
 		if err := tmux.ValidateSessionName(session); err != nil {
 			return SessionResolution{}, fmt.Errorf("invalid session name: %w", err)
 		}
-		sessionList, err := tmux.ListSessions()
+		sessionList, err := tmux.ListSessionsContext(ctx)
 		if err != nil {
 			return SessionResolution{}, err
 		}
@@ -185,7 +217,16 @@ func ResolveSessionWithOptions(session string, w io.Writer, opts SessionResolveO
 
 	// Current tmux session is the most deterministic signal.
 	if tmux.InTmux() {
-		if current := tmux.GetCurrentSession(); current != "" {
+		current, currentErr := tmux.GetCurrentSessionContext(ctx)
+		if currentErr != nil {
+			if errors.Is(currentErr, context.Canceled) || errors.Is(currentErr, context.DeadlineExceeded) {
+				return SessionResolution{}, currentErr
+			}
+			if err := ctx.Err(); err != nil {
+				return SessionResolution{}, err
+			}
+		}
+		if current != "" {
 			return SessionResolution{
 				Session:  current,
 				Reason:   "current tmux session",
@@ -194,7 +235,7 @@ func ResolveSessionWithOptions(session string, w io.Writer, opts SessionResolveO
 		}
 	}
 
-	sessionList, err := tmux.ListSessions()
+	sessionList, err := tmux.ListSessionsContext(ctx)
 	if err != nil {
 		return SessionResolution{}, err
 	}
@@ -561,9 +602,15 @@ func SanitizeFilename(name string) string {
 	return result
 }
 
-// ResolveCassContext queries CASS for relevant past sessions based on a query string
-// and returns a formatted markdown summary.
-func ResolveCassContext(query, dir string) (string, error) {
+// ResolveCassContextWithContext queries CASS for relevant past sessions while
+// preserving the owning command's cancellation lifecycle.
+func ResolveCassContextWithContext(ctx context.Context, query, dir string) (string, error) {
+	if ctx == nil {
+		return "", errors.New("CASS context resolution requires a command context")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	// Use active config or fall back to defaults
 	activeCfg := cfg
 	if activeCfg == nil {
@@ -590,7 +637,7 @@ func ResolveCassContext(query, dir string) (string, error) {
 		since = "30d"
 	}
 
-	resp, err := client.Search(context.Background(), cass.SearchOptions{
+	resp, err := client.Search(ctx, cass.SearchOptions{
 		Query:     query,
 		Workspace: dir,
 		Limit:     limit,
@@ -700,14 +747,79 @@ func resolveProjectDirForSession(session string, preferSession bool) string {
 // resolveExplicitProjectDirForSession resolves the project directory for commands that
 // were given an explicit session argument. Unlike resolveProjectDirForSession, this must
 // not fall back to the caller's current workspace: explicit-session commands should
-// operate on the session's saved/configured project or fail closed.
+// operate on the live session's unanimous project, its saved/configured project, or fail
+// closed.
 func resolveExplicitProjectDirForSession(session string) (string, error) {
+	return resolveExplicitProjectDirForSessionContext(context.Background(), session)
+}
+
+func resolveExplicitProjectDirForSessionContext(parent context.Context, session string) (string, error) {
+	if parent == nil {
+		return "", errors.New("session project resolution context is required")
+	}
+	if err := parent.Err(); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+
+	return resolveExplicitProjectDirForSessionWithLookup(
+		ctx,
+		session,
+		tmux.GetPanesContext,
+		func(ctx context.Context, paneID string) (string, error) {
+			return tmux.DefaultClient.RunContext(ctx, "display-message", "-p", "-t", paneID, "#{pane_current_path}")
+		},
+	)
+}
+
+func resolveExplicitProjectDirForSessionWithLookup(
+	ctx context.Context,
+	session string,
+	listPanes func(context.Context, string) ([]tmux.Pane, error),
+	paneCurrentPath func(context.Context, string) (string, error),
+) (string, error) {
+	if ctx == nil {
+		return "", errors.New("session project resolution context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	session = strings.TrimSpace(session)
 	if session == "" {
 		return "", fmt.Errorf("session is required")
 	}
 	if err := tmux.ValidateSessionName(session); err != nil {
 		return "", err
+	}
+
+	if listPanes != nil {
+		panes, err := listPanes(ctx, session)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		if err != nil {
+			class := tmux.ClassifyCommandError(err)
+			switch class.Kind {
+			case tmux.CommandErrorSessionNotFound, tmux.CommandErrorPaneNotFound, tmux.CommandErrorNoServer:
+				// A missing live session is not evidence that its persisted
+				// project metadata is invalid. Continue to the saved/configured
+				// fallback below. At this boundary tmux may report a missing
+				// session as "can't find window", hence PaneNotFound is included.
+				panes = nil
+			default:
+				return "", fmt.Errorf("list panes for session %s: %w", session, err)
+			}
+		}
+		if len(panes) > 0 {
+			projectDir, err := robot.ResolveLiveSessionProjectContext(ctx, session, panes, paneCurrentPath)
+			if err != nil {
+				return "", err
+			}
+			if projectDir != "" {
+				return projectDir, nil
+			}
+		}
 	}
 
 	_, sessionProject, savedProject := projectDirCandidatesForSession(session, false)
@@ -815,9 +927,28 @@ func jsonFailureExit() error { return errJSONFailure }
 //
 // On encode failure, the encoder error is returned as-is so it surfaces
 // on stderr with the usual "Error: ..." formatting.
-func emitJSONFailureEnvelope(v interface{}) error {
-	if encErr := json.NewEncoder(os.Stdout).Encode(v); encErr != nil {
+func emitJSONFailureEnvelopeTo(w io.Writer, v interface{}) error {
+	if w == nil {
+		w = os.Stdout
+	}
+	if encErr := json.NewEncoder(w).Encode(v); encErr != nil {
 		return encErr
 	}
 	return errJSONFailure
+}
+
+func emitJSONFailureEnvelope(v interface{}) error {
+	return emitJSONFailureEnvelopeTo(os.Stdout, v)
+}
+
+func emitJSONFailureEnvelopeToWithCause(w io.Writer, v interface{}, cause error) error {
+	emitErr := emitJSONFailureEnvelopeTo(w, v)
+	if cause != nil && errors.Is(emitErr, errJSONFailure) {
+		return errors.Join(emitErr, cause)
+	}
+	return emitErr
+}
+
+func emitJSONFailureEnvelopeWithCause(v interface{}, cause error) error {
+	return emitJSONFailureEnvelopeToWithCause(os.Stdout, v, cause)
 }

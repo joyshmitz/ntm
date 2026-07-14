@@ -1,12 +1,16 @@
 package assignment
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -24,6 +28,9 @@ func TestNewStore(t *testing.T) {
 	}
 	if store.Version != assignmentStoreVersion {
 		t.Errorf("expected version %d, got %d", assignmentStoreVersion, store.Version)
+	}
+	if store.PersistenceGeneration != 0 {
+		t.Errorf("expected unsaved persistence generation 0, got %d", store.PersistenceGeneration)
 	}
 }
 
@@ -139,26 +146,6 @@ func TestList(t *testing.T) {
 	assignments := store.List()
 	if len(assignments) != 3 {
 		t.Errorf("expected 3 assignments, got %d", len(assignments))
-	}
-}
-
-func TestListByPane(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	store := NewStore("test-session")
-	_, _ = store.Assign("bd-1", "Bead 1", 1, "claude", "", "")
-	_, _ = store.Assign("bd-2", "Bead 2", 1, "claude", "", "")
-	_, _ = store.Assign("bd-3", "Bead 3", 2, "codex", "", "")
-
-	pane1 := store.ListByPane(1)
-	if len(pane1) != 2 {
-		t.Errorf("expected 2 assignments for pane 1, got %d", len(pane1))
-	}
-
-	pane2 := store.ListByPane(2)
-	if len(pane2) != 1 {
-		t.Errorf("expected 1 assignment for pane 2, got %d", len(pane2))
 	}
 }
 
@@ -562,6 +549,20 @@ func TestPersistenceSaveLoad(t *testing.T) {
 	if a.AgentName != "TestAgent" {
 		t.Errorf("expected agent name 'TestAgent', got '%s'", a.AgentName)
 	}
+	if store2.PersistenceGeneration < 2 {
+		t.Fatalf("persistence generation=%d, want at least two completed saves", store2.PersistenceGeneration)
+	}
+	primaryData, err := os.ReadFile(store2.path)
+	if err != nil {
+		t.Fatalf("read primary: %v", err)
+	}
+	backupData, err := os.ReadFile(store2.path + ".bak")
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if string(primaryData) != string(backupData) {
+		t.Fatal("completed save did not publish identical primary and backup snapshots")
+	}
 }
 
 func TestPersistenceBackupRecovery(t *testing.T) {
@@ -623,6 +624,556 @@ func TestPersistenceBackupRecovery(t *testing.T) {
 	}
 }
 
+func TestPersistenceRecoversReceiptPublishedOnlyToBackup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "receipt-backup-recovery"
+		beadID  = "ntm-receipt-backup-recovery"
+		key     = "receipt-backup-key"
+	)
+	now := time.Now().UTC()
+	req := AtomicRequest{
+		BeadID: beadID, BeadTitle: "Receipt recovery", Target: "%88", OccupancyKey: "%88",
+		Pane: 1, AgentType: "codex", AgentName: "CodexOne", Actor: "CodexOne",
+		Prompt: "recover exactly once", IdempotencyKey: key,
+	}
+	actor := StableClaimActor(req.Actor, key)
+	store := NewStore(session)
+	if _, err := store.RecordAtomicIntent(req, actor, now); err != nil {
+		t.Fatalf("RecordAtomicIntent: %v", err)
+	}
+	if _, err := store.RecordAtomicClaim(req, ClaimReceipt{BeadID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: now}); err != nil {
+		t.Fatalf("RecordAtomicClaim: %v", err)
+	}
+	if err := store.RecordAtomicDispatchStarted(beadID, key, now); err != nil {
+		t.Fatalf("RecordAtomicDispatchStarted: %v", err)
+	}
+
+	injected := errors.New("stop after backup publication")
+	hookCalls := 0
+	store.afterBackupPublished = func(snapshot *AssignmentStore) error {
+		hookCalls++
+		stored := snapshot.Assignments[beadID]
+		if stored == nil || stored.DispatchState != DispatchSent || stored.DispatchReceiptID != "delivery-88" {
+			t.Errorf("backup publication snapshot=%+v", stored)
+		}
+		return injected
+	}
+	if err := store.RecordAtomicDispatchSent(beadID, key, req.Prompt, DispatchReceipt{DeliveryID: "delivery-88", Duration: 25 * time.Millisecond}, now); !errors.Is(err, injected) {
+		t.Fatalf("RecordAtomicDispatchSent error=%v, want injected failure", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("backup publication hook calls=%d, want 1", hookCalls)
+	}
+
+	primary, primaryData := mustReadAssignmentSnapshot(t, store.path, session)
+	backup, backupData := mustReadAssignmentSnapshot(t, store.path+".bak", session)
+	if primary.Assignments[beadID].DispatchState != DispatchSending {
+		t.Fatalf("primary dispatch state=%s, want sending", primary.Assignments[beadID].DispatchState)
+	}
+	if stored := backup.Assignments[beadID]; stored == nil || stored.DispatchState != DispatchSent || stored.DispatchReceiptID != "delivery-88" {
+		t.Fatalf("backup receipt snapshot=%+v", stored)
+	}
+	if backup.PersistenceGeneration != primary.PersistenceGeneration+1 {
+		t.Fatalf("primary generation=%d backup generation=%d", primary.PersistenceGeneration, backup.PersistenceGeneration)
+	}
+	if string(primaryData) == string(backupData) {
+		t.Fatal("fault injection did not leave the intended publication window")
+	}
+
+	restarted, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("LoadStoreStrict: %v", err)
+	}
+	recovered := restarted.Get(beadID)
+	if recovered == nil || recovered.DispatchState != DispatchSent || recovered.DispatchReceiptID != "delivery-88" {
+		t.Fatalf("recovered assignment=%+v", recovered)
+	}
+	if restarted.PersistenceGeneration != backup.PersistenceGeneration {
+		t.Fatalf("recovered generation=%d, want %d", restarted.PersistenceGeneration, backup.PersistenceGeneration)
+	}
+	promotedData, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatalf("read promoted primary: %v", err)
+	}
+	if string(promotedData) != string(backupData) {
+		t.Fatal("strict recovery did not promote the exact durable backup bytes")
+	}
+
+	claimCalls := 0
+	dispatchCalls := 0
+	coordinator := NewAtomicCoordinator(
+		restarted,
+		ClaimFunc(func(context.Context, string, string) (ClaimReceipt, error) {
+			claimCalls++
+			return ClaimReceipt{}, errors.New("claim must not be replayed")
+		}),
+		nil,
+		DispatchFunc(func(context.Context, DispatchRequest) (DispatchReceipt, error) {
+			dispatchCalls++
+			return DispatchReceipt{}, errors.New("dispatch must not be replayed")
+		}),
+	)
+	result, err := coordinator.Execute(t.Context(), req)
+	if err != nil {
+		t.Fatalf("replay Execute: %v", err)
+	}
+	if !result.Sent || !result.Replayed || result.Dispatch.DeliveryID != "delivery-88" {
+		t.Fatalf("replay result=%+v", result)
+	}
+	if claimCalls != 0 || dispatchCalls != 0 {
+		t.Fatalf("replay crossed external boundaries: claims=%d dispatches=%d", claimCalls, dispatchCalls)
+	}
+}
+
+func TestPersistenceRecoversBackupOnlyInitialPublication(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("backup-only-initial")
+	store.Assignments["ntm-initial"] = &Assignment{BeadID: "ntm-initial", Status: StatusClaiming, AssignedAt: time.Now().UTC()}
+	injected := errors.New("stop initial save after backup publication")
+	store.afterBackupPublished = func(*AssignmentStore) error { return injected }
+	if err := store.Save(); !errors.Is(err, injected) {
+		t.Fatalf("Save error=%v, want injected failure", err)
+	}
+	if _, err := os.Stat(store.path); !os.IsNotExist(err) {
+		t.Fatalf("initial primary stat error=%v, want missing file", err)
+	}
+	backup, backupData := mustReadAssignmentSnapshot(t, store.path+".bak", store.SessionName)
+	if backup.PersistenceGeneration != 1 {
+		t.Fatalf("initial backup generation=%d, want 1", backup.PersistenceGeneration)
+	}
+
+	restarted, err := LoadStoreStrict(store.SessionName)
+	if err != nil {
+		t.Fatalf("LoadStoreStrict: %v", err)
+	}
+	if restarted.Get("ntm-initial") == nil || restarted.PersistenceGeneration != 1 {
+		t.Fatalf("restarted initial snapshot=%+v generation=%d", restarted.Get("ntm-initial"), restarted.PersistenceGeneration)
+	}
+	primaryData, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatalf("read promoted initial primary: %v", err)
+	}
+	if string(primaryData) != string(backupData) {
+		t.Fatal("initial recovery did not promote the exact backup snapshot")
+	}
+}
+
+func TestPersistenceLegacyV8PairLoadsAndUpgradesOnSave(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("legacy-v8-upgrade")
+	legacy := &AssignmentStore{
+		SessionName: store.SessionName,
+		Assignments: map[string]*Assignment{
+			"ntm-legacy": {BeadID: "ntm-legacy", Status: StatusAssigned, AssignedAt: time.Now().UTC()},
+		},
+		ClearedGenerations: map[string]uint64{},
+		UpdatedAt:          time.Now().UTC(),
+		Version:            assignmentStoreGenerationVersion - 1,
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy snapshot: %v", err)
+	}
+	if err := os.WriteFile(store.path, data, 0600); err != nil {
+		t.Fatalf("write legacy primary: %v", err)
+	}
+	if err := os.WriteFile(store.path+".bak", data, 0600); err != nil {
+		t.Fatalf("write legacy backup: %v", err)
+	}
+
+	loaded, err := LoadStoreStrict(store.SessionName)
+	if err != nil {
+		t.Fatalf("LoadStoreStrict legacy v8: %v", err)
+	}
+	if loaded.PersistenceGeneration != 0 || loaded.Version != assignmentStoreVersion {
+		t.Fatalf("loaded legacy generation=%d version=%d", loaded.PersistenceGeneration, loaded.Version)
+	}
+	if err := loaded.Save(); err != nil {
+		t.Fatalf("upgrade Save: %v", err)
+	}
+	primary, primaryData := mustReadAssignmentSnapshot(t, store.path, store.SessionName)
+	backup, backupData := mustReadAssignmentSnapshot(t, store.path+".bak", store.SessionName)
+	if primary.Version != assignmentStoreVersion || primary.PersistenceGeneration != 1 {
+		t.Fatalf("upgraded primary version=%d generation=%d", primary.Version, primary.PersistenceGeneration)
+	}
+	if !reflect.DeepEqual(primary, backup) || string(primaryData) != string(backupData) {
+		t.Fatal("legacy upgrade did not publish one identical generation-bearing snapshot")
+	}
+}
+
+func TestPersistenceStrictSelectionRejectsAmbiguousArtifacts(t *testing.T) {
+	t.Run("equal generation divergent payload", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		store := NewStore("split-brain-generation")
+		if _, err := store.Assign("ntm-split", "Primary", 1, "codex", "", ""); err != nil {
+			t.Fatalf("Assign: %v", err)
+		}
+		backup, _ := mustReadAssignmentSnapshot(t, store.path+".bak", store.SessionName)
+		backup.Assignments["ntm-split"].BeadTitle = "Divergent backup"
+		data, err := json.MarshalIndent(backup, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal divergent backup: %v", err)
+		}
+		if err := os.WriteFile(store.path+".bak", data, 0600); err != nil {
+			t.Fatalf("write divergent backup: %v", err)
+		}
+		if _, err := LoadStoreStrict(store.SessionName); err == nil || !strings.Contains(err.Error(), "diverge") {
+			t.Fatalf("strict split-brain error=%v", err)
+		}
+	})
+
+	t.Run("equal generation unknown field divergence", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		store := NewStore("split-brain-unknown-field")
+		if _, err := store.Assign("ntm-split-unknown", "Primary", 1, "codex", "", ""); err != nil {
+			t.Fatalf("Assign: %v", err)
+		}
+		_, backupData := mustReadAssignmentSnapshot(t, store.path+".bak", store.SessionName)
+		var payload map[string]any
+		if err := json.Unmarshal(backupData, &payload); err != nil {
+			t.Fatalf("decode backup payload: %v", err)
+		}
+		payload["unknown_extension"] = map[string]any{"value": "must not be ignored"}
+		divergent, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal unknown-field backup: %v", err)
+		}
+		if err := os.WriteFile(store.path+".bak", divergent, 0600); err != nil {
+			t.Fatalf("write unknown-field backup: %v", err)
+		}
+		if _, err := LoadStoreStrict(store.SessionName); err == nil || !strings.Contains(err.Error(), "diverge") {
+			t.Fatalf("strict unknown-field split-brain error=%v", err)
+		}
+	})
+
+	t.Run("backup generation jump", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		store := NewStore("backup-generation-jump")
+		if _, err := store.Assign("ntm-jump", "Jump", 1, "codex", "", ""); err != nil {
+			t.Fatalf("Assign: %v", err)
+		}
+		backup, _ := mustReadAssignmentSnapshot(t, store.path+".bak", store.SessionName)
+		backup.PersistenceGeneration += 2
+		data, err := json.MarshalIndent(backup, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal jumped backup: %v", err)
+		}
+		if err := os.WriteFile(store.path+".bak", data, 0600); err != nil {
+			t.Fatalf("write jumped backup: %v", err)
+		}
+		if _, err := LoadStoreStrict(store.SessionName); err == nil || !strings.Contains(err.Error(), "immediate successor") {
+			t.Fatalf("strict generation-jump error=%v", err)
+		}
+	})
+
+	t.Run("malformed backup", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		store := NewStore("malformed-backup")
+		if _, err := store.Assign("ntm-malformed", "Malformed", 1, "codex", "", ""); err != nil {
+			t.Fatalf("Assign: %v", err)
+		}
+		if err := os.WriteFile(store.path+".bak", []byte("{not-json"), 0600); err != nil {
+			t.Fatalf("write malformed backup: %v", err)
+		}
+		if _, err := LoadStoreStrict(store.SessionName); err == nil || !strings.Contains(err.Error(), "invalid backup") {
+			t.Fatalf("strict malformed-backup error=%v", err)
+		}
+	})
+
+	for _, artifact := range []string{"primary", "backup"} {
+		artifact := artifact
+		t.Run("future schema "+artifact, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			store := NewStore("future-schema-" + artifact)
+			if _, err := store.Assign("ntm-future", "Future", 1, "codex", "", ""); err != nil {
+				t.Fatalf("Assign: %v", err)
+			}
+			path := store.path
+			if artifact == "backup" {
+				path += ".bak"
+			}
+			future, _ := mustReadAssignmentSnapshot(t, path, store.SessionName)
+			future.Version = assignmentStoreVersion + 1
+			data, err := json.MarshalIndent(future, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal future %s: %v", artifact, err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatalf("write future %s: %v", artifact, err)
+			}
+			if _, err := LoadStoreStrict(store.SessionName); err == nil || !strings.Contains(err.Error(), "newer than supported") {
+				t.Fatalf("strict future-%s error=%v", artifact, err)
+			}
+		})
+	}
+}
+
+func TestPersistenceStrictV9RejectsMalformedCompletionOutboxArtifacts(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*Assignment)
+		wantError string
+	}{
+		{
+			name: "pending event without detection timestamp",
+			mutate: func(current *Assignment) {
+				current.CompletionDetectedAt = nil
+			},
+			wantError: "must appear together",
+		},
+		{
+			name: "detection timestamp without pending event",
+			mutate: func(current *Assignment) {
+				current.PendingCompletionEventID = ""
+			},
+			wantError: "must appear together",
+		},
+		{
+			name: "blank pending event",
+			mutate: func(current *Assignment) {
+				current.PendingCompletionEventID = "   "
+			},
+			wantError: "event ID is blank",
+		},
+		{
+			name: "pending event on nonterminal assignment",
+			mutate: func(current *Assignment) {
+				current.Status = StatusAssigned
+			},
+			wantError: "requires a terminal assignment outcome",
+		},
+		{
+			name: "zero detection timestamp",
+			mutate: func(current *Assignment) {
+				zero := time.Time{}
+				current.CompletionDetectedAt = &zero
+			},
+			wantError: "detection timestamp is invalid",
+		},
+		{
+			name: "non UTC detection timestamp",
+			mutate: func(current *Assignment) {
+				nonUTC := current.CompletionDetectedAt.In(time.FixedZone("completion-test", 3600))
+				current.CompletionDetectedAt = &nonUTC
+			},
+			wantError: "detection timestamp must be UTC",
+		},
+		{
+			name: "consumer token without lease expiry",
+			mutate: func(current *Assignment) {
+				current.CompletionConsumerToken = "consumer-a"
+			},
+			wantError: "must appear together",
+		},
+		{
+			name: "lease expiry without consumer token",
+			mutate: func(current *Assignment) {
+				expiresAt := time.Now().UTC().Add(time.Minute)
+				current.CompletionLeaseExpiresAt = &expiresAt
+			},
+			wantError: "must appear together",
+		},
+		{
+			name: "blank consumer token",
+			mutate: func(current *Assignment) {
+				current.CompletionConsumerToken = "   "
+				expiresAt := time.Now().UTC().Add(time.Minute)
+				current.CompletionLeaseExpiresAt = &expiresAt
+			},
+			wantError: "consumer token is blank",
+		},
+		{
+			name: "lease without pending event",
+			mutate: func(current *Assignment) {
+				current.PendingCompletionEventID = ""
+				current.CompletionDetectedAt = nil
+				current.CompletionConsumerToken = "consumer-a"
+				expiresAt := time.Now().UTC().Add(time.Minute)
+				current.CompletionLeaseExpiresAt = &expiresAt
+			},
+			wantError: "requires a pending completion event",
+		},
+		{
+			name: "lease on terminal reconciliation barrier",
+			mutate: func(current *Assignment) {
+				current.Status = StatusAssigned
+				current.ClearState = ClearStateReservationReleasing
+				current.PendingTerminalStatus = StatusCompleted
+				current.CompletionConsumerToken = "consumer-a"
+				expiresAt := time.Now().UTC().Add(time.Minute)
+				current.CompletionLeaseExpiresAt = &expiresAt
+			},
+			wantError: "requires a terminal assignment status",
+		},
+		{
+			name: "lease before terminal reconciliation finishes",
+			mutate: func(current *Assignment) {
+				current.ClearState = ClearStateLeasesReleased
+				current.CompletionConsumerToken = "consumer-a"
+				expiresAt := time.Now().UTC().Add(time.Minute)
+				current.CompletionLeaseExpiresAt = &expiresAt
+			},
+			wantError: "requires completed terminal reconciliation",
+		},
+		{
+			name: "zero lease expiry",
+			mutate: func(current *Assignment) {
+				current.CompletionConsumerToken = "consumer-a"
+				zero := time.Time{}
+				current.CompletionLeaseExpiresAt = &zero
+			},
+			wantError: "lease expiry timestamp is invalid",
+		},
+		{
+			name: "non UTC lease expiry",
+			mutate: func(current *Assignment) {
+				current.CompletionConsumerToken = "consumer-a"
+				expiresAt := time.Now().UTC().Add(time.Minute).In(time.FixedZone("completion-test", 3600))
+				current.CompletionLeaseExpiresAt = &expiresAt
+			},
+			wantError: "lease expiry timestamp must be UTC",
+		},
+	}
+
+	for _, artifact := range []string{"primary", "backup"} {
+		artifact := artifact
+		for _, test := range tests {
+			test := test
+			t.Run(artifact+"/"+test.name, func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				store := NewStore("completion-outbox-validation-" + artifact + "-" + strings.ReplaceAll(test.name, " ", "-"))
+				if _, err := store.Assign("ntm-completion-validation", "Completion validation", 1, "codex", "", ""); err != nil {
+					t.Fatalf("Assign: %v", err)
+				}
+				path := store.path
+				if artifact == "backup" {
+					path += ".bak"
+				}
+				snapshot, _ := mustReadAssignmentSnapshot(t, path, store.SessionName)
+				current := snapshot.Assignments["ntm-completion-validation"]
+				detectedAt := time.Now().UTC()
+				current.Status = StatusCompleted
+				current.PendingCompletionEventID = "completion-event-valid"
+				current.CompletionDetectedAt = &detectedAt
+				test.mutate(current)
+				data, err := json.MarshalIndent(snapshot, "", "  ")
+				if err != nil {
+					t.Fatalf("marshal malformed %s completion snapshot: %v", artifact, err)
+				}
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					t.Fatalf("write malformed %s completion snapshot: %v", artifact, err)
+				}
+				_, err = LoadStoreStrict(store.SessionName)
+				if err == nil || !strings.Contains(err.Error(), "invalid "+artifact+" ledger") || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("strict malformed-%s error=%v, want %q", artifact, err, test.wantError)
+				}
+			})
+		}
+	}
+}
+
+func TestPersistenceLegacyVersionCannotBypassCompletionOutboxValidation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("legacy-completion-outbox-validation")
+	detectedAt := time.Now().UTC()
+	legacy := &AssignmentStore{
+		SessionName: store.SessionName,
+		Assignments: map[string]*Assignment{
+			"ntm-legacy-completion": {
+				BeadID: "ntm-legacy-completion", Status: StatusCompleted, AssignedAt: detectedAt,
+				PendingCompletionEventID: "legacy-event", CompletionDetectedAt: &detectedAt,
+				CompletionConsumerToken: "unpaired-legacy-consumer",
+			},
+		},
+		ClearedGenerations: map[string]uint64{},
+		UpdatedAt:          detectedAt,
+		Version:            assignmentStoreGenerationVersion - 1,
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy completion snapshot: %v", err)
+	}
+	if err := os.WriteFile(store.path, data, 0600); err != nil {
+		t.Fatalf("write legacy completion primary: %v", err)
+	}
+	if err := os.WriteFile(store.path+".bak", data, 0600); err != nil {
+		t.Fatalf("write legacy completion backup: %v", err)
+	}
+	if _, err := LoadStoreStrict(store.SessionName); err == nil ||
+		!strings.Contains(err.Error(), "invalid primary ledger") ||
+		!strings.Contains(err.Error(), "consumer token and lease expiry must appear together") {
+		t.Fatalf("legacy completion validation error=%v", err)
+	}
+}
+
+func TestPersistenceSelectsNewerPrimaryOverStaleBackup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("newer-primary")
+	if _, err := store.Assign("ntm-newer-primary", "Newer primary", 1, "codex", "", ""); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	firstGeneration, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatalf("read first generation: %v", err)
+	}
+	if err := store.MarkWorking("ntm-newer-primary"); err != nil {
+		t.Fatalf("MarkWorking: %v", err)
+	}
+	if err := os.WriteFile(store.path+".bak", firstGeneration, 0600); err != nil {
+		t.Fatalf("restore stale backup: %v", err)
+	}
+
+	loaded, err := LoadStoreStrict(store.SessionName)
+	if err != nil {
+		t.Fatalf("LoadStoreStrict: %v", err)
+	}
+	if loaded.PersistenceGeneration != 2 || loaded.Get("ntm-newer-primary").Status != StatusWorking {
+		t.Fatalf("selected generation=%d assignment=%+v", loaded.PersistenceGeneration, loaded.Get("ntm-newer-primary"))
+	}
+}
+
+func TestPersistenceNonStrictLoadUsesNewerBackupGeneration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("nonstrict-newer-backup")
+	if _, err := store.Assign("ntm-nonstrict", "Before", 1, "codex", "", ""); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	store.mutex.Lock()
+	store.Assignments["ntm-nonstrict"].BeadTitle = "After"
+	store.mutex.Unlock()
+	injected := errors.New("stop after newer backup")
+	store.afterBackupPublished = func(*AssignmentStore) error { return injected }
+	if err := store.Save(); !errors.Is(err, injected) {
+		t.Fatalf("Save error=%v, want injected failure", err)
+	}
+	_, backupData := mustReadAssignmentSnapshot(t, store.path+".bak", store.SessionName)
+
+	loaded, err := LoadStore(store.SessionName)
+	if err != nil {
+		t.Fatalf("LoadStore: %v", err)
+	}
+	if loaded.PersistenceGeneration != 2 || loaded.Get("ntm-nonstrict").BeadTitle != "After" {
+		t.Fatalf("nonstrict selected generation=%d assignment=%+v", loaded.PersistenceGeneration, loaded.Get("ntm-nonstrict"))
+	}
+	primaryData, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatalf("read promoted primary: %v", err)
+	}
+	if string(primaryData) != string(backupData) {
+		t.Fatal("nonstrict load did not promote the selected newer backup")
+	}
+}
+
+func mustReadAssignmentSnapshot(t *testing.T, path, session string) (*AssignmentStore, []byte) {
+	t.Helper()
+	candidate := readAssignmentSnapshotCandidate(path, session)
+	if !candidate.exists || candidate.err != nil || candidate.snapshot == nil {
+		t.Fatalf("read assignment snapshot %s: exists=%v error=%v", path, candidate.exists, candidate.err)
+	}
+	return candidate.snapshot, candidate.data
+}
+
 func TestLoadStoreStrictRejectsCorruptLedgerWithoutBackup(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
@@ -651,7 +1202,7 @@ func TestLoadStoreStrictNeverRollsBackToBackup(t *testing.T) {
 				IdempotencyKey: "attempt-1",
 			},
 		},
-		Version: assignmentStoreVersion,
+		Version: assignmentStoreGenerationVersion - 1,
 	}
 	backup, err := json.Marshal(stale)
 	if err != nil {
@@ -679,6 +1230,29 @@ func TestLoadStoreStrictRejectsOrphanedBackup(t *testing.T) {
 
 	if _, err := LoadStoreStrict("strict-orphaned-backup"); err == nil {
 		t.Fatal("expected strict load to reject a backup with no primary ledger")
+	}
+}
+
+func TestLoadStoreStrictRejectsLaterGenerationOrphanedBackup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("strict-later-orphaned-backup")
+	orphan := &AssignmentStore{
+		SessionName:           store.SessionName,
+		Assignments:           map[string]*Assignment{},
+		ClearedGenerations:    map[string]uint64{},
+		PersistenceGeneration: 2,
+		UpdatedAt:             time.Now().UTC(),
+		Version:               assignmentStoreVersion,
+	}
+	data, err := json.MarshalIndent(orphan, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal later-generation orphan: %v", err)
+	}
+	if err := os.WriteFile(store.path+".bak", data, 0600); err != nil {
+		t.Fatalf("write later-generation orphan: %v", err)
+	}
+	if _, err := LoadStoreStrict(store.SessionName); err == nil || !strings.Contains(err.Error(), "want initial generation 1") {
+		t.Fatalf("later-generation orphan error=%v", err)
 	}
 }
 
@@ -1141,6 +1715,76 @@ func TestAssignmentClearBarrierRetainsLeaseAndBlocksNewWork(t *testing.T) {
 	}
 }
 
+func TestExplicitClearRejectsPendingCompletionOutboxWithoutMutation(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leased_%t", leased), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			const (
+				beadID  = "ntm-pending-completion-clear"
+				eventID = "pending-completion-clear-event"
+			)
+			now := time.Now().UTC()
+			store := NewStore("pending-completion-clear")
+			store.Assignments[beadID] = &Assignment{
+				BeadID: beadID, Status: StatusFailed, AssignedAt: now,
+				DispatchTarget: "%64", OccupancyKey: "%64",
+				PendingCompletionEventID: eventID, CompletionDetectedAt: cloneTimePtr(&now),
+			}
+			if leased {
+				expiresAt := now.Add(time.Minute)
+				store.Assignments[beadID].CompletionConsumerToken = "pending-clear-consumer"
+				store.Assignments[beadID].CompletionLeaseExpiresAt = &expiresAt
+			}
+			if err := store.Save(); err != nil {
+				t.Fatalf("seed pending completion clear: %v", err)
+			}
+			before := mustLoadAssignment(t, store.SessionName, beadID)
+
+			_, err := store.BeginClearIfStatus(t.Context(), beadID, now.Add(time.Second), StatusFailed)
+			if !errors.Is(err, ErrCompletionEventPending) {
+				t.Fatalf("BeginClearIfStatus error=%v, want ErrCompletionEventPending", err)
+			}
+			after := mustLoadAssignment(t, store.SessionName, beadID)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("refused pending-event clear mutated assignment:\nbefore=%+v\nafter=%+v", before, after)
+			}
+			if _, err := LoadStoreStrict(store.SessionName); err != nil {
+				t.Fatalf("strict reload after refused pending-event clear: %v", err)
+			}
+		})
+	}
+}
+
+func TestCompleteClearRejectsPendingCompletionOutboxWithoutMutation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "pending-completion-complete-clear"
+		beadID  = "ntm-pending-completion-complete-clear"
+		eventID = "pending-completion-complete-clear-event"
+	)
+	now := time.Now().UTC()
+	store := NewStore(session)
+	store.Assignments[beadID] = &Assignment{
+		BeadID: beadID, Status: StatusFailed, AssignedAt: now,
+		DispatchTarget: "%65", OccupancyKey: "%65",
+		ClearState: ClearStateLeasesReleased, ClearStartedAt: cloneTimePtr(&now),
+		PendingCompletionEventID: eventID, CompletionDetectedAt: cloneTimePtr(&now),
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed pending completion complete-clear: %v", err)
+	}
+	before := mustLoadAssignment(t, session, beadID)
+
+	err := store.CompleteClear(t.Context(), beadID)
+	if !errors.Is(err, ErrCompletionEventPending) {
+		t.Fatalf("CompleteClear error=%v, want ErrCompletionEventPending", err)
+	}
+	after := mustLoadAssignment(t, session, beadID)
+	if !reflect.DeepEqual(after, before) || store.ClearedGeneration(beadID) != 0 {
+		t.Fatalf("refused pending-event complete-clear mutated assignment: before=%+v after=%+v generation=%d", before, after, store.ClearedGeneration(beadID))
+	}
+}
+
 func TestCompleteTerminalReconciliationRetainsReceiptAndClearsLeaseHandles(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const session = "assignment-terminal-reconciliation"
@@ -1161,11 +1805,22 @@ func TestCompleteTerminalReconciliationRetainsReceiptAndClearsLeaseHandles(t *te
 	if err := store.Save(); err != nil {
 		t.Fatalf("seed terminal assignment: %v", err)
 	}
-	if _, err := store.BeginClearIfStatus(t.Context(), beadID, now.Add(time.Minute), StatusAssigned); err != nil {
-		t.Fatalf("BeginClearIfStatus: %v", err)
+	observed := store.Get(beadID)
+	barrier, applied, err := store.BeginTerminalReconciliationWithCompletionEventIfCurrent(t.Context(), observed, StatusCompleted, "")
+	if err != nil || !applied {
+		t.Fatalf("BeginTerminalReconciliationIfCurrent barrier=%+v applied=%v error=%v", barrier, applied, err)
 	}
+	durableBarrier := mustLoadAssignment(t, session, beadID)
+	if durableBarrier == nil || durableBarrier.PendingTerminalStatus != StatusCompleted || durableBarrier.ClearState != ClearStateReservationReleasing || durableBarrier.TerminalClaimReleased ||
+		durableBarrier.PendingCompletionEventID == "" || durableBarrier.CompletionDetectedAt == nil {
+		t.Fatalf("durable terminal barrier = %+v", durableBarrier)
+	}
+	eventID := durableBarrier.PendingCompletionEventID
 	if _, err := store.RecordClearLeasesReleased(t.Context(), beadID); err != nil {
 		t.Fatalf("RecordClearLeasesReleased: %v", err)
+	}
+	if _, err := store.RecordTerminalClaimReleased(t.Context(), beadID); err != nil {
+		t.Fatalf("RecordTerminalClaimReleased: %v", err)
 	}
 	if err := store.CompleteTerminalReconciliation(t.Context(), beadID, StatusCompleted, ""); err != nil {
 		t.Fatalf("CompleteTerminalReconciliation: %v", err)
@@ -1174,11 +1829,312 @@ func TestCompleteTerminalReconciliationRetainsReceiptAndClearsLeaseHandles(t *te
 	stored := mustLoadAssignment(t, session, beadID)
 	if stored == nil || stored.Status != StatusCompleted || stored.CompletedAt == nil || stored.ClearState != ClearStateNone ||
 		stored.ReservationState != ReservationReleased || stored.ReservationCompleted || len(stored.ReservationIDs) != 0 ||
-		len(stored.ReservedPaths) != 0 || stored.DispatchReceiptID != "receipt-63" {
+		len(stored.ReservedPaths) != 0 || stored.DispatchReceiptID != "receipt-63" || stored.PendingTerminalStatus != "" ||
+		stored.PendingTerminalReason != "" || stored.TerminalClaimReleased || stored.PendingCompletionEventID != eventID || stored.CompletionDetectedAt == nil {
 		t.Fatalf("terminal reconciliation result = %+v", stored)
+	}
+	pendingEvents := store.ListPendingCompletionEvents()
+	if len(pendingEvents) != 1 || pendingEvents[0].PendingCompletionEventID != eventID {
+		t.Fatalf("pending completion outbox=%+v", pendingEvents)
+	}
+	const consumerToken = "store-test-consumer"
+	claimed, acquired, err := store.ClaimPendingCompletionEvent(t.Context(), beadID, eventID, consumerToken, time.Minute)
+	if err != nil || !acquired || claimed == nil || claimed.CompletionConsumerToken != consumerToken || claimed.CompletionLeaseExpiresAt == nil {
+		t.Fatalf("claim completion outbox acquired=%v row=%+v error=%v", acquired, claimed, err)
+	}
+	if acknowledged, err := store.AcknowledgeCompletionEvent(t.Context(), beadID, eventID+"-stale", consumerToken); err != nil || acknowledged {
+		t.Fatalf("stale acknowledgement applied=%v error=%v", acknowledged, err)
+	}
+	if acknowledged, err := store.AcknowledgeCompletionEvent(t.Context(), beadID, eventID, "other-consumer"); err != nil || acknowledged {
+		t.Fatalf("foreign acknowledgement applied=%v error=%v", acknowledged, err)
+	}
+	if acknowledged, err := store.AcknowledgeCompletionEvent(t.Context(), beadID, eventID, consumerToken); err != nil || !acknowledged {
+		t.Fatalf("exact acknowledgement applied=%v error=%v", acknowledged, err)
+	}
+	acknowledged := mustLoadAssignment(t, session, beadID)
+	if acknowledged == nil || acknowledged.PendingCompletionEventID != "" || acknowledged.CompletionDetectedAt != nil ||
+		acknowledged.CompletionConsumerToken != "" || acknowledged.CompletionLeaseExpiresAt != nil || len(store.ListPendingCompletionEvents()) != 0 {
+		t.Fatalf("acknowledged completion outbox=%+v", acknowledged)
 	}
 	if generation := store.ClearedGeneration(beadID); generation != 0 {
 		t.Fatalf("terminal reconciliation incremented explicit clear generation to %d", generation)
+	}
+}
+
+func TestListPendingCompletionEventsUsesDeterministicReplayOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("assignment-completion-outbox-order")
+	early := time.Date(2026, time.July, 13, 9, 30, 0, 0, time.UTC)
+	later := early.Add(time.Minute)
+	store.Assignments = map[string]*Assignment{
+		"later": {
+			BeadID: "ntm-z", Status: StatusCompleted,
+			PendingCompletionEventID: "event-later", CompletionDetectedAt: &later,
+		},
+		"tie-b": {
+			BeadID: "ntm-a", Status: StatusFailed,
+			PendingCompletionEventID: "event-b", CompletionDetectedAt: &early,
+		},
+		"first": {
+			BeadID: "ntm-0", Status: StatusCompleted,
+			PendingCompletionEventID: "event-first", CompletionDetectedAt: &early,
+		},
+		"tie-a": {
+			BeadID: "ntm-a", Status: StatusFailed,
+			PendingCompletionEventID: "event-a", CompletionDetectedAt: &early,
+		},
+	}
+
+	got := store.ListPendingCompletionEvents()
+	want := []string{"event-first", "event-a", "event-b", "event-later"}
+	if len(got) != len(want) {
+		t.Fatalf("pending completion events=%+v, want %d rows", got, len(want))
+	}
+	for index, eventID := range want {
+		if got[index].PendingCompletionEventID != eventID {
+			t.Fatalf("pending completion event %d=%q, want %q (all=%+v)", index, got[index].PendingCompletionEventID, eventID, got)
+		}
+	}
+}
+
+func TestCompletionEventLeaseOwnershipRenewalAndExpiryAcrossStores(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "assignment-completion-lease"
+		beadID  = "ntm-completion-lease"
+		eventID = "completion-event-generation"
+	)
+	base := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	seed := NewStore(session)
+	seed.Assignments[beadID] = &Assignment{
+		BeadID: beadID, Status: StatusCompleted, AssignedAt: base,
+		DispatchTarget: "%81", OccupancyKey: "%81",
+		PendingCompletionEventID: eventID, CompletionDetectedAt: &base,
+	}
+	if err := seed.Save(); err != nil {
+		t.Fatalf("seed completion lease: %v", err)
+	}
+	first, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load first completion consumer: %v", err)
+	}
+	second, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load second completion consumer: %v", err)
+	}
+	leaseNow := base
+	first.completionLeaseClock = func() time.Time { return leaseNow }
+	second.completionLeaseClock = func() time.Time { return leaseNow }
+
+	claimed, acquired, err := first.ClaimPendingCompletionEvent(t.Context(), beadID, eventID, "consumer-a", time.Minute)
+	if err != nil || !acquired || claimed.CompletionLeaseExpiresAt == nil || !claimed.CompletionLeaseExpiresAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("first claim acquired=%v row=%+v error=%v", acquired, claimed, err)
+	}
+	leaseNow = base.Add(30 * time.Second)
+	if row, acquired, err := second.ClaimPendingCompletionEvent(t.Context(), beadID, eventID, "consumer-b", time.Minute); err != nil || acquired || row == nil || row.CompletionConsumerToken != "consumer-a" {
+		t.Fatalf("live foreign claim acquired=%v row=%+v error=%v", acquired, row, err)
+	}
+	leaseNow = base.Add(45 * time.Second)
+	if renewed, err := first.RenewPendingCompletionEventLease(t.Context(), beadID, eventID, "consumer-a", time.Minute); err != nil || !renewed {
+		t.Fatalf("owner renewal applied=%v error=%v", renewed, err)
+	}
+	leaseNow = base.Add(75 * time.Second)
+	if _, acquired, err := second.ClaimPendingCompletionEvent(t.Context(), beadID, eventID, "consumer-b", time.Minute); err != nil || acquired {
+		t.Fatalf("claim during renewed lease acquired=%v error=%v", acquired, err)
+	}
+	leaseNow = base.Add(106 * time.Second)
+	recovered, acquired, err := second.ClaimPendingCompletionEvent(t.Context(), beadID, eventID, "consumer-b", time.Minute)
+	if err != nil || !acquired || recovered == nil || recovered.CompletionConsumerToken != "consumer-b" {
+		t.Fatalf("expired lease takeover acquired=%v row=%+v error=%v", acquired, recovered, err)
+	}
+	leaseNow = base.Add(107 * time.Second)
+	if renewed, err := first.RenewPendingCompletionEventLease(t.Context(), beadID, eventID, "consumer-a", time.Minute); err != nil || renewed {
+		t.Fatalf("stale owner renewal applied=%v error=%v", renewed, err)
+	}
+	if acknowledged, err := first.AcknowledgeCompletionEvent(t.Context(), beadID, eventID, "consumer-a"); err != nil || acknowledged {
+		t.Fatalf("stale owner acknowledgement applied=%v error=%v", acknowledged, err)
+	}
+	if acknowledged, err := second.AcknowledgeCompletionEvent(t.Context(), beadID, eventID, "consumer-b"); err != nil || !acknowledged {
+		t.Fatalf("recovery owner acknowledgement applied=%v error=%v", acknowledged, err)
+	}
+}
+
+func TestCompletionEventLeaseRenewalSamplesClockAfterOperationLock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session       = "assignment-completion-lease-contended"
+		beadID        = "ntm-completion-lease-contended"
+		eventID       = "completion-event-contended"
+		consumerToken = "consumer-contended"
+	)
+	base := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	detectedAt := base.Add(-time.Minute)
+	store := NewStore(session)
+	store.Assignments[beadID] = &Assignment{
+		BeadID: beadID, Status: StatusCompleted, AssignedAt: detectedAt,
+		DispatchTarget: "%82", OccupancyKey: "%82",
+		PendingCompletionEventID: eventID, CompletionDetectedAt: &detectedAt,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed contended completion lease: %v", err)
+	}
+
+	clockValues := make(chan time.Time, 1)
+	store.completionLeaseClock = func() time.Time { return <-clockValues }
+	leaseDuration := time.Minute
+	clockValues <- base
+	claimed, acquired, err := store.ClaimPendingCompletionEvent(
+		t.Context(), beadID, eventID, consumerToken, leaseDuration,
+	)
+	if err != nil || !acquired || claimed == nil || claimed.CompletionLeaseExpiresAt == nil {
+		t.Fatalf("claim contended completion lease acquired=%v row=%+v error=%v", acquired, claimed, err)
+	}
+
+	lockEntered := make(chan struct{})
+	allowLock := make(chan struct{})
+	store.completionLeaseLock = func(context.Context, string, string) (func(), error) {
+		close(lockEntered)
+		<-allowLock
+		return func() {}, nil
+	}
+	var lockAcquired atomic.Bool
+	store.completionLeaseClock = func() time.Time {
+		if lockAcquired.Load() {
+			return base.Add(leaseDuration)
+		}
+		return base
+	}
+	result := make(chan struct {
+		renewed bool
+		err     error
+	}, 1)
+	go func() {
+		renewed, renewErr := store.RenewPendingCompletionEventLease(
+			t.Context(), beadID, eventID, consumerToken, leaseDuration,
+		)
+		result <- struct {
+			renewed bool
+			err     error
+		}{renewed: renewed, err: renewErr}
+	}()
+	<-lockEntered
+	lockAcquired.Store(true)
+	close(allowLock)
+
+	select {
+	case got := <-result:
+		if got.err != nil || got.renewed {
+			t.Fatalf("post-expiry contended renewal applied=%v error=%v", got.renewed, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("contended completion lease renewal did not finish")
+	}
+
+	reloaded, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload contended completion lease: %v", err)
+	}
+	current := reloaded.Get(beadID)
+	if current == nil || current.CompletionLeaseExpiresAt == nil || !current.CompletionLeaseExpiresAt.Equal(base.Add(leaseDuration)) {
+		t.Fatalf("contended renewal changed durable expiry: %+v", current)
+	}
+}
+
+func TestOwnsLiveCompletionEventLease(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	expired := now.Add(-time.Nanosecond)
+	boundary := now
+	live := now.Add(time.Nanosecond)
+
+	tests := []struct {
+		name       string
+		assignment *Assignment
+		eventID    string
+		token      string
+		want       bool
+	}{
+		{
+			name:       "live lease",
+			assignment: &Assignment{PendingCompletionEventID: "event", CompletionConsumerToken: "consumer", CompletionLeaseExpiresAt: &live},
+			eventID:    "event",
+			token:      "consumer",
+			want:       true,
+		},
+		{
+			name:       "expired lease",
+			assignment: &Assignment{PendingCompletionEventID: "event", CompletionConsumerToken: "consumer", CompletionLeaseExpiresAt: &expired},
+			eventID:    "event",
+			token:      "consumer",
+		},
+		{
+			name:       "expiry boundary is not live",
+			assignment: &Assignment{PendingCompletionEventID: "event", CompletionConsumerToken: "consumer", CompletionLeaseExpiresAt: &boundary},
+			eventID:    "event",
+			token:      "consumer",
+		},
+		{
+			name:       "nil lease",
+			assignment: &Assignment{PendingCompletionEventID: "event", CompletionConsumerToken: "consumer"},
+			eventID:    "event",
+			token:      "consumer",
+		},
+		{
+			name:       "different event",
+			assignment: &Assignment{PendingCompletionEventID: "event", CompletionConsumerToken: "consumer", CompletionLeaseExpiresAt: &live},
+			eventID:    "other-event",
+			token:      "consumer",
+		},
+		{
+			name:       "different consumer",
+			assignment: &Assignment{PendingCompletionEventID: "event", CompletionConsumerToken: "consumer", CompletionLeaseExpiresAt: &live},
+			eventID:    "event",
+			token:      "other-consumer",
+		},
+		{
+			name:    "missing assignment",
+			eventID: "event",
+			token:   "consumer",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ownsLiveCompletionEventLease(test.assignment, test.eventID, test.token, now); got != test.want {
+				t.Fatalf("ownsLiveCompletionEventLease()=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAcknowledgeCompletionEventRejectsExpiredLeaseWithoutMutation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session       = "assignment-expired-completion-ack"
+		beadID        = "ntm-expired-completion-ack"
+		eventID       = "expired-completion-event"
+		consumerToken = "expired-completion-consumer"
+	)
+	detectedAt := time.Now().UTC().Add(-2 * time.Hour)
+	expiresAt := detectedAt.Add(time.Hour)
+	store := NewStore(session)
+	store.Assignments[beadID] = &Assignment{
+		BeadID: beadID, Status: StatusCompleted, AssignedAt: detectedAt,
+		DispatchTarget: "%82", OccupancyKey: "%82",
+		PendingCompletionEventID: eventID, CompletionDetectedAt: &detectedAt,
+		CompletionConsumerToken: consumerToken, CompletionLeaseExpiresAt: &expiresAt,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed expired completion lease: %v", err)
+	}
+	before := mustLoadAssignment(t, session, beadID)
+
+	acknowledged, err := store.AcknowledgeCompletionEvent(t.Context(), beadID, eventID, consumerToken)
+	if err != nil || acknowledged {
+		t.Fatalf("expired acknowledgement applied=%v error=%v", acknowledged, err)
+	}
+	after := mustLoadAssignment(t, session, beadID)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("expired acknowledgement mutated assignment:\nbefore=%+v\nafter=%+v", before, after)
 	}
 }
 
@@ -1195,6 +2151,134 @@ func TestCompleteTerminalReconciliationRequiresBarrierAndTerminalStatus(t *testi
 	}
 	if err := store.CompleteTerminalReconciliation(t.Context(), beadID, StatusWorking, ""); err == nil || !strings.Contains(err.Error(), "must be completed or failed") {
 		t.Fatalf("nonterminal status error = %v", err)
+	}
+	if _, applied, err := store.BeginTerminalReconciliationIfCurrent(t.Context(), store.Get(beadID), StatusWorking, ""); err == nil || applied {
+		t.Fatalf("nonterminal begin applied=%v error=%v", applied, err)
+	}
+}
+
+func TestBeginTerminalReconciliationRejectsSupersededGenerationBeforeBarrier(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "terminal-reconciliation-stale-generation"
+	const beadID = "ntm-terminal-reconciliation-stale"
+	store := NewStore(session)
+	observed, err := store.Assign(beadID, "Old", 1, "codex", "OldAgent", "old work")
+	if err != nil {
+		t.Fatalf("Assign old generation: %v", err)
+	}
+	winner, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("LoadStoreStrict: %v", err)
+	}
+	replacement, err := winner.Assign(beadID, "Winner", 2, "codex", "WinnerAgent", "winner work")
+	if err != nil {
+		t.Fatalf("Assign winner: %v", err)
+	}
+
+	barrier, applied, err := store.BeginTerminalReconciliationIfCurrent(t.Context(), observed, StatusCompleted, "")
+	if err != nil || applied || barrier != nil {
+		t.Fatalf("stale begin barrier=%+v applied=%v error=%v", barrier, applied, err)
+	}
+	current := mustLoadAssignment(t, session, beadID)
+	if current == nil || current.IdempotencyKey != replacement.IdempotencyKey || current.Status != StatusAssigned ||
+		current.ClearState != ClearStateNone || current.PendingTerminalStatus != "" {
+		t.Fatalf("stale begin mutated winner: %+v", current)
+	}
+}
+
+func TestBeginTerminalReconciliationConcurrentDifferentReasonsHasOneWinner(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "terminal-reconciliation-reason-race"
+	const beadID = "ntm-terminal-reconciliation-reason-race"
+	seed := NewStore(session)
+	if _, err := seed.Assign(beadID, "Reason race", 1, "codex", "CodexOne", "work"); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+
+	type attempt struct {
+		reason  string
+		barrier *Assignment
+		applied bool
+		err     error
+	}
+	stores := make([]*AssignmentStore, 2)
+	observed := make([]*Assignment, 2)
+	for i := range stores {
+		var err error
+		stores[i], err = LoadStoreStrict(session)
+		if err != nil {
+			t.Fatalf("LoadStoreStrict(%d): %v", i, err)
+		}
+		observed[i] = stores[i].Get(beadID)
+	}
+
+	start := make(chan struct{})
+	results := make(chan attempt, 2)
+	var wg sync.WaitGroup
+	for i, reason := range []string{"first detector reason", "second detector reason"} {
+		wg.Add(1)
+		go func(store *AssignmentStore, generation *Assignment, reason string) {
+			defer wg.Done()
+			<-start
+			barrier, applied, err := store.BeginTerminalReconciliationIfCurrent(t.Context(), generation, StatusFailed, reason)
+			results <- attempt{reason: reason, barrier: barrier, applied: applied, err: err}
+		}(stores[i], observed[i], reason)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var winner attempt
+	appliedCount := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("begin reason %q: %v", result.reason, result.err)
+		}
+		if result.applied {
+			appliedCount++
+			winner = result
+		} else if result.barrier != nil {
+			t.Fatalf("losing reason %q returned barrier %+v", result.reason, result.barrier)
+		}
+	}
+	if appliedCount != 1 {
+		t.Fatalf("applied attempts=%d, want exactly one", appliedCount)
+	}
+	current := mustLoadAssignment(t, session, beadID)
+	if current == nil || current.PendingTerminalStatus != StatusFailed || current.PendingTerminalReason != winner.reason ||
+		winner.barrier == nil || winner.barrier.PendingTerminalReason != winner.reason {
+		t.Fatalf("durable winner=%+v attempt=%+v", current, winner)
+	}
+}
+
+func TestAssignmentEventIdentityAndIdleUsePhysicalPaneIDsAcrossWindows(t *testing.T) {
+	completed := &Assignment{
+		BeadID: "ntm-window-zero", Pane: 1, Status: StatusCompleted,
+		OccupancyKey: "%41", DispatchTarget: "%41",
+	}
+	otherWindow := &Assignment{
+		BeadID: "ntm-window-one", Pane: 1, Status: StatusWorking,
+		OccupancyKey: "%42", DispatchTarget: "%42",
+	}
+	store := NewStore("event-physical-pane-identity")
+	store.Assignments[completed.BeadID] = completed
+	store.Assignments[otherWindow.BeadID] = otherWindow
+
+	paneID, err := assignmentEventPaneID(completed)
+	if err != nil || paneID != "%41" {
+		t.Fatalf("assignmentEventPaneID()=%q error=%v", paneID, err)
+	}
+	if !store.shouldEmitAgentIdleLocked(completed, StatusWorking, StatusCompleted) {
+		t.Fatal("same local pane index in a different window suppressed physical-pane idle event")
+	}
+
+	otherWindow.OccupancyKey = "%41"
+	otherWindow.DispatchTarget = "%41"
+	if store.shouldEmitAgentIdleLocked(completed, StatusWorking, StatusCompleted) {
+		t.Fatal("working assignment on the same physical pane allowed idle event")
+	}
+	if _, err := assignmentEventPaneID(&Assignment{BeadID: "legacy", Pane: 1}); !errors.Is(err, ErrPaneIdentityMigrationRequired) {
+		t.Fatalf("legacy event identity error=%v, want typed migration error", err)
 	}
 }
 
@@ -1265,6 +2349,134 @@ func mustLoadAssignment(t *testing.T, session, beadID string) *Assignment {
 		t.Fatalf("LoadStoreStrict(%s): %v", session, err)
 	}
 	return store.Get(beadID)
+}
+
+func TestGuardedLifecycleTransitionsApplyOnlyToObservedGeneration(t *testing.T) {
+	t.Run("working then completed", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		store := NewStore("guarded-lifecycle-success")
+		observed, err := store.Assign("ntm-guarded-success", "Guarded", 1, "codex", "CodexOne", "work")
+		if err != nil {
+			t.Fatalf("Assign: %v", err)
+		}
+		applied, err := store.MarkWorkingIfCurrent(t.Context(), observed)
+		if err != nil || !applied {
+			t.Fatalf("MarkWorkingIfCurrent applied=%v error=%v", applied, err)
+		}
+		working := store.Get(observed.BeadID)
+		if working == nil || working.Status != StatusWorking || working.StartedAt == nil {
+			t.Fatalf("working assignment=%+v", working)
+		}
+		applied, err = store.MarkCompletedIfCurrent(t.Context(), observed)
+		if err != nil || !applied {
+			t.Fatalf("MarkCompletedIfCurrent applied=%v error=%v", applied, err)
+		}
+		completed := store.Get(observed.BeadID)
+		if completed == nil || completed.Status != StatusCompleted || completed.CompletedAt == nil {
+			t.Fatalf("completed assignment=%+v", completed)
+		}
+	})
+
+	t.Run("failed with reason", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		store := NewStore("guarded-lifecycle-failed")
+		observed, err := store.Assign("ntm-guarded-failed", "Guarded", 1, "codex", "CodexOne", "work")
+		if err != nil {
+			t.Fatalf("Assign: %v", err)
+		}
+		applied, err := store.MarkFailedIfCurrent(t.Context(), observed, "agent stopped")
+		if err != nil || !applied {
+			t.Fatalf("MarkFailedIfCurrent applied=%v error=%v", applied, err)
+		}
+		failed := store.Get(observed.BeadID)
+		if failed == nil || failed.Status != StatusFailed || failed.FailedAt == nil || failed.FailReason != "agent stopped" || failed.FailureReason != "" {
+			t.Fatalf("failed assignment=%+v", failed)
+		}
+	})
+}
+
+func TestGuardedLifecycleTransitionsRejectSupersededAtomicGeneration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "guarded-lifecycle-superseded"
+	const beadID = "ntm-guarded-superseded"
+	now := time.Now().UTC()
+	store := NewStore(session)
+	store.Assignments[beadID] = &Assignment{
+		BeadID: beadID, BeadTitle: "Old", Pane: 1, AgentType: "codex", AgentName: "OldAgent",
+		Status: StatusAssigned, AssignedAt: now, IdempotencyKey: "old-generation",
+		DispatchState: DispatchSent, DispatchReceiptID: "old-receipt", DispatchTarget: "%71", OccupancyKey: "%71",
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed old generation: %v", err)
+	}
+	observed := store.Get(beadID)
+	winner, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load winner: %v", err)
+	}
+	winner.mutex.Lock()
+	winner.Assignments[beadID] = &Assignment{
+		BeadID: beadID, BeadTitle: "New", Pane: 2, AgentType: "codex", AgentName: "NewAgent",
+		Status: StatusAssigned, AssignedAt: now.Add(time.Minute), IdempotencyKey: "new-generation",
+		DispatchState: DispatchSent, DispatchReceiptID: "new-receipt", DispatchTarget: "%72", OccupancyKey: "%72",
+	}
+	winner.replace[beadID] = struct{}{}
+	winner.mutex.Unlock()
+	if err := winner.Save(); err != nil {
+		t.Fatalf("persist winner: %v", err)
+	}
+
+	for name, transition := range map[string]func() (bool, error){
+		"working":   func() (bool, error) { return store.MarkWorkingIfCurrent(t.Context(), observed) },
+		"completed": func() (bool, error) { return store.MarkCompletedIfCurrent(t.Context(), observed) },
+		"failed":    func() (bool, error) { return store.MarkFailedIfCurrent(t.Context(), observed, "stale") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			applied, err := transition()
+			if err != nil || applied {
+				t.Fatalf("stale transition applied=%v error=%v", applied, err)
+			}
+			stored := mustLoadAssignment(t, session, beadID)
+			if stored == nil || stored.IdempotencyKey != "new-generation" || stored.Status != StatusAssigned || stored.DispatchReceiptID != "new-receipt" {
+				t.Fatalf("stale transition mutated winner: %+v", stored)
+			}
+		})
+	}
+}
+
+func TestGuardedLifecycleTransitionRejectsClearingGeneration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("guarded-lifecycle-clearing")
+	observed, err := store.Assign("ntm-guarded-clearing", "Guarded", 1, "codex", "CodexOne", "work")
+	if err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	if _, err := store.BeginClearIfStatus(t.Context(), observed.BeadID, time.Now().UTC(), StatusAssigned); err != nil {
+		t.Fatalf("BeginClearIfStatus: %v", err)
+	}
+	applied, err := store.MarkCompletedIfCurrent(t.Context(), observed)
+	if err != nil || applied {
+		t.Fatalf("clearing transition applied=%v error=%v", applied, err)
+	}
+	stored := store.Get(observed.BeadID)
+	if stored == nil || stored.Status != StatusAssigned || stored.ClearState != ClearStateReservationReleasing || stored.CompletedAt != nil {
+		t.Fatalf("completion crossed clear barrier: %+v", stored)
+	}
+}
+
+func TestGuardedLifecycleTransitionRequiresObservedGeneration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("guarded-lifecycle-required-observation")
+	for name, observed := range map[string]*Assignment{
+		"nil":        nil,
+		"missing id": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if applied, err := store.MarkCompletedIfCurrent(t.Context(), observed); err == nil || applied {
+				t.Fatalf("MarkCompletedIfCurrent applied=%v error=%v, want validation error", applied, err)
+			}
+		})
+	}
 }
 
 func TestLoadNormalizesLegacyFailureReason(t *testing.T) {

@@ -8,6 +8,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -363,6 +364,33 @@ func TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess(t *testing.T) {
 			}
 			if _, err := time.Parse(time.RFC3339Nano, result.Timestamp); err != nil {
 				t.Fatalf("bulk strategy timestamp %q is not RFC3339: %v", result.Timestamp, err)
+			}
+		})
+	}
+}
+
+func TestE2ERobotBulkAssignInvalidInputsAreSingleFailureDocuments(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "invalid strategy", args: []string{"--from-bv", "--strategy=fastest", "--dry-run"}},
+		{name: "empty allocation", args: []string{"--allocation={}", "--dry-run"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRobotProcessFixture(t, "bulk-invalid")
+			args := []string{"--robot-bulk-assign=" + fixture.session, "--robot-format=json"}
+			args = append(args, test.args...)
+			process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env, args...)
+			if process.exitCode != 1 || len(bytes.TrimSpace(process.stderr)) != 0 {
+				t.Fatalf("exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+			}
+			var result BulkAssignOutput
+			decodeSingleRobotJSON(t, process.stdout, &result)
+			if result.Success || result.ErrorCode != "INVALID_FLAG" || result.Assignments == nil {
+				t.Fatalf("failure envelope = %+v", result)
 			}
 		})
 	}

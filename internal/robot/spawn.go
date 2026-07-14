@@ -35,34 +35,49 @@ var promptPatterns = []*regexp.Regexp{
 // SpawnOptions configures the robot-spawn operation.
 type SpawnOptions struct {
 	Session            string
-	Label              string   // Session label — constructs "{Session}--{Label}" if set
-	CCCount            int      // Claude agents
-	CodCount           int      // Codex agents
-	GmiCount           int      // Gemini agents
-	AgyCount           int      // Antigravity agents
-	Preset             string   // Recipe/preset name
-	NoUserPane         bool     // Don't create user pane
-	WorkingDir         string   // Override working directory
-	WaitReady          bool     // Wait for agents to be ready
-	ReadyTimeout       int      // Timeout in seconds for ready detection
-	DryRun             bool     // Preview mode: show what would happen without executing
-	Safety             bool     // Fail if session already exists
-	AssignWork         bool     // Enable orchestrator work assignment mode
-	AssignStrategy     string   // Assignment strategy: top-n, diverse, dependency-aware, skill-matched
-	CustomNames        []string // Custom agent names (used in order, then NATO alphabet)
+	Label              string        // Session label — constructs "{Session}--{Label}" if set
+	CCCount            int           // Claude agents
+	CodCount           int           // Codex agents
+	GmiCount           int           // Gemini agents
+	AgyCount           int           // Antigravity agents
+	Preset             string        // Recipe/preset name
+	NoUserPane         bool          // Don't create user pane
+	WorkingDir         string        // Override working directory
+	WaitReady          bool          // Wait for agents to be ready
+	ReadyTimeout       time.Duration // Timeout for ready detection
+	DryRun             bool          // Preview mode: show what would happen without executing
+	Safety             bool          // Fail if session already exists
+	AssignWork         bool          // Enable orchestrator work assignment mode
+	AssignStrategy     string        // Assignment strategy: top-n, diverse, dependency-aware, skill-matched
+	CustomNames        []string      // Custom agent names (used in order, then NATO alphabet)
 	RequireReservation bool
 	ReservationPaths   []string
 	AssignmentDeps     *SpawnAssignmentDependencies
+	LifecycleDeps      *SpawnLifecycleDependencies
+}
+
+// SpawnLifecycleDependencies exposes tmux lifecycle ports for deterministic
+// terminal-contract tests. Production callers leave this nil.
+type SpawnLifecycleDependencies struct {
+	IsTMUXInstalled  func() bool
+	GetAllPanes      func(context.Context) (map[string][]tmux.Pane, error)
+	SessionExists    func(context.Context, string) (bool, error)
+	CreateSession    func(context.Context, string, string, int) error
+	GetPanes         func(context.Context, string) ([]tmux.Pane, error)
+	SplitWindow      func(context.Context, string, string) (string, error)
+	ApplyTiledLayout func(context.Context, string) error
+	LaunchAgent      func(context.Context, tmux.Pane, string, string, int, string, string) (SpawnedAgent, error)
+	WaitForReady     func(context.Context, *SpawnOutput, time.Duration) error
 }
 
 // SpawnAssignmentDependencies exposes assignment side-effect ports for focused
 // tests while production uses the durable Beads, ledger, and dispatch services.
 type SpawnAssignmentDependencies struct {
-	FetchTriage       func(dir string) (*bv.TriageResponse, error)
-	ListPanes         func(session string) ([]tmux.Pane, error)
+	FetchTriage       func(context.Context, string) (*bv.TriageResponse, error)
+	ListPanes         func(context.Context, string) ([]tmux.Pane, error)
 	LoadStore         func(session string) (*assignment.AssignmentStore, error)
 	ClaimBead         func(context.Context, string, string, string) (bv.BeadClaimResult, error)
-	GetBeadStatus     func(string, string) (string, error)
+	GetBeadStatus     func(context.Context, string, string) (string, error)
 	NewIdempotencyKey func() (string, error)
 	ReservationPort   assignment.ReservationPort
 	ResolveAgentName  func(context.Context, string, string, string, string) (string, error)
@@ -89,6 +104,108 @@ type SpawnOutput struct {
 	AssignStrategy string                   `json:"assign_strategy,omitempty"` // Strategy used for assignments
 	Recovery       *SpawnRecovery           `json:"recovery,omitempty"`        // Session recovery context from handoff
 	Admission      *pressure.SpawnAdmission `json:"admission,omitempty"`       // Pre-spawn resource-pressure admission result
+}
+
+func setSpawnCancellation(output *SpawnOutput, err error) {
+	if output == nil || err == nil {
+		return
+	}
+	output.Error = err.Error()
+	output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry the command after cancellation")
+}
+
+func spawnCancellationError(ctx context.Context, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
+}
+
+func newSpawnOutput(startTime time.Time, opts SpawnOptions) *SpawnOutput {
+	return &SpawnOutput{
+		RobotResponse: NewRobotResponse(true),
+		Session:       opts.Session,
+		CreatedAt:     startTime.UTC().Format(time.RFC3339),
+		PresetUsed:    opts.Preset,
+		Agents:        []SpawnedAgent{},
+		Layout:        "tiled",
+	}
+}
+
+func validateSpawnRequest(opts SpawnOptions) (string, error) {
+	counts := []struct {
+		flag  string
+		value int
+	}{
+		{flag: "--spawn-cc", value: opts.CCCount},
+		{flag: "--spawn-cod", value: opts.CodCount},
+		{flag: "--spawn-gmi", value: opts.GmiCount},
+		{flag: "--spawn-agy", value: opts.AgyCount},
+	}
+	for _, count := range counts {
+		if count.value < 0 {
+			return "", fmt.Errorf("%s must be zero or greater, got %d", count.flag, count.value)
+		}
+	}
+	if opts.CCCount+opts.CodCount+opts.GmiCount+opts.AgyCount <= 0 {
+		return "", errors.New("no agents specified (use cc, cod, gmi, or agy counts)")
+	}
+	if !opts.AssignWork {
+		return "", nil
+	}
+	strategy, err := normalizeAssignStrategyStrict(opts.AssignStrategy)
+	if err != nil {
+		return "", err
+	}
+	return strategy, nil
+}
+
+func spawnLifecycleDeps(custom *SpawnLifecycleDependencies) SpawnLifecycleDependencies {
+	deps := SpawnLifecycleDependencies{
+		IsTMUXInstalled:  tmux.IsInstalled,
+		GetAllPanes:      tmux.GetAllPanesContext,
+		SessionExists:    tmux.SessionExistsContext,
+		CreateSession:    tmux.CreateSessionWithHistoryLimitContext,
+		GetPanes:         tmux.GetPanesContext,
+		SplitWindow:      tmux.SplitWindowContext,
+		ApplyTiledLayout: tmux.ApplyTiledLayoutContext,
+		LaunchAgent:      launchAgent,
+		WaitForReady:     waitForAgentsReady,
+	}
+	if custom == nil {
+		return deps
+	}
+	if custom.IsTMUXInstalled != nil {
+		deps.IsTMUXInstalled = custom.IsTMUXInstalled
+	}
+	if custom.GetAllPanes != nil {
+		deps.GetAllPanes = custom.GetAllPanes
+	}
+	if custom.SessionExists != nil {
+		deps.SessionExists = custom.SessionExists
+	}
+	if custom.CreateSession != nil {
+		deps.CreateSession = custom.CreateSession
+	}
+	if custom.GetPanes != nil {
+		deps.GetPanes = custom.GetPanes
+	}
+	if custom.SplitWindow != nil {
+		deps.SplitWindow = custom.SplitWindow
+	}
+	if custom.ApplyTiledLayout != nil {
+		deps.ApplyTiledLayout = custom.ApplyTiledLayout
+	}
+	if custom.LaunchAgent != nil {
+		deps.LaunchAgent = custom.LaunchAgent
+	}
+	if custom.WaitForReady != nil {
+		deps.WaitForReady = custom.WaitForReady
+	}
+	return deps
 }
 
 // SpawnRecovery contains session recovery context loaded from handoff.
@@ -131,7 +248,17 @@ type SpawnedAgent struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func collectSpawnAdmissionInput(opts SpawnOptions, cfg *config.Config, totalAgents, totalPanes int) pressure.SpawnAdmissionInput {
+func collectSpawnAdmissionInput(ctx context.Context, opts SpawnOptions, cfg *config.Config, totalAgents, totalPanes int) pressure.SpawnAdmissionInput {
+	return collectSpawnAdmissionInputWithPanes(ctx, opts, cfg, totalAgents, totalPanes, tmux.GetAllPanesContext)
+}
+
+func collectSpawnAdmissionInputWithPanes(
+	ctx context.Context,
+	opts SpawnOptions,
+	cfg *config.Config,
+	totalAgents, totalPanes int,
+	getAllPanes func(context.Context) (map[string][]tmux.Pane, error),
+) pressure.SpawnAdmissionInput {
 	input := pressure.SpawnAdmissionInput{
 		Session:         opts.Session,
 		RequestedAgents: totalAgents,
@@ -146,10 +273,10 @@ func collectSpawnAdmissionInput(opts SpawnOptions, cfg *config.Config, totalAgen
 			}
 			input.MaxAgents = spawnAdmissionAgentLimit(cfg)
 		}
-		input.Pressure = collectSystemPressureSnapshot()
+		input.Pressure = collectSystemPressureSnapshot(ctx)
 	}
 
-	panesBySession, err := tmux.GetAllPanes()
+	panesBySession, err := getAllPanes(ctx)
 	if err != nil {
 		return input
 	}
@@ -182,14 +309,14 @@ func spawnAdmissionAgentLimit(cfg *config.Config) int {
 	return total
 }
 
-func collectSystemPressureSnapshot() pressure.Snapshot {
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+func collectSystemPressureSnapshot(ctx context.Context) pressure.Snapshot {
+	pressureCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
 	g := pressure.New(pressure.Config{
 		Mode:      pressure.ModeEnforce,
 		Providers: []pressure.Provider{pressure.NewSystemProvider()},
 	})
-	return g.Refresh(ctx)
+	return g.Refresh(pressureCtx)
 }
 
 func isSpawnAdmissionAgentPane(pane tmux.Pane) bool {
@@ -199,8 +326,12 @@ func isSpawnAdmissionAgentPane(pane tmux.Pane) bool {
 
 // GetSpawn creates a session with agents and returns structured output.
 // This function returns the data struct directly, enabling CLI/REST parity.
-func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
+func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
+	if ctx == nil {
+		return nil, errors.New("robot spawn context is required")
+	}
 	startTime := time.Now()
+	output := newSpawnOutput(startTime, opts)
 	correlationID := audit.NewCorrelationID()
 	auditStart := time.Now()
 	auditWorkingDir := ""
@@ -209,34 +340,33 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 
 	// Validate project name unconditionally: "--" is reserved for labels.
 	if err := config.ValidateProjectName(opts.Session); err != nil {
-		errOutput := &SpawnOutput{
-			RobotResponse: NewErrorResponse(err, ErrCodeInvalidFlag, "Project names cannot contain '--' (reserved as label separator)"),
-			Session:       opts.Session,
-			Error:         err.Error(),
-		}
-		return errOutput, nil
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInvalidFlag, "Project names cannot contain '--' (reserved as label separator)")
+		output.Error = err.Error()
+		return output, nil
 	}
 
 	// Apply goal label to session name (bd-1933u)
 	if opts.Label != "" {
 		if err := config.ValidateLabel(opts.Label); err != nil {
-			errOutput := &SpawnOutput{
-				RobotResponse: NewErrorResponse(fmt.Errorf("invalid label: %w", err), ErrCodeInvalidFlag, "Use a valid label (alphanumeric, dash, underscore)"),
-				Session:       opts.Session,
-				Error:         fmt.Sprintf("invalid label: %v", err),
-			}
-			return errOutput, nil
+			labelErr := fmt.Errorf("invalid label: %w", err)
+			output.RobotResponse = NewErrorResponse(labelErr, ErrCodeInvalidFlag, "Use a valid label (alphanumeric, dash, underscore)")
+			output.Error = labelErr.Error()
+			return output, nil
 		}
 		opts.Session = config.FormatSessionName(opts.Session, opts.Label)
+		output.Session = opts.Session
 	}
 
-	output := &SpawnOutput{
-		RobotResponse: NewRobotResponse(true),
-		Session:       opts.Session,
-		CreatedAt:     startTime.UTC().Format(time.RFC3339),
-		PresetUsed:    opts.Preset,
-		Agents:        []SpawnedAgent{},
-		Layout:        "tiled",
+	assignStrategy, validationErr := validateSpawnRequest(opts)
+	if validationErr != nil {
+		output.Error = validationErr.Error()
+		output.RobotResponse = NewErrorResponse(validationErr, ErrCodeInvalidFlag, "Use non-negative agent counts and a supported assignment strategy")
+		return output, nil
+	}
+	deps := spawnLifecycleDeps(opts.LifecycleDeps)
+	if err := ctx.Err(); err != nil {
+		setSpawnCancellation(output, err)
+		return output, nil
 	}
 	_ = audit.LogEvent(opts.Session, audit.EventTypeSpawn, audit.ActorSystem, "robot.spawn", map[string]interface{}{
 		"phase":           "start",
@@ -288,17 +418,29 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	}
 
 	// Check tmux availability
-	if !tmux.IsInstalled() {
+	if !deps.IsTMUXInstalled() {
 		output.Error = "tmux is not installed"
 		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeDependencyMissing, "Install tmux to spawn sessions")
 		return output, nil
 	}
 
 	// Safety check: fail if session already exists (when --spawn-safety is enabled)
-	if opts.Safety && tmux.SessionExists(opts.Session) {
-		output.Error = fmt.Sprintf("session '%s' already exists (--spawn-safety mode prevents reuse; use 'ntm kill %s' first)", opts.Session, opts.Session)
-		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeInvalidFlag, "Choose a new session name or disable --spawn-safety")
-		return output, nil
+	if opts.Safety {
+		exists, err := deps.SessionExists(ctx, opts.Session)
+		if err != nil {
+			if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+				setSpawnCancellation(output, cancelErr)
+			} else {
+				output.Error = fmt.Sprintf("checking session: %v", err)
+				output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux availability")
+			}
+			return output, nil
+		}
+		if exists {
+			output.Error = fmt.Sprintf("session '%s' already exists (--spawn-safety mode prevents reuse; use 'ntm kill %s' first)", opts.Session, opts.Session)
+			output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeInvalidFlag, "Choose a new session name or disable --spawn-safety")
+			return output, nil
+		}
 	}
 
 	// Get working directory
@@ -327,11 +469,6 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	_ = handoffCtx // silence unused warning when not in orchestrator mode
 
 	totalAgents := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount
-	if totalAgents == 0 {
-		output.Error = "no agents specified (use cc, cod, gmi, or agy counts)"
-		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeInvalidFlag, "Specify at least one agent count")
-		return output, nil
-	}
 
 	// Calculate total panes needed
 	totalPanes := totalAgents
@@ -339,8 +476,25 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 		totalPanes++
 	}
 
-	admission := pressure.EvaluateSpawnAdmission(collectSpawnAdmissionInput(opts, cfg, totalAgents, totalPanes))
+	var admissionTopologyErr error
+	admissionInput := collectSpawnAdmissionInputWithPanes(
+		ctx, opts, cfg, totalAgents, totalPanes,
+		func(callCtx context.Context) (map[string][]tmux.Pane, error) {
+			panesBySession, err := deps.GetAllPanes(callCtx)
+			admissionTopologyErr = err
+			return panesBySession, err
+		},
+	)
+	if cancelErr := spawnCancellationError(ctx, admissionTopologyErr); cancelErr != nil {
+		setSpawnCancellation(output, cancelErr)
+		return output, nil
+	}
+	admission := pressure.EvaluateSpawnAdmission(admissionInput)
 	output.Admission = &admission
+	if err := ctx.Err(); err != nil {
+		setSpawnCancellation(output, err)
+		return output, nil
+	}
 	if !opts.DryRun && admission.Decision != pressure.SpawnAdmissionAdmit {
 		output.Error = fmt.Sprintf("spawn admission %s: %s", admission.Decision, admission.Reason)
 		hint := admission.Hint
@@ -425,6 +579,10 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 		output.Layout = "tiled"
 		return output, nil
 	}
+	if err := ctx.Err(); err != nil {
+		setSpawnCancellation(output, err)
+		return output, nil
+	}
 
 	// Ensure directory exists (only for real spawns, not dry-run)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -435,14 +593,32 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 
 	// Create session if it doesn't exist
 	sessionCreated := false
-	if !tmux.SessionExists(opts.Session) {
+	sessionExists, sessionErr := deps.SessionExists(ctx, opts.Session)
+	if sessionErr != nil {
+		if cancelErr := spawnCancellationError(ctx, sessionErr); cancelErr != nil {
+			setSpawnCancellation(output, cancelErr)
+		} else {
+			output.Error = fmt.Sprintf("checking session: %v", sessionErr)
+			output.RobotResponse = NewErrorResponse(sessionErr, ErrCodeInternalError, "Check tmux availability")
+		}
+		return output, nil
+	}
+	if !sessionExists {
+		if err := ctx.Err(); err != nil {
+			setSpawnCancellation(output, err)
+			return output, nil
+		}
 		historyLimit := tmux.DefaultHistoryLimit
 		if cfg != nil && cfg.Tmux.HistoryLimit > 0 {
 			historyLimit = cfg.Tmux.HistoryLimit
 		}
-		if err := tmux.CreateSessionWithHistoryLimit(opts.Session, dir, historyLimit); err != nil {
-			output.Error = fmt.Sprintf("creating session: %v", err)
-			output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux availability and session name")
+		if err := deps.CreateSession(ctx, opts.Session, dir, historyLimit); err != nil {
+			if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+				setSpawnCancellation(output, cancelErr)
+			} else {
+				output.Error = fmt.Sprintf("creating session: %v", err)
+				output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux availability and session name")
+			}
 			return output, nil
 		}
 		sessionCreated = true
@@ -450,10 +626,14 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	}
 
 	// Get current panes
-	panes, err := tmux.GetPanes(opts.Session)
+	panes, err := deps.GetPanes(ctx, opts.Session)
 	if err != nil {
-		output.Error = fmt.Sprintf("getting panes: %v", err)
-		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux session state")
+		if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+			setSpawnCancellation(output, cancelErr)
+		} else {
+			output.Error = fmt.Sprintf("getting panes: %v", err)
+			output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux session state")
+		}
 		return output, nil
 	}
 
@@ -463,24 +643,56 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 		toAdd := totalPanes - existingPanes
 		auditPanesAdded = toAdd
 		for i := 0; i < toAdd; i++ {
-			if _, err := tmux.SplitWindow(opts.Session, dir); err != nil {
-				output.Error = fmt.Sprintf("creating pane: %v", err)
-				output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux pane layout constraints")
+			if err := ctx.Err(); err != nil {
+				setSpawnCancellation(output, err)
+				return output, nil
+			}
+			if _, err := deps.SplitWindow(ctx, opts.Session, dir); err != nil {
+				if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+					setSpawnCancellation(output, cancelErr)
+				} else {
+					output.Error = fmt.Sprintf("creating pane: %v", err)
+					output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux pane layout constraints")
+				}
 				return output, nil
 			}
 		}
 	}
 
 	// Get updated pane list
-	panes, err = tmux.GetPanes(opts.Session)
+	panes, err = deps.GetPanes(ctx, opts.Session)
 	if err != nil {
-		output.Error = fmt.Sprintf("getting panes: %v", err)
-		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux session state")
+		if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+			setSpawnCancellation(output, cancelErr)
+		} else {
+			output.Error = fmt.Sprintf("getting panes: %v", err)
+			output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux session state")
+		}
+		return output, nil
+	}
+	if len(panes) < totalPanes {
+		output.Error = fmt.Sprintf(
+			"spawn topology has %d pane(s), but %d are required for %d agent(s)",
+			len(panes), totalPanes, totalAgents,
+		)
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("%s", output.Error),
+			ErrCodePaneNotFound,
+			"Inspect tmux pane creation and retry the spawn",
+		)
 		return output, nil
 	}
 
 	// Apply tiled layout
-	_ = tmux.ApplyTiledLayout(opts.Session)
+	if err := deps.ApplyTiledLayout(ctx, opts.Session); err != nil {
+		if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+			setSpawnCancellation(output, cancelErr)
+		} else {
+			output.Error = fmt.Sprintf("applying tiled layout: %v", err)
+			output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Inspect tmux layout support and retry")
+		}
+		return output, nil
+	}
 
 	// Initialize agent name map
 	var nameMap *AgentNameMap
@@ -496,7 +708,7 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 		startIdx = 1
 		// Add user pane info
 		if len(panes) > 0 {
-			userPaneRef := fmt.Sprintf("0.%d", panes[0].Index)
+			userPaneRef := panes[0].Ref().Physical()
 			userName := nameMap.AssignNew("user", userPaneRef)
 			output.Agents = append(output.Agents, SpawnedAgent{
 				Pane:      userPaneRef,
@@ -509,57 +721,109 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 		}
 	}
 
-	agentNum := startIdx
 	agentCommands := getAgentCommands(cfg)
-
-	// Launch Claude agents
-	for i := 0; i < opts.CCCount && agentNum < len(panes); i++ {
-		agent := launchAgent(panes[agentNum], opts.Session, "claude", i+1, dir, agentCommands["claude"])
-		agent.Name = nameMap.AssignNew("claude", agent.Pane)
-		output.Agents = append(output.Agents, agent)
-		agentNum++
+	type launchRequest struct {
+		agentType string
+		number    int
+	}
+	launchRequests := make([]launchRequest, 0, totalAgents)
+	for _, spec := range []struct {
+		agentType string
+		count     int
+	}{
+		{agentType: "claude", count: opts.CCCount},
+		{agentType: "codex", count: opts.CodCount},
+		{agentType: "gemini", count: opts.GmiCount},
+		{agentType: "antigravity", count: opts.AgyCount},
+	} {
+		for i := 0; i < spec.count; i++ {
+			launchRequests = append(launchRequests, launchRequest{agentType: spec.agentType, number: i + 1})
+		}
 	}
 
-	// Launch Codex agents
-	for i := 0; i < opts.CodCount && agentNum < len(panes); i++ {
-		agent := launchAgent(panes[agentNum], opts.Session, "codex", i+1, dir, agentCommands["codex"])
-		agent.Name = nameMap.AssignNew("codex", agent.Pane)
+	launchErrors := make([]error, 0)
+	for i, request := range launchRequests {
+		if err := ctx.Err(); err != nil {
+			setSpawnCancellation(output, err)
+			return output, nil
+		}
+		pane := panes[startIdx+i]
+		agent, launchErr := deps.LaunchAgent(
+			ctx, pane, opts.Session, request.agentType, request.number, dir, agentCommands[request.agentType],
+		)
+		if agent.Pane == "" {
+			agent.Pane = fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
+		}
+		if agent.Type == "" {
+			agent.Type = request.agentType
+		}
+		if agent.Title == "" {
+			agent.Title = fmt.Sprintf("%s__%s_%d", opts.Session, agentTypeShort(request.agentType), request.number)
+		}
+		agent.Name = nameMap.AssignNew(request.agentType, agent.Pane)
+		if launchErr != nil && agent.Error == "" {
+			agent.Error = launchErr.Error()
+		}
 		output.Agents = append(output.Agents, agent)
-		agentNum++
+		if cancelErr := spawnCancellationError(ctx, launchErr); cancelErr != nil {
+			setSpawnCancellation(output, cancelErr)
+			return output, nil
+		}
+		if launchErr != nil {
+			launchErrors = append(launchErrors, fmt.Errorf("%s agent %d: %w", request.agentType, request.number, launchErr))
+		}
 	}
-
-	// Launch Gemini agents
-	for i := 0; i < opts.GmiCount && agentNum < len(panes); i++ {
-		agent := launchAgent(panes[agentNum], opts.Session, "gemini", i+1, dir, agentCommands["gemini"])
-		agent.Name = nameMap.AssignNew("gemini", agent.Pane)
-		output.Agents = append(output.Agents, agent)
-		agentNum++
-	}
-
-	// Launch Antigravity agents
-	for i := 0; i < opts.AgyCount && agentNum < len(panes); i++ {
-		agent := launchAgent(panes[agentNum], opts.Session, "antigravity", i+1, dir, agentCommands["antigravity"])
-		agent.Name = nameMap.AssignNew("antigravity", agent.Pane)
-		output.Agents = append(output.Agents, agent)
-		agentNum++
+	if len(launchErrors) > 0 {
+		launchErr := errors.Join(launchErrors...)
+		output.Error = fmt.Sprintf("%d of %d agent launches failed: %v", len(launchErrors), totalAgents, launchErr)
+		output.RobotResponse = NewErrorResponse(
+			launchErr,
+			ErrCodeInternalError,
+			"Inspect agents[].error; successfully launched agents remain listed",
+		)
+		return output, nil
 	}
 
 	// Wait for agents to be ready if requested
 	if opts.WaitReady {
 		timeout := opts.ReadyTimeout
 		if timeout <= 0 {
-			timeout = 30 // default 30 seconds
+			timeout = 30 * time.Second
 		}
-		waitForAgentsReady(output, time.Duration(timeout)*time.Second)
+		if err := deps.WaitForReady(ctx, output, timeout); err != nil {
+			if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+				setSpawnCancellation(output, cancelErr)
+			} else {
+				output.Error = fmt.Sprintf("waiting for agents to become ready: %v", err)
+				output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Inspect agent readiness diagnostics and retry")
+			}
+			return output, nil
+		}
 	}
 
 	// Orchestrator work assignment mode
 	if opts.AssignWork {
 		output.Mode = "orchestrator"
-		output.AssignStrategy = normalizeAssignStrategy(opts.AssignStrategy)
-		assignments := assignWorkToAgents(output, dir, opts.Session, output.AssignStrategy, cfg, opts.RequireReservation, opts.ReservationPaths, opts.AssignmentDeps)
+		output.AssignStrategy = assignStrategy
+		assignments, assignmentErr := assignWorkToAgentsWithError(
+			ctx, output, dir, opts.Session, output.AssignStrategy, cfg,
+			opts.RequireReservation, opts.ReservationPaths, opts.AssignmentDeps,
+		)
 		output.Assignments = assignments
+		ensureSpawnAssignmentCoverage(output)
+		if cancelErr := spawnCancellationError(ctx, assignmentErr); cancelErr != nil {
+			setSpawnCancellation(output, cancelErr)
+			return output, nil
+		}
 		finalizeSpawnAssignmentOutput(output)
+		if err := ctx.Err(); err != nil {
+			setSpawnCancellation(output, err)
+			return output, nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		setSpawnCancellation(output, err)
+		return output, nil
 	}
 
 	output.TotalStartupMs = time.Since(startTime).Milliseconds()
@@ -574,8 +838,8 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 
 // PrintSpawn creates a session with agents and outputs structured JSON.
 // This is a thin wrapper around GetSpawn() for CLI output.
-func PrintSpawn(opts SpawnOptions, cfg *config.Config) error {
-	output, err := GetSpawn(opts, cfg)
+func PrintSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) error {
+	output, err := GetSpawn(ctx, opts, cfg)
 	if err != nil {
 		return err
 	}
@@ -583,7 +847,7 @@ func PrintSpawn(opts SpawnOptions, cfg *config.Config) error {
 }
 
 // launchAgent launches a single agent and returns its info.
-func launchAgent(pane tmux.Pane, session, agentType string, num int, dir, command string) SpawnedAgent {
+func launchAgent(ctx context.Context, pane tmux.Pane, session, agentType string, num int, dir, command string) (SpawnedAgent, error) {
 	startTime := time.Now()
 
 	title := fmt.Sprintf("%s__%s_%d", session, agentTypeShort(agentType), num)
@@ -593,12 +857,16 @@ func launchAgent(pane tmux.Pane, session, agentType string, num int, dir, comman
 		Title: title,
 		Ready: false,
 	}
+	if err := ctx.Err(); err != nil {
+		agent.Error = fmt.Sprintf("launch canceled: %v", err)
+		return agent, fmt.Errorf("launch canceled: %w", err)
+	}
 
 	// Set pane title
-	if err := tmux.SetPaneTitle(pane.ID, title); err != nil {
+	if err := tmux.SetPaneTitleContext(ctx, pane.ID, title); err != nil {
 		agent.Error = fmt.Sprintf("setting title: %v", err)
 		agent.StartupMs = time.Since(startTime).Milliseconds()
-		return agent
+		return agent, fmt.Errorf("setting title: %w", err)
 	}
 
 	// Launch agent command
@@ -606,33 +874,64 @@ func launchAgent(pane tmux.Pane, session, agentType string, num int, dir, comman
 	if err != nil {
 		agent.Error = fmt.Sprintf("invalid command: %v", err)
 		agent.StartupMs = time.Since(startTime).Milliseconds()
-		return agent
+		return agent, fmt.Errorf("invalid command: %w", err)
 	}
 
 	cmd, err := tmux.BuildPaneCommand(dir, safeCommand)
 	if err != nil {
 		agent.Error = fmt.Sprintf("building command: %v", err)
 		agent.StartupMs = time.Since(startTime).Milliseconds()
-		return agent
+		return agent, fmt.Errorf("building command: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		agent.Error = fmt.Sprintf("launch canceled: %v", err)
+		agent.StartupMs = time.Since(startTime).Milliseconds()
+		return agent, fmt.Errorf("launch canceled: %w", err)
 	}
 
-	// Use SendKeysForAgent to handle different submission methods (buffer vs send-keys)
-	if err := tmux.SendKeysForAgent(pane.ID, cmd, true, tmux.AgentType(agentTypeShort(agentType))); err != nil {
+	// Use the agent-aware context path so cancellation covers staging and Enter.
+	if err := tmux.SendKeysForAgentContext(ctx, pane.ID, cmd, true, tmux.AgentType(agentTypeShort(agentType))); err != nil {
 		agent.Error = fmt.Sprintf("launching: %v", err)
 		agent.StartupMs = time.Since(startTime).Milliseconds()
-		return agent
+		return agent, fmt.Errorf("launching: %w", err)
 	}
 
 	agent.StartupMs = time.Since(startTime).Milliseconds()
-	return agent
+	return agent, nil
 }
 
 // waitForAgentsReady polls agents for ready state.
-func waitForAgentsReady(output *SpawnOutput, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
+func waitForAgentsReady(ctx context.Context, output *SpawnOutput, timeout time.Duration) error {
+	return waitForAgentsReadyWithCapture(ctx, output, timeout, tmux.CapturePaneOutputContext)
+}
+
+func waitForAgentsReadyWithCapture(
+	ctx context.Context,
+	output *SpawnOutput,
+	timeout time.Duration,
+	capture func(context.Context, string, int) (string, error),
+) error {
+	if ctx == nil {
+		return errors.New("waiting for agents requires a context")
+	}
+	if output == nil || capture == nil {
+		return errors.New("waiting for agents requires spawn output and capture dependency")
+	}
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	deadline, _ := readyCtx.Deadline()
 	pollInterval := 500 * time.Millisecond
 
-	for time.Now().Before(deadline) {
+	for {
+		if err := readyCtx.Err(); err != nil {
+			if parentErr := ctx.Err(); parentErr != nil {
+				return parentErr
+			}
+			return fmt.Errorf("agents not ready before %s timeout: %w", timeout, err)
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("agents not ready before %s timeout: %w", timeout, context.DeadlineExceeded)
+		}
 		allReady := true
 
 		for i := range output.Agents {
@@ -652,8 +951,17 @@ func waitForAgentsReady(output *SpawnOutput, timeout time.Duration) {
 			target := fmt.Sprintf("%s:%s", output.Session, paneRef)
 
 			// Capture pane output (50 lines to catch Claude's TUI)
-			captured, err := tmux.CapturePaneOutput(target, 50)
+			captured, err := capture(readyCtx, target, 50)
 			if err != nil {
+				if waitErr := readyCtx.Err(); waitErr != nil {
+					if parentErr := ctx.Err(); parentErr != nil {
+						return parentErr
+					}
+					return fmt.Errorf("agents not ready before %s timeout: %w", timeout, waitErr)
+				}
+				if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+					return cancelErr
+				}
 				allReady = false
 				continue
 			}
@@ -667,10 +975,23 @@ func waitForAgentsReady(output *SpawnOutput, timeout time.Duration) {
 		}
 
 		if allReady {
-			return
+			return nil
 		}
 
-		time.Sleep(pollInterval)
+		wait := time.Until(deadline)
+		if wait > pollInterval {
+			wait = pollInterval
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-readyCtx.Done():
+			timer.Stop()
+			if parentErr := ctx.Err(); parentErr != nil {
+				return parentErr
+			}
+			return fmt.Errorf("agents not ready before %s timeout: %w", timeout, readyCtx.Err())
+		case <-timer.C:
+		}
 	}
 }
 
@@ -806,26 +1127,40 @@ func loadLatestHandoff(workDir, sessionName string) (*SpawnRecovery, *recovery.H
 	return spawnRecovery, ctx
 }
 
-// normalizeAssignStrategy validates and normalizes the assignment strategy.
-func normalizeAssignStrategy(strategy string) string {
+func normalizeAssignStrategyStrict(strategy string) (string, error) {
 	s := strings.ToLower(strings.TrimSpace(strategy))
 	switch s {
 	case "top-n", "topn":
-		return "top-n"
+		return "top-n", nil
 	case "diverse":
-		return "diverse"
+		return "diverse", nil
 	case "dependency-aware", "dependency":
-		return "dependency-aware"
+		return "dependency-aware", nil
 	case "skill-matched", "skill":
-		return "skill-matched"
+		return "skill-matched", nil
+	case "":
+		return "", errors.New("assignment strategy is required when --spawn-assign-work is enabled")
 	default:
-		return "top-n" // Default strategy
+		return "", fmt.Errorf("unsupported assignment strategy %q (expected top-n, diverse, dependency-aware, or skill-matched)", strategy)
 	}
 }
 
 // assignWorkToAgents gets triage recommendations, claims beads, and sends work prompts.
-func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies) []SpawnAssignment {
+func assignWorkToAgents(ctx context.Context, output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies) []SpawnAssignment {
+	assignments, _ := assignWorkToAgentsWithError(
+		ctx, output, workDir, session, strategy, cfg, requireReservation, reservationPaths, customDeps,
+	)
+	return assignments
+}
+
+func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies) ([]SpawnAssignment, error) {
 	var assignments []SpawnAssignment
+	if ctx == nil {
+		return []SpawnAssignment{{ClaimError: "spawn assignment context is required"}}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return []SpawnAssignment{{ClaimError: fmt.Sprintf("spawn assignment canceled: %v", err)}}, err
+	}
 	deps := spawnAssignmentDeps(customDeps)
 
 	// Get non-user agents that are ready
@@ -839,27 +1174,35 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, 
 	}
 
 	if len(readyAgents) == 0 {
-		return assignments
+		return assignments, nil
 	}
 
 	// Get triage recommendations from bv
-	triage, err := deps.FetchTriage(workDir)
+	triage, err := deps.FetchTriage(ctx, workDir)
 	if err != nil {
-		return spawnAgentPlanErrors(readyAgents, fmt.Errorf("load bv triage: %w", err))
+		wrapped := fmt.Errorf("load bv triage: %w", err)
+		return spawnAgentPlanErrors(readyAgents, wrapped), spawnCancellationError(ctx, wrapped)
 	}
 	if triage == nil {
-		return spawnAgentPlanErrors(readyAgents, errors.New("load bv triage: empty response"))
+		return spawnAgentPlanErrors(readyAgents, errors.New("load bv triage: empty response")), nil
+	}
+	if err := ctx.Err(); err != nil {
+		return spawnAgentPlanErrors(readyAgents, fmt.Errorf("spawn assignment canceled after triage: %w", err)), err
 	}
 
 	// Get work items based on strategy
 	workItems := getWorkItemsForStrategy(triage, strategy, len(readyAgents))
 	if len(workItems) == 0 {
-		return assignments
+		return assignments, nil
 	}
 
 	store, err := deps.LoadStore(session)
 	if err != nil {
-		return spawnAssignmentPlanErrors(readyAgents, workItems, fmt.Errorf("load assignment ledger: %w", err))
+		wrapped := fmt.Errorf("load assignment ledger: %w", err)
+		return spawnAssignmentPlanErrors(readyAgents, workItems, wrapped), spawnCancellationError(ctx, wrapped)
+	}
+	if err := ctx.Err(); err != nil {
+		return spawnAssignmentPlanErrors(readyAgents, workItems, fmt.Errorf("spawn assignment canceled after ledger load: %w", err)), err
 	}
 	redactionConfig := config.Default().Redaction.ToRedactionLibConfig()
 	if cfg != nil {
@@ -867,17 +1210,35 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, 
 	}
 	dispatchPort := newRobotAtomicPaneDispatchPort(session, deps.ListPanes, deps.ObserveSession, redactionConfig, deps.DispatchDeliverer, deps.DispatchPacer)
 	claimPort := newRobotAtomicClaimPort(workDir, deps.ClaimBead)
-	panes, err := deps.ListPanes(session)
+	panes, err := deps.ListPanes(ctx, session)
 	if err != nil {
-		return spawnAssignmentPlanErrors(readyAgents, workItems, fmt.Errorf("load pane topology: %w", err))
+		wrapped := fmt.Errorf("load pane topology: %w", err)
+		return spawnAssignmentPlanErrors(readyAgents, workItems, wrapped), spawnCancellationError(ctx, wrapped)
+	}
+	if err := ctx.Err(); err != nil {
+		return spawnAssignmentPlanErrors(readyAgents, workItems, fmt.Errorf("spawn assignment canceled after topology load: %w", err)), err
 	}
 	multiWindow := tmux.PanesSpanMultipleWindows(panes)
 	reservationPort := deps.ReservationPort
 	resolveAgentName := deps.ResolveAgentName
+	var terminalErr error
+	stopForTerminalError := func(err error) bool {
+		cancelErr := spawnCancellationError(ctx, err)
+		if cancelErr == nil {
+			return false
+		}
+		terminalErr = cancelErr
+		return true
+	}
 
 	// Assign work to agents
 	for i, agent := range readyAgents {
 		if i >= len(workItems) {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i:], fmt.Errorf("spawn assignment canceled: %w", err))...)
+			terminalErr = err
 			break
 		}
 
@@ -908,11 +1269,22 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, 
 			agentName = replay.AgentName
 			idempotencyKey = replay.IdempotencyKey
 		} else {
-			observation, observeErr := deps.ObserveSession(context.Background(), session)
+			observation, observeErr := deps.ObserveSession(ctx, session)
 			if observeErr != nil {
 				spawnAssignment.ClaimError = fmt.Sprintf("observe pane %s before assignment: %v", spawnAssignment.Pane, observeErr)
 				assignments = append(assignments, spawnAssignment)
+				if stopForTerminalError(observeErr) {
+					assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], observeErr)...)
+					break
+				}
 				continue
+			}
+			if err := ctx.Err(); err != nil {
+				spawnAssignment.ClaimError = fmt.Sprintf("spawn assignment canceled after observation: %v", err)
+				assignments = append(assignments, spawnAssignment)
+				assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], err)...)
+				terminalErr = err
+				break
 			}
 			if !observation.SafeToDispatch(target) {
 				spawnAssignment.ClaimError = fmt.Sprintf("pane %s (%s) is not safe to dispatch", spawnAssignment.Pane, target)
@@ -923,10 +1295,14 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, 
 			agentName = strings.TrimSpace(agent.Name)
 			if requireReservation {
 				if reservationPort == nil {
-					mailRuntime, runtimeErr := newRobotAgentMailReservationRuntime(context.Background(), workDir, session, nil)
+					mailRuntime, runtimeErr := newRobotAgentMailReservationRuntime(ctx, workDir, session, nil)
 					if runtimeErr != nil {
 						spawnAssignment.ClaimError = runtimeErr.Error()
 						assignments = append(assignments, spawnAssignment)
+						if stopForTerminalError(runtimeErr) {
+							assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], runtimeErr)...)
+							break
+						}
 						continue
 					}
 					reservationPort = mailRuntime
@@ -939,11 +1315,22 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, 
 					assignments = append(assignments, spawnAssignment)
 					continue
 				}
-				agentName, resolveErr = resolveAgentName(context.Background(), workDir, session, target, pane.Title)
+				agentName, resolveErr = resolveAgentName(ctx, workDir, session, target, pane.Title)
 				if resolveErr != nil {
 					spawnAssignment.ClaimError = resolveErr.Error()
 					assignments = append(assignments, spawnAssignment)
+					if stopForTerminalError(resolveErr) {
+						assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], resolveErr)...)
+						break
+					}
 					continue
+				}
+				if err := ctx.Err(); err != nil {
+					spawnAssignment.ClaimError = fmt.Sprintf("spawn assignment canceled after reservation identity resolution: %v", err)
+					assignments = append(assignments, spawnAssignment)
+					assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], err)...)
+					terminalErr = err
+					break
 				}
 				agentName = strings.TrimSpace(agentName)
 			}
@@ -960,15 +1347,29 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, 
 			if keyErr != nil {
 				spawnAssignment.ClaimError = keyErr.Error()
 				assignments = append(assignments, spawnAssignment)
+				if stopForTerminalError(keyErr) {
+					assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], keyErr)...)
+					break
+				}
 				continue
 			}
 		}
 		spawnAssignment.IdempotencyKey = idempotencyKey
+		if err := ctx.Err(); err != nil {
+			spawnAssignment.ClaimError = fmt.Sprintf("spawn assignment canceled before atomic claim: %v", err)
+			assignments = append(assignments, spawnAssignment)
+			assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], err)...)
+			terminalErr = err
+			break
+		}
 		coordinator := assignment.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, dispatchPort).
-			WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(_ context.Context, beadID string) (string, error) {
-				return deps.GetBeadStatus(workDir, beadID)
+			WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(statusCtx context.Context, beadID string) (string, error) {
+				if err := statusCtx.Err(); err != nil {
+					return "", err
+				}
+				return deps.GetBeadStatus(statusCtx, workDir, beadID)
 			}))
-		result, executeErr := coordinator.Execute(context.Background(), spawnAtomicRequest(
+		result, executeErr := coordinator.Execute(ctx, spawnAtomicRequest(
 			item, target, pane.Index, agent.Type, agentName, prompt, idempotencyKey, requireReservation, reservationPaths,
 		))
 		if result.Assignment != nil && result.Assignment.IdempotencyKey == idempotencyKey {
@@ -988,9 +1389,18 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, 
 		}
 
 		assignments = append(assignments, spawnAssignment)
+		if stopForTerminalError(executeErr) {
+			assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], executeErr)...)
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], err)...)
+			terminalErr = err
+			break
+		}
 	}
 
-	return assignments
+	return assignments, terminalErr
 }
 
 func spawnAgentPlanErrors(agents []SpawnedAgent, err error) []SpawnAssignment {
@@ -1003,10 +1413,80 @@ func spawnAgentPlanErrors(agents []SpawnedAgent, err error) []SpawnAssignment {
 	return result
 }
 
+func ensureSpawnAssignmentCoverage(output *SpawnOutput) {
+	if output == nil {
+		return
+	}
+	multiWindow := spawnCoverageSpansMultipleWindows(output.Agents)
+	represented := make(map[string]struct{}, len(output.Assignments))
+	for _, spawnAssignment := range output.Assignments {
+		represented[spawnCoveragePaneKey(spawnAssignment.Pane, multiWindow)] = struct{}{}
+	}
+	for _, agent := range output.Agents {
+		if agent.Type == "user" {
+			continue
+		}
+		coverageKey := spawnCoveragePaneKey(agent.Pane, multiWindow)
+		if _, ok := represented[coverageKey]; ok {
+			continue
+		}
+		output.Assignments = append(output.Assignments, SpawnAssignment{
+			Pane:       agent.Pane,
+			AgentType:  agent.Type,
+			ClaimError: "no work assignment was produced for this eligible agent",
+		})
+		represented[coverageKey] = struct{}{}
+	}
+}
+
+func spawnCoverageSpansMultipleWindows(agents []SpawnedAgent) bool {
+	firstWindow := 0
+	haveWindow := false
+	for _, agent := range agents {
+		if agent.Type == "user" {
+			continue
+		}
+		selector, err := tmux.ParsePaneSelector(agent.Pane)
+		if err != nil || selector.Kind != tmux.PaneSelectorWindowPane {
+			continue
+		}
+		if !haveWindow {
+			firstWindow = selector.WindowIndex
+			haveWindow = true
+			continue
+		}
+		if selector.WindowIndex != firstWindow {
+			return true
+		}
+	}
+	return false
+}
+
+func spawnCoveragePaneKey(raw string, multiWindow bool) string {
+	selector, err := tmux.ParsePaneSelector(raw)
+	if err != nil {
+		return strings.TrimSpace(raw)
+	}
+	switch selector.Kind {
+	case tmux.PaneSelectorWindowPane:
+		if multiWindow {
+			return fmt.Sprintf("%d.%d", selector.WindowIndex, selector.PaneIndex)
+		}
+		return fmt.Sprint(selector.PaneIndex)
+	case tmux.PaneSelectorPaneIndex:
+		return fmt.Sprint(selector.Index)
+	case tmux.PaneSelectorID:
+		return selector.PaneID
+	default:
+		return strings.TrimSpace(raw)
+	}
+}
+
 func finalizeSpawnAssignmentOutput(output *SpawnOutput) {
 	if output == nil {
 		return
 	}
+	ensureSpawnAssignmentCoverage(output)
 	failed := 0
 	for _, spawnAssignment := range output.Assignments {
 		if spawnAssignment.ClaimError != "" || spawnAssignment.PromptError != "" || !spawnAssignment.Claimed || !spawnAssignment.PromptSent {
@@ -1019,7 +1499,7 @@ func finalizeSpawnAssignmentOutput(output *SpawnOutput) {
 	output.Error = fmt.Sprintf("%d of %d spawn work assignments failed", failed, len(output.Assignments))
 	output.RobotResponse = NewErrorResponse(
 		fmt.Errorf("%s", output.Error),
-		ErrCodeInternalError,
+		"ASSIGNMENT_FAILED",
 		"Inspect assignments[].claim_error and assignments[].prompt_error; failed targets were not dispatched",
 	)
 }
@@ -1052,11 +1532,11 @@ func spawnAssignmentPlanErrors(agents []SpawnedAgent, items []workItem, err erro
 func spawnAssignmentDeps(custom *SpawnAssignmentDependencies) SpawnAssignmentDependencies {
 	observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
 	deps := SpawnAssignmentDependencies{
-		FetchTriage:       bv.GetTriage,
-		ListPanes:         tmux.GetPanes,
+		FetchTriage:       bv.GetTriageContext,
+		ListPanes:         tmux.GetPanesContext,
 		LoadStore:         assignment.LoadStoreStrict,
-		ClaimBead:         bv.ClaimBead,
-		GetBeadStatus:     bv.GetBeadStatus,
+		ClaimBead:         bv.ClaimBeadForAssignment,
+		GetBeadStatus:     bv.GetBeadStatusContext,
 		NewIdempotencyKey: assignment.NewAssignmentIdempotencyKey,
 		ObserveSession:    observer.Observe,
 		DispatchDeliverer: dispatchsvc.TMUXDeliverer{},

@@ -4,6 +4,7 @@ import "time"
 
 // ErrorResponse is the standard JSON error format
 type ErrorResponse struct {
+	Success bool   `json:"success"`
 	Error   string `json:"error"`
 	Code    string `json:"code,omitempty"`
 	Details string `json:"details,omitempty"`
@@ -65,11 +66,14 @@ type SessionResponse struct {
 
 // PaneResponse is the standard format for pane-related output
 type PaneResponse struct {
-	Index   int    `json:"index"`
-	Title   string `json:"title"`
-	Type    string `json:"type"`              // claude, codex, gemini, user
-	Variant string `json:"variant,omitempty"` // model alias or persona name
-	Persona string `json:"persona,omitempty"` // persona name when spawned via --profile-set/--profiles (ntm#149)
+	PaneID      string `json:"pane_id"`
+	PaneTarget  string `json:"pane_target"`
+	WindowIndex int    `json:"window_index"`
+	Index       int    `json:"index"`
+	Title       string `json:"title"`
+	Type        string `json:"type"`              // claude, codex, gemini, user
+	Variant     string `json:"variant,omitempty"` // model alias or persona name
+	Persona     string `json:"persona,omitempty"` // persona name when spawned via --profile-set/--profiles (ntm#149)
 	// PersonaPromptSource is the prepared system-prompt file path used to seed the
 	// persona's role prompt. Lets orchestrators verify *which* prompt source landed
 	// on each pane after a --profile-set launch, not just the persona's display
@@ -120,7 +124,17 @@ type AgentMailSpawnStatus struct {
 	ProjectRegistered bool              `json:"project_registered"`
 	AgentsRegistered  int               `json:"agents_registered"`
 	AgentsFailed      int               `json:"agents_failed"`
-	AgentMap          map[string]string `json:"agent_map,omitempty"` // pane index -> agent name
+	AgentMap          map[string]string `json:"agent_map,omitempty"` // stable %pane_id -> agent name
+}
+
+// RecoverySpawnStatus reports whether configured session recovery produced
+// prompt content and which optional sources degraded.
+type RecoverySpawnStatus struct {
+	Enabled   bool     `json:"enabled"`
+	Applied   bool     `json:"applied"`
+	Partial   bool     `json:"partial"`
+	ErrorCode string   `json:"error_code,omitempty"`
+	Warnings  []string `json:"warnings"`
 }
 
 // SpawnResponse is the output format for spawn command (with agents)
@@ -133,6 +147,7 @@ type SpawnResponse struct {
 	AgentCounts      AgentCountsResponse   `json:"agent_counts"`
 	Stagger          *StaggerConfig        `json:"stagger,omitempty"`
 	AgentMail        *AgentMailSpawnStatus `json:"agent_mail,omitempty"`
+	Recovery         *RecoverySpawnStatus  `json:"recovery,omitempty"`
 	// ProfileSet is the --profile-set name when the session was spawned from a
 	// persona set. Combined with each pane's `persona` field this gives an
 	// orchestrator a deterministic persona→pane mapping (ntm#149).

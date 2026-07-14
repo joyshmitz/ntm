@@ -66,6 +66,19 @@ func createAssignmentWithStatus(t *testing.T, store *assignment.AssignmentStore,
 	}
 }
 
+func setAssignmentCanonicalPaneIdentity(t *testing.T, store *assignment.AssignmentStore, beadID, paneID string) {
+	t.Helper()
+	current := store.Assignments[beadID]
+	if current == nil {
+		t.Fatalf("assignment %s does not exist", beadID)
+	}
+	current.DispatchTarget = paneID
+	current.OccupancyKey = paneID
+	if err := store.Save(); err != nil {
+		t.Fatalf("persist canonical pane identity for %s: %v", beadID, err)
+	}
+}
+
 func TestClearSingleAssignment_RemovesAssignment(t *testing.T) {
 	store := setupClearTestStore(t)
 
@@ -98,22 +111,31 @@ func TestClearMultipleAssignments_RemovesOnlyTargets(t *testing.T) {
 	}
 }
 
-func TestClearByPane_RemovesOnlyPaneAssignments(t *testing.T) {
+func TestClearByCanonicalPaneIdentityIgnoresDuplicateLocalIndexes(t *testing.T) {
 	store := setupClearTestStore(t)
 
-	createAssignmentWithStatus(t, store, "bd-1", 1, assignment.StatusAssigned)
+	createAssignmentWithStatus(t, store, "bd-1", 3, assignment.StatusAssigned)
 	createAssignmentWithStatus(t, store, "bd-2", 3, assignment.StatusAssigned)
 	createAssignmentWithStatus(t, store, "bd-3", 3, assignment.StatusWorking)
+	setAssignmentCanonicalPaneIdentity(t, store, "bd-1", "%31")
+	setAssignmentCanonicalPaneIdentity(t, store, "bd-2", "%32")
+	setAssignmentCanonicalPaneIdentity(t, store, "bd-3", "%32")
 
-	for _, a := range store.ListByPane(3) {
-		store.Remove(a.BeadID)
+	for _, a := range store.List() {
+		paneID, err := assignment.CanonicalPaneIdentity(a)
+		if err != nil {
+			t.Fatalf("resolve assignment %s identity: %v", a.BeadID, err)
+		}
+		if paneID == "%32" {
+			store.Remove(a.BeadID)
+		}
 	}
 
 	if store.Get("bd-1") == nil {
-		t.Fatal("expected assignment on other pane to remain")
+		t.Fatal("expected assignment on physical pane %31 to remain")
 	}
 	if store.Get("bd-2") != nil || store.Get("bd-3") != nil {
-		t.Fatal("expected pane assignments to be cleared")
+		t.Fatal("expected physical pane %32 assignments to be cleared")
 	}
 }
 

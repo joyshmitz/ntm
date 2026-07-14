@@ -96,7 +96,7 @@ func runSessionTemplatesList() error {
 	tmpls, err := loader.List()
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(sessionTemplateErrorResponse(err, ""))
+			return emitJSONFailureEnvelopeWithCause(sessionTemplateErrorResponse(err, ""), err)
 		}
 		return err
 	}
@@ -191,13 +191,13 @@ func runSessionTemplatesShow(name string) error {
 	tmpl, err := loader.Load(name)
 	if err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(sessionTemplateErrorResponse(err, name))
+			return emitJSONFailureEnvelopeWithCause(sessionTemplateErrorResponse(err, name), err)
 		}
 		return err
 	}
 	if err := tmpl.Validate(); err != nil {
 		if jsonOutput {
-			return json.NewEncoder(os.Stdout).Encode(sessionTemplateErrorResponse(err, name))
+			return emitJSONFailureEnvelopeWithCause(sessionTemplateErrorResponse(err, name), err)
 		}
 		return err
 	}
@@ -357,7 +357,8 @@ func runSessionTemplatesShow(name string) error {
 
 func sessionTemplateErrorResponse(err error, name string) map[string]interface{} {
 	resp := map[string]interface{}{
-		"error": err.Error(),
+		"success": false,
+		"error":   err.Error(),
 	}
 	if suggestions := sessionTemplateSuggestions(err, name); len(suggestions) > 0 {
 		resp["suggestions"] = suggestions
