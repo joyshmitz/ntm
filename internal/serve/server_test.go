@@ -35,7 +35,16 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
 
-var errServeTestAgentSpawnDisabled = errors.New("agent spawning disabled in serve unit tests")
+var (
+	errServeTestAgentSpawnDisabled = errors.New("agent spawning disabled in serve unit tests")
+	errServeTestAgentMailDisabled  = errors.New("agent mail disabled in serve unit tests")
+)
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func skipServeRealToolsInShort(t *testing.T, tools ...string) {
 	t.Helper()
@@ -76,6 +85,15 @@ func setupTestServer(t *testing.T) (*Server, *state.Store) {
 		EventBus:   eventBus,
 		StateStore: store,
 	})
+	srv.mailClient = agentmail.NewClient(
+		agentmail.WithBaseURL("http://agentmail.test/"),
+		agentmail.WithHTTPClient(&http.Client{
+			Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errServeTestAgentMailDisabled
+			}),
+			Timeout: time.Second,
+		}),
+	)
 	srv.projectDir = t.TempDir()
 	srv.spawnAgents = func(context.Context, robot.SpawnOptions) (*robot.SpawnOutput, error) {
 		return nil, errServeTestAgentSpawnDisabled
@@ -119,6 +137,14 @@ func TestSetupTestServerIsolatesTMUXAndAgentSpawn(t *testing.T) {
 	if !errors.Is(err, errServeTestAgentSpawnDisabled) {
 		t.Fatalf("spawn error = %v, want %v", err, errServeTestAgentSpawnDisabled)
 	}
+
+	health, err := srv.mailClient.HealthCheck(context.Background())
+	if health != nil {
+		t.Fatalf("agent mail health = %+v, want nil", health)
+	}
+	if !agentmail.IsServerUnavailable(err) {
+		t.Fatalf("agent mail health error = %v, want server unavailable", err)
+	}
 }
 
 func TestRobotErrorHTTPStatus(t *testing.T) {
@@ -156,13 +182,13 @@ func requireRegisterWSClient(tb testing.TB, hub *WSHub, client *WSClient) {
 	}
 }
 
-func newMockAgentMailMCPServer(
+func newMockAgentMailMCPHandler(
 	t *testing.T,
 	handlers map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError),
-) *httptest.Server {
+) http.Handler {
 	t.Helper()
 
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeRPCResponse := func(resp agentmail.JSONRPCResponse) {
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -228,7 +254,26 @@ func newMockAgentMailMCPServer(
 			ID:      req.ID,
 			Result:  resultJSON,
 		})
-	}))
+	})
+}
+
+func newMockAgentMailMCPClient(
+	t *testing.T,
+	handlers map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError),
+) *agentmail.Client {
+	t.Helper()
+	handler := newMockAgentMailMCPHandler(t, handlers)
+	return agentmail.NewClient(
+		agentmail.WithBaseURL("http://agentmail.test/"),
+		agentmail.WithHTTPClient(&http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				return rec.Result(), nil
+			}),
+			Timeout: time.Second,
+		}),
+	)
 }
 
 func TestNew(t *testing.T) {
@@ -290,12 +335,11 @@ func TestValidateConfigPublicBaseURL(t *testing.T) {
 
 func TestHandleGetMessage_NotImplemented(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
-	defer mcpServer.Close()
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/messages/42", nil)
@@ -324,7 +368,7 @@ func TestHandleGetMessage_NotImplemented(t *testing.T) {
 func TestHandleMailInbox_SanitizesDisclosureFields(t *testing.T) {
 
 	secret := strings.Repeat("s", 20)
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"fetch_inbox": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return []agentmail.InboxMessage{
 				{
@@ -339,11 +383,10 @@ func TestHandleMailInbox_SanitizesDisclosureFields(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/inbox?agent_name=GreenStone&include_bodies=true", nil)
@@ -388,7 +431,7 @@ func TestHandleMailInbox_SanitizesDisclosureFields(t *testing.T) {
 func TestHandleGetMessage_SanitizesDisclosureFields(t *testing.T) {
 
 	secret := strings.Repeat("s", 20)
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"get_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return &agentmail.Message{
 				ID:          42,
@@ -404,11 +447,10 @@ func TestHandleGetMessage_SanitizesDisclosureFields(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/messages/42", nil)
@@ -451,16 +493,15 @@ func TestHandleGetMessage_SanitizesDisclosureFields(t *testing.T) {
 
 func TestHandleReplyMessage_MessageNotFound(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"reply_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, &agentmail.JSONRPCError{Code: -32000, Message: "Message not found"}
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/reply", strings.NewReader(`{"sender_name":"BlueLake","body_md":"reply"}`))
@@ -485,7 +526,7 @@ func TestHandleReplyMessage_MessageNotFound(t *testing.T) {
 
 func TestHandleSendMessage_ContactBlocked(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"send_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, &agentmail.JSONRPCError{
 				Code:    -32000,
@@ -493,11 +534,10 @@ func TestHandleSendMessage_ContactBlocked(t *testing.T) {
 			}
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages", strings.NewReader(`{"sender_name":"BlueLake","to":["RedStone"],"subject":"hello","body_md":"hi"}`))
@@ -519,7 +559,7 @@ func TestHandleSendMessage_ContactBlocked(t *testing.T) {
 
 func TestHandleReplyMessage_ContactBlocked(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"reply_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, &agentmail.JSONRPCError{
 				Code:    -32000,
@@ -527,11 +567,10 @@ func TestHandleReplyMessage_ContactBlocked(t *testing.T) {
 			}
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/reply", strings.NewReader(`{"sender_name":"BlueLake","body_md":"reply"}`))
@@ -556,7 +595,7 @@ func TestHandleReplyMessage_ContactBlocked(t *testing.T) {
 
 func TestHandleReservePaths_ConflictReturnsStructured409(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.ReservationResult{
 				Granted: []agentmail.FileReservation{
@@ -568,11 +607,10 @@ func TestHandleReservePaths_ConflictReturnsStructured409(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/reservations", strings.NewReader(`{"agent_name":"BlueLake","paths":["internal/serve/*.go"],"exclusive":true}`))
@@ -604,12 +642,11 @@ func TestHandleReservePaths_ConflictReturnsStructured409(t *testing.T) {
 
 func TestHandleGetReservation_NotImplemented(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
-	defer mcpServer.Close()
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/reservations/42", nil)
@@ -634,16 +671,15 @@ func TestHandleGetReservation_NotImplemented(t *testing.T) {
 
 func TestHandleGetReservation_NotFound(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"list_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return []agentmail.FileReservation{}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/reservations/42", nil)
@@ -668,7 +704,7 @@ func TestHandleGetReservation_NotFound(t *testing.T) {
 
 func TestHandleRenewReservation_ReturnsRenewedReservations(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"renew_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.RenewReservationsResult{
 				Renewed: 1,
@@ -681,11 +717,10 @@ func TestHandleRenewReservation_ReturnsRenewedReservations(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/reservations/42/renew", strings.NewReader(`{"agent_name":"BlueLake","extend_seconds":900}`))
@@ -729,16 +764,15 @@ func TestHandleReleaseReservations_ReturnsReleaseCount(t *testing.T) {
 		t.Fatalf("parse released_at: %v", err)
 	}
 	releasedFlexTime := agentmail.FlexTime{Time: releasedTime}
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"release_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.ReleaseReservationsResult{Released: 2, ReleasedAt: &releasedFlexTime}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/reservations", strings.NewReader(`{"agent_name":"BlueLake","paths":["a/*","b/*"]}`))
@@ -770,16 +804,15 @@ func TestHandleReleaseReservations_ReturnsReleaseCount(t *testing.T) {
 
 func TestHandleReleaseReservationByID_NotFoundOnZeroRelease(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"release_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.ReleaseReservationsResult{Released: 0}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/reservations/42/release?agent_name=BlueLake", nil)
@@ -804,16 +837,15 @@ func TestHandleReleaseReservationByID_NotFoundOnZeroRelease(t *testing.T) {
 
 func TestHandleMarkMessageRead_AgentNotFound(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, &agentmail.JSONRPCError{Code: -32000, Message: "Agent not registered in project"}
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/read?agent_name=BlueLake", nil)
@@ -838,7 +870,7 @@ func TestHandleMarkMessageRead_AgentNotFound(t *testing.T) {
 
 func TestHandleMarkMessageRead_ReturnsReadMetadata(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.MessageReadResult{
 				MessageID: 42,
@@ -847,11 +879,10 @@ func TestHandleMarkMessageRead_ReturnsReadMetadata(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/read?agent_name=BlueLake", nil)
@@ -884,16 +915,15 @@ func TestHandleMarkMessageRead_ReturnsReadMetadata(t *testing.T) {
 
 func TestHandleMarkMessageRead_DefaultsMessageIDWhenToolReturnsNull(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/read?agent_name=BlueLake", nil)
@@ -925,7 +955,7 @@ func TestHandleMarkMessageRead_DefaultsMessageIDWhenToolReturnsNull(t *testing.T
 
 func TestHandleAckMessage_ReturnsAckMetadata(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"acknowledge_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.MessageAckResult{
 				MessageID:      42,
@@ -935,11 +965,10 @@ func TestHandleAckMessage_ReturnsAckMetadata(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/ack?agent_name=BlueLake", nil)
@@ -973,16 +1002,15 @@ func TestHandleAckMessage_ReturnsAckMetadata(t *testing.T) {
 
 func TestHandleAckMessage_DefaultsMessageIDWhenToolReturnsNull(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"acknowledge_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/ack?agent_name=BlueLake", nil)
@@ -1014,12 +1042,11 @@ func TestHandleAckMessage_DefaultsMessageIDWhenToolReturnsNull(t *testing.T) {
 
 func TestHandleSearchMessages_NotImplemented(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
-	defer mcpServer.Close()
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/search?q=test", nil)
@@ -1160,7 +1187,7 @@ func TestHandleThreadSummary_InvalidIncludeExamples(t *testing.T) {
 func TestHandleThreadSummary_ForwardsExplicitLLMModeFalse(t *testing.T) {
 
 	var receivedArgs map[string]interface{}
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"summarize_thread": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			receivedArgs = args
 			return agentmail.ThreadSummaryResponse{
@@ -1171,11 +1198,10 @@ func TestHandleThreadSummary_ForwardsExplicitLLMModeFalse(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/threads/TKT-123/summary?llm_mode=false", nil)
@@ -1198,7 +1224,7 @@ func TestHandleThreadSummary_ForwardsExplicitLLMModeFalse(t *testing.T) {
 func TestHandleThreadSummary_OmitsIncludeExamplesWhenUnset(t *testing.T) {
 
 	var receivedArgs map[string]interface{}
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"summarize_thread": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			receivedArgs = args
 			return agentmail.ThreadSummaryResponse{
@@ -1209,11 +1235,10 @@ func TestHandleThreadSummary_OmitsIncludeExamplesWhenUnset(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/threads/TKT-123/summary", nil)
@@ -1233,7 +1258,7 @@ func TestHandleThreadSummary_OmitsIncludeExamplesWhenUnset(t *testing.T) {
 
 func TestHandleThreadSummary_ReturnsExamplesWhenRequested(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"summarize_thread": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.ThreadSummaryResponse{
 				ThreadID: args["thread_id"].(string),
@@ -1247,11 +1272,10 @@ func TestHandleThreadSummary_ReturnsExamplesWhenRequested(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/threads/TKT-123/summary?include_examples=true", nil)
@@ -1285,8 +1309,8 @@ func TestHandleThreadSummary_ReturnsExamplesWhenRequested(t *testing.T) {
 }
 
 func TestHandleMarkMessageRead_DoesNotPublishEventWhenReadFalse(t *testing.T) {
-
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	srv, _ := setupTestServer(t)
+	srv.mailClient = newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.MessageReadResult{
 				MessageID: 42,
@@ -1294,25 +1318,6 @@ func TestHandleMarkMessageRead_DoesNotPublishEventWhenReadFalse(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
-
-	srv, _ := setupTestServer(t)
-	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
-	hub := NewWSHub()
-	go hub.Run()
-	defer hub.Stop()
-	srv.wsHub = hub
-
-	client := &WSClient{
-		id:     "mail-read-watcher",
-		hub:    hub,
-		send:   make(chan []byte, 10),
-		topics: make(map[string]struct{}),
-	}
-	client.Subscribe([]string{"mail:BlueLake"})
-	requireRegisterWSClient(t, hub, client)
-	time.Sleep(20 * time.Millisecond)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/read?agent_name=BlueLake", nil)
@@ -1326,17 +1331,16 @@ func TestHandleMarkMessageRead_DoesNotPublishEventWhenReadFalse(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	time.Sleep(50 * time.Millisecond)
 	select {
-	case msg := <-client.send:
-		t.Fatalf("unexpected mail.read event published: %s", string(msg))
+	case event := <-srv.wsHub.broadcast:
+		t.Fatalf("unexpected mail.read event published: %+v", event)
 	default:
 	}
 }
 
 func TestHandleAckMessage_DoesNotPublishEventWhenAckFalse(t *testing.T) {
-
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	srv, _ := setupTestServer(t)
+	srv.mailClient = newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"acknowledge_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.MessageAckResult{
 				MessageID:    42,
@@ -1344,25 +1348,6 @@ func TestHandleAckMessage_DoesNotPublishEventWhenAckFalse(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
-
-	srv, _ := setupTestServer(t)
-	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
-	hub := NewWSHub()
-	go hub.Run()
-	defer hub.Stop()
-	srv.wsHub = hub
-
-	client := &WSClient{
-		id:     "mail-ack-watcher",
-		hub:    hub,
-		send:   make(chan []byte, 10),
-		topics: make(map[string]struct{}),
-	}
-	client.Subscribe([]string{"mail:BlueLake"})
-	requireRegisterWSClient(t, hub, client)
-	time.Sleep(20 * time.Millisecond)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/ack?agent_name=BlueLake", nil)
@@ -1376,22 +1361,20 @@ func TestHandleAckMessage_DoesNotPublishEventWhenAckFalse(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	time.Sleep(50 * time.Millisecond)
 	select {
-	case msg := <-client.send:
-		t.Fatalf("unexpected mail.acknowledged event published: %s", string(msg))
+	case event := <-srv.wsHub.broadcast:
+		t.Fatalf("unexpected mail.acknowledged event published: %+v", event)
 	default:
 	}
 }
 
 func TestHandleListMailProjects_NotImplemented(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
-	defer mcpServer.Close()
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/projects", nil)
@@ -1413,7 +1396,7 @@ func TestHandleListMailProjects_NotImplemented(t *testing.T) {
 
 func TestHandleCreateMailAgent_InvalidRequest(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"register_agent": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, &agentmail.JSONRPCError{
 				Code:    -32602,
@@ -1421,11 +1404,10 @@ func TestHandleCreateMailAgent_InvalidRequest(t *testing.T) {
 			}
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/agents", strings.NewReader(`{"program":"claude-code","model":"opus-4.5","name":"bad-name"}`))
@@ -1447,7 +1429,7 @@ func TestHandleCreateMailAgent_InvalidRequest(t *testing.T) {
 
 func TestHandleCreateMailAgent_TransientBusy(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"register_agent": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, &agentmail.JSONRPCError{
 				Code:    -32000,
@@ -1455,11 +1437,10 @@ func TestHandleCreateMailAgent_TransientBusy(t *testing.T) {
 			}
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/agents", strings.NewReader(`{"program":"claude-code","model":"opus-4.5","name":"BlueLake"}`))
@@ -1481,7 +1462,7 @@ func TestHandleCreateMailAgent_TransientBusy(t *testing.T) {
 
 func TestHandleMailInbox_AgentNotFound(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"fetch_inbox": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, &agentmail.JSONRPCError{
 				Code:    -32000,
@@ -1489,11 +1470,10 @@ func TestHandleMailInbox_AgentNotFound(t *testing.T) {
 			}
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/inbox?agent_name=BlueLake", nil)
@@ -1515,18 +1495,17 @@ func TestHandleMailInbox_AgentNotFound(t *testing.T) {
 
 func TestHandleMailInbox_DoesNotEmitMailReceivedEvent(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"fetch_inbox": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return []agentmail.InboxMessage{
 				{ID: 1, Subject: "Hello", From: "BlueLake", Importance: "normal", Kind: "to"},
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 	srv.wsHub = NewWSHub()
 
 	rec := httptest.NewRecorder()
@@ -1545,7 +1524,7 @@ func TestHandleMailInbox_DoesNotEmitMailReceivedEvent(t *testing.T) {
 func TestHandleRequestContact_ReturnsLinkAndExpiry(t *testing.T) {
 
 	expiresAt := "2026-03-22T12:34:56Z"
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"request_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.ContactRequestResult{
 				Status: "pending",
@@ -1558,11 +1537,10 @@ func TestHandleRequestContact_ReturnsLinkAndExpiry(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/request", strings.NewReader(`{"from_agent":"BlueLake","to_agent":"RedStone","reason":"coordination"}`))
@@ -1594,12 +1572,11 @@ func TestHandleRequestContact_ReturnsLinkAndExpiry(t *testing.T) {
 
 func TestHandleRequestContact_NotImplemented(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
-	defer mcpServer.Close()
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/request", strings.NewReader(`{"from_agent":"BlueLake","to_agent":"RedStone"}`))
@@ -1621,7 +1598,7 @@ func TestHandleRequestContact_NotImplemented(t *testing.T) {
 
 func TestHandleRequestContact_AgentNotFound(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"request_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, &agentmail.JSONRPCError{
 				Code:    -32000,
@@ -1629,11 +1606,10 @@ func TestHandleRequestContact_AgentNotFound(t *testing.T) {
 			}
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/request", strings.NewReader(`{"from_agent":"BlueLake","to_agent":"RedStone"}`))
@@ -1655,12 +1631,11 @@ func TestHandleRequestContact_AgentNotFound(t *testing.T) {
 
 func TestHandleRespondContact_NotImplemented(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
-	defer mcpServer.Close()
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/respond", strings.NewReader(`{"to_agent":"BlueLake","from_agent":"RedStone","accept":true}`))
@@ -1683,7 +1658,7 @@ func TestHandleRespondContact_NotImplemented(t *testing.T) {
 func TestHandleRespondContact_ReturnsStatus(t *testing.T) {
 
 	expiresAt := "2026-03-23T00:00:00Z"
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"respond_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.ContactRespondResult{
 				Status: "approved",
@@ -1696,11 +1671,10 @@ func TestHandleRespondContact_ReturnsStatus(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/respond", strings.NewReader(`{"to_agent":"BlueLake","from_agent":"RedStone","accept":true}`))
@@ -1732,7 +1706,7 @@ func TestHandleRespondContact_ReturnsStatus(t *testing.T) {
 
 func TestHandleRespondContact_NotFound(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"respond_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return nil, &agentmail.JSONRPCError{
 				Code:    -32000,
@@ -1740,11 +1714,10 @@ func TestHandleRespondContact_NotFound(t *testing.T) {
 			}
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/respond", strings.NewReader(`{"to_agent":"BlueLake","from_agent":"RedStone","accept":true}`))
@@ -1772,7 +1745,7 @@ func TestHandleForceReleaseReservation_ReturnsMCPResultFields(t *testing.T) {
 		t.Fatalf("parse released_at: %v", err)
 	}
 	releasedFlexTime := agentmail.FlexTime{Time: releasedTime}
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"force_release_file_reservation": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.ForceReleaseResult{
 				Success:        true,
@@ -1783,11 +1756,10 @@ func TestHandleForceReleaseReservation_ReturnsMCPResultFields(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/reservations/17/force-release", strings.NewReader(`{"agent_name":"RedStone","notify_previous":true}`))
@@ -1824,7 +1796,7 @@ func TestHandleForceReleaseReservation_ReturnsMCPResultFields(t *testing.T) {
 
 func TestHandleForceReleaseReservation_DeniedReturnsConflict(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"force_release_file_reservation": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.ForceReleaseResult{
 				Success:        false,
@@ -1834,11 +1806,10 @@ func TestHandleForceReleaseReservation_DeniedReturnsConflict(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/reservations/17/force-release", strings.NewReader(`{"agent_name":"RedStone","notify_previous":true}`))
@@ -1869,16 +1840,15 @@ func TestHandleForceReleaseReservation_DeniedReturnsConflict(t *testing.T) {
 
 func TestHandleRenewReservation_NotFoundOnZeroRenew(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"renew_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.RenewReservationsResult{}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/reservations/42/renew", strings.NewReader(`{"agent_name":"BlueLake","extend_seconds":900}`))
@@ -1903,7 +1873,7 @@ func TestHandleRenewReservation_NotFoundOnZeroRenew(t *testing.T) {
 
 func TestHandleSetContactPolicy_ReturnsMCPResultFields(t *testing.T) {
 
-	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+	mailClient := newMockAgentMailMCPClient(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"set_contact_policy": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
 			return agentmail.ContactPolicyResult{
 				AgentName: "BlueLake",
@@ -1911,11 +1881,10 @@ func TestHandleSetContactPolicy_ReturnsMCPResultFields(t *testing.T) {
 			}, nil
 		},
 	})
-	defer mcpServer.Close()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
-	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.mailClient = mailClient
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/mail/contacts/policy", strings.NewReader(`{"agent_name":"BlueLake","policy":"open"}`))
