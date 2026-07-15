@@ -886,6 +886,7 @@ esac
 		args          []string
 		emptyArrays   []string
 		wantRootArray bool
+		isolateTools  bool
 	}{
 		{name: "analytics_csv", args: []string{"--json", "analytics", "--format=csv"}},
 		{name: "analytics_prometheus", args: []string{"--json", "analytics", "--format=prometheus"}},
@@ -919,11 +920,20 @@ esac
 		{name: "worktree_table", args: []string{"--json", "worktree", "list", "--output=table"}, wantRootArray: true},
 		{name: "worktree_uppercase_json", args: []string{"worktree", "list", "--output=JSON"}, wantRootArray: true},
 		{name: "worktree_precommand_output", args: []string{"--output=json", "worktree", "list"}, wantRootArray: true},
-		{name: "support_bundle", args: []string{"support-bundle", "--output=" + filepath.Join(root, "support-bundle"), "--json"}},
+		{name: "support_bundle", args: []string{"support-bundle", "--output=" + filepath.Join(root, "support-bundle"), "--json"}, isolateTools: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			args := append([]string{"--profile-startup"}, test.args...)
-			process := runBuiltRobotProcess(t, ntmPath, repoDir, env, args...)
+			processEnv := env
+			if test.isolateTools {
+				// Doctor data in a support bundle probes every installed tool. Keep
+				// this format-precedence test independent of host tools and load.
+				processEnv = mergeRobotProcessEnv(env, map[string]string{
+					"PATH":            fakeBin,
+					"NTM_TMUX_BINARY": filepath.Join(fakeBin, "missing-tmux"),
+				})
+			}
+			process := runBuiltRobotProcess(t, ntmPath, repoDir, processEnv, args...)
 			if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
 				t.Fatalf("global JSON precedence exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
 			}
