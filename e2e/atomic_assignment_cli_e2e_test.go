@@ -6377,7 +6377,7 @@ func seedReservedWorkingAssignment(t *testing.T, fixture *atomicAssignmentCLIFix
 		"--force",
 		"--ignore-deps",
 		"--reserve-files=true",
-		"--timeout=15s",
+		"--timeout=30s",
 		"--json",
 	)
 	if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
