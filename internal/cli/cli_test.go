@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -6418,27 +6420,379 @@ func TestVerifyChecksum(t *testing.T) {
 	})
 }
 
-// TestFetchChecksumsParser tests the checksums.txt parsing logic
-func TestFetchChecksumsParser(t *testing.T) {
-	// Note: fetchChecksums requires network access, so we test the parsing logic
-	// by examining the expected format and behavior.
+func writeInstallScriptArchive(t *testing.T, path string) {
+	t.Helper()
 
-	// The function parses lines in the format:
-	// "<sha256hash>  <filename>" (BSD-style with two spaces)
-	// "<sha256hash> <filename>"  (GNU-style with one space)
+	payload := []byte(`#!/bin/sh
+if [ "${1:-}" = "version" ]; then
+    printf '%s\n' 'ntm fixture v1.19.2'
+    exit 0
+fi
+exit 1
+`)
+	var archive bytes.Buffer
+	gzipWriter := gzip.NewWriter(&archive)
+	tarWriter := tar.NewWriter(gzipWriter)
+	if err := tarWriter.WriteHeader(&tar.Header{
+		Name: "ntm",
+		Mode: 0o755,
+		Size: int64(len(payload)),
+	}); err != nil {
+		t.Fatalf("write installer fixture header: %v", err)
+	}
+	if _, err := tarWriter.Write(payload); err != nil {
+		t.Fatalf("write installer fixture payload: %v", err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close installer fixture tar stream: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close installer fixture gzip stream: %v", err)
+	}
+	if err := os.WriteFile(path, archive.Bytes(), 0o600); err != nil {
+		t.Fatalf("write installer fixture archive: %v", err)
+	}
+}
 
-	t.Run("format documentation", func(t *testing.T) {
-		// This test documents the expected checksums.txt format
-		// GoReleaser generates checksums.txt with BSD-style format:
-		// sha256hash  filename
+func installScriptTestPATH(t *testing.T, binDir string) string {
+	t.Helper()
 
-		// Example content:
-		// abc123...  ntm_1.4.1_darwin_all.tar.gz
-		// def456...  ntm_1.4.1_linux_amd64.tar.gz
+	// Exclude host downloaders and rm so the fixture cannot reach the network or
+	// execute the installer's recursive cleanup command.
+	required := []string{
+		"awk", "cat", "chmod", "cp", "grep", "gzip", "head", "mkdir",
+		"mv", "sed", "tar", "tr", "uname",
+	}
+	for _, name := range required {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("required installer test command %q not found: %v", name, err)
+		}
+		if err := os.Symlink(path, filepath.Join(binDir, name)); err != nil {
+			t.Fatalf("link installer test command %q: %v", name, err)
+		}
+	}
 
-		// The parser should handle both formats
-		t.Log("fetchChecksums parses GoReleaser checksums.txt format")
-	})
+	for _, name := range []string{"sha256sum", "shasum"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		if err := os.Symlink(path, filepath.Join(binDir, name)); err != nil {
+			t.Fatalf("link installer checksum command %q: %v", name, err)
+		}
+		return binDir
+	}
+	t.Fatalf("installer test requires sha256sum or shasum")
+	return ""
+}
+
+func TestInstallScriptChecksumSourcesEndToEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash installer E2E requires a Unix host")
+	}
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+
+	var platformOS string
+	switch runtime.GOOS {
+	case "linux", "darwin", "freebsd":
+		platformOS = runtime.GOOS
+	default:
+		t.Skipf("installer does not support E2E host OS %q", runtime.GOOS)
+	}
+	var platformArch string
+	switch runtime.GOARCH {
+	case "amd64", "arm64":
+		platformArch = runtime.GOARCH
+	case "arm":
+		platformArch = "armv7"
+	default:
+		t.Skipf("installer does not support E2E host architecture %q", runtime.GOARCH)
+	}
+
+	const version = "v1.19.2"
+	assetName := fmt.Sprintf("ntm_1.19.2_%s_%s.tar.gz", platformOS, platformArch)
+	apiURL := "https://api.github.com/repos/Dicklesworthstone/ntm/releases/tags/" + version
+	releaseBase := "https://github.com/Dicklesworthstone/ntm/releases/download/" + version
+	installScript := filepath.Join(repoRoot(t), "install.sh")
+
+	const fakeDownloader = `#!/bin/bash
+set -euo pipefail
+out=""
+url=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o|-O)
+            out="$2"
+            shift 2
+            ;;
+		-qO-)
+			out="-"
+			shift
+			;;
+        -*)
+            shift
+            ;;
+        *)
+            url="$1"
+            shift
+            ;;
+    esac
+done
+
+copy_fixture() {
+	local source_path="$1"
+	if [ -z "$out" ] || [ "$out" = "-" ]; then
+		cat "$source_path"
+	else
+		cp "$source_path" "$out"
+	fi
+}
+
+printf '%s\n' "$url" >> "$NTM_TEST_REQUEST_LOG"
+if [ "$url" = "$NTM_TEST_API_URL" ]; then
+	copy_fixture "$NTM_TEST_RELEASE_JSON"
+	exit 0
+fi
+
+case "$url" in
+	"$NTM_TEST_RELEASE_BASE/$NTM_TEST_ASSET_NAME")
+		copy_fixture "$NTM_TEST_ASSET"
+		;;
+	"$NTM_TEST_RELEASE_BASE/checksums.txt")
+		case "$NTM_TEST_CHECKSUM_MODE" in
+			goreleaser) copy_fixture "$NTM_TEST_GO_CHECKSUMS" ;;
+			mismatch) copy_fixture "$NTM_TEST_BAD_CHECKSUMS" ;;
+			*) exit 22 ;;
+		esac
+        ;;
+	"$NTM_TEST_RELEASE_BASE/SHA256SUMS")
+		case "$NTM_TEST_CHECKSUM_MODE" in
+			aggregate) copy_fixture "$NTM_TEST_DSR_CHECKSUMS" ;;
+			aggregate-mismatch) copy_fixture "$NTM_TEST_BAD_CHECKSUMS" ;;
+			*) exit 22 ;;
+		esac
+        ;;
+	"$NTM_TEST_RELEASE_BASE/$NTM_TEST_ASSET_NAME.sha256")
+		case "$NTM_TEST_CHECKSUM_MODE" in
+			sidecar) copy_fixture "$NTM_TEST_DSR_SIDECAR" ;;
+			sidecar-mismatch) copy_fixture "$NTM_TEST_BAD_CHECKSUMS" ;;
+			*) exit 22 ;;
+		esac
+        ;;
+    *)
+        exit 22
+        ;;
+esac
+`
+	const fakeCleanup = `#!/bin/bash
+set -euo pipefail
+if [ "$#" -ne 2 ] || [ "$1" != "-rf" ]; then
+	exit 97
+fi
+case "$2" in
+	"$NTM_TEST_TMPROOT"/*) ;;
+	*) exit 98 ;;
+esac
+printf '%s\n' "$*" >> "$NTM_TEST_CLEANUP_LOG"
+`
+	const fakeMktemp = `#!/bin/bash
+set -euo pipefail
+if [ "$#" -ne 1 ] || [ "$1" != "-d" ]; then
+	exit 96
+fi
+dir="$NTM_TEST_TMPROOT/ntm-installer"
+mkdir "$dir"
+printf '%s\n' "$dir"
+`
+
+	cases := []struct {
+		name             string
+		mode             string
+		wantSuccess      bool
+		checksumRequests []string
+		wantOutput       string
+	}{
+		{name: "GoReleaser aggregate", mode: "goreleaser", wantSuccess: true, checksumRequests: []string{"checksums.txt"}},
+		{name: "DSR aggregate", mode: "aggregate", wantSuccess: true, checksumRequests: []string{"checksums.txt", "SHA256SUMS"}},
+		{name: "DSR per-asset sidecar", mode: "sidecar", wantSuccess: true, checksumRequests: []string{"checksums.txt", "SHA256SUMS", assetName + ".sha256"}},
+		{name: "missing checksums", mode: "missing", checksumRequests: []string{"checksums.txt", "SHA256SUMS", assetName + ".sha256"}, wantOutput: "Could not download release checksums"},
+		{name: "mismatched preferred aggregate fails closed", mode: "mismatch", checksumRequests: []string{"checksums.txt"}, wantOutput: "Checksum mismatch"},
+		{name: "mismatched DSR aggregate fails closed", mode: "aggregate-mismatch", checksumRequests: []string{"checksums.txt", "SHA256SUMS"}, wantOutput: "Checksum mismatch"},
+		{name: "mismatched DSR sidecar fails closed", mode: "sidecar-mismatch", checksumRequests: []string{"checksums.txt", "SHA256SUMS", assetName + ".sha256"}, wantOutput: "Checksum mismatch"},
+	}
+
+	for _, downloader := range []string{"curl", "wget"} {
+		for _, test := range cases {
+			t.Run(downloader+"/"+test.name, func(t *testing.T) {
+				dir := t.TempDir()
+				assetPath := filepath.Join(dir, assetName)
+				writeInstallScriptArchive(t, assetPath)
+				asset, err := os.ReadFile(assetPath)
+				if err != nil {
+					t.Fatalf("read installer fixture archive: %v", err)
+				}
+				digest := sha256.Sum256(asset)
+				validLine := fmt.Sprintf("%x  %s\n", digest, assetName)
+				invalidLine := fmt.Sprintf("%064x  %s\n", 0, assetName)
+
+				releaseJSON := filepath.Join(dir, "release.json")
+				goChecksums := filepath.Join(dir, "go-checksums.txt")
+				dsrChecksums := filepath.Join(dir, "dsr-checksums.txt")
+				dsrSidecar := filepath.Join(dir, "dsr-sidecar.txt")
+				badChecksums := filepath.Join(dir, "bad-checksums.txt")
+				for path, content := range map[string]string{
+					releaseJSON:  fmt.Sprintf(`{"tag_name":%q,"assets":[{"name":%q}]}\n`, version, assetName),
+					goChecksums:  validLine,
+					dsrChecksums: validLine,
+					dsrSidecar:   validLine,
+					badChecksums: invalidLine,
+				} {
+					if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+						t.Fatalf("write checksum fixture %s: %v", path, err)
+					}
+				}
+
+				binDir := filepath.Join(dir, "bin")
+				if err := os.Mkdir(binDir, 0o755); err != nil {
+					t.Fatalf("create fake bin: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(binDir, downloader), []byte(fakeDownloader), 0o755); err != nil {
+					t.Fatalf("write fake %s: %v", downloader, err)
+				}
+				if err := os.WriteFile(filepath.Join(binDir, "rm"), []byte(fakeCleanup), 0o755); err != nil {
+					t.Fatalf("write fake cleanup command: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(binDir, "mktemp"), []byte(fakeMktemp), 0o755); err != nil {
+					t.Fatalf("write fake mktemp command: %v", err)
+				}
+
+				requestLog := filepath.Join(dir, "requests.log")
+				cleanupLog := filepath.Join(dir, "cleanup.log")
+				tmpRoot := filepath.Join(dir, "tmp")
+				if err := os.Mkdir(tmpRoot, 0o755); err != nil {
+					t.Fatalf("create installer temp root: %v", err)
+				}
+				installDir := filepath.Join(dir, "installed")
+				cmd := exec.Command(bashPath, installScript, "--version="+version, "--dir="+installDir, "--no-shell")
+				cmd.Env = envWithOverrides(os.Environ(),
+					"HOME="+filepath.Join(dir, "home"),
+					"PATH="+installScriptTestPATH(t, binDir),
+					"NTM_TEST_API_URL="+apiURL,
+					"NTM_TEST_ASSET_NAME="+assetName,
+					"NTM_TEST_ASSET="+assetPath,
+					"NTM_TEST_CHECKSUM_MODE="+test.mode,
+					"NTM_TEST_REQUEST_LOG="+requestLog,
+					"NTM_TEST_RELEASE_JSON="+releaseJSON,
+					"NTM_TEST_RELEASE_BASE="+releaseBase,
+					"NTM_TEST_GO_CHECKSUMS="+goChecksums,
+					"NTM_TEST_DSR_CHECKSUMS="+dsrChecksums,
+					"NTM_TEST_DSR_SIDECAR="+dsrSidecar,
+					"NTM_TEST_BAD_CHECKSUMS="+badChecksums,
+					"NTM_TEST_CLEANUP_LOG="+cleanupLog,
+					"NTM_TEST_TMPROOT="+tmpRoot,
+				)
+				output, err := cmd.CombinedOutput()
+				if test.wantSuccess && err != nil {
+					t.Fatalf("installer E2E failed: %v; output:\n%s", err, output)
+				}
+				if !test.wantSuccess && err == nil {
+					t.Fatalf("installer E2E unexpectedly succeeded; output:\n%s", output)
+				}
+				if !test.wantSuccess {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+						t.Fatalf("installer exit = %v, want status 1; output:\n%s", err, output)
+					}
+				}
+				if test.wantOutput != "" && !strings.Contains(string(output), test.wantOutput) {
+					t.Fatalf("installer output missing %q:\n%s", test.wantOutput, output)
+				}
+
+				requests, err := os.ReadFile(requestLog)
+				if err != nil {
+					t.Fatalf("read request log: %v", err)
+				}
+				gotRequests := strings.Split(strings.TrimSpace(string(requests)), "\n")
+				wantRequests := []string{apiURL, releaseBase + "/" + assetName}
+				for _, name := range test.checksumRequests {
+					wantRequests = append(wantRequests, releaseBase+"/"+name)
+				}
+				if !reflect.DeepEqual(gotRequests, wantRequests) {
+					t.Fatalf("installer requests = %q, want %q", gotRequests, wantRequests)
+				}
+
+				cleanup, err := os.ReadFile(cleanupLog)
+				if err != nil {
+					t.Fatalf("read installer cleanup log: %v", err)
+				}
+				cleanupLine := strings.TrimSpace(string(cleanup))
+				wantCleanup := "-rf " + filepath.Join(tmpRoot, "ntm-installer")
+				if cleanupLine != wantCleanup {
+					t.Fatalf("installer cleanup target = %q, want %q", cleanupLine, wantCleanup)
+				}
+
+				installedBinary := filepath.Join(installDir, "ntm")
+				if !test.wantSuccess {
+					if _, statErr := os.Stat(installedBinary); !os.IsNotExist(statErr) {
+						t.Fatalf("failed install left binary behind; stat error = %v", statErr)
+					}
+					return
+				}
+
+				versionOutput, err := exec.Command(installedBinary, "version").CombinedOutput()
+				if err != nil {
+					t.Fatalf("execute installed fixture: %v; output: %s", err, versionOutput)
+				}
+				if got := strings.TrimSpace(string(versionOutput)); got != "ntm fixture v1.19.2" {
+					t.Fatalf("installed fixture output = %q", got)
+				}
+			})
+		}
+	}
+}
+
+func TestInstallScriptExecutionEntryPoints(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash installer contract requires a Unix host")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	installScript := filepath.Join(repoRoot(t), "install.sh")
+	script, err := os.ReadFile(installScript)
+	if err != nil {
+		t.Fatalf("read install script: %v", err)
+	}
+	args := []string{"--version=invalid", "--dir=" + t.TempDir(), "--no-shell"}
+	tests := []struct {
+		name string
+		cmd  *exec.Cmd
+	}{
+		{name: "direct", cmd: exec.Command("bash", append([]string{installScript}, args...)...)},
+		{name: "stdin", cmd: exec.Command("bash", append([]string{"-s", "--"}, args...)...)},
+	}
+	tests[1].cmd.Stdin = bytes.NewReader(script)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output, err := test.cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("installer did not execute; output:\n%s", output)
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("installer exit = %v, want status 1; output:\n%s", err, output)
+			}
+			if !strings.Contains(string(output), "Invalid version: invalid") {
+				t.Fatalf("installer did not reach version validation; output:\n%s", output)
+			}
+		})
+	}
 }
 
 // TestProgressWriter tests the download progress writer

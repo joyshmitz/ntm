@@ -37,13 +37,6 @@ cleanup_tmp_dirs() {
     done
 }
 
-make_tmp_dir() {
-    local dir
-    dir=$(mktemp -d)
-    TMP_DIRS+=("$dir")
-    printf '%s\n' "$dir"
-}
-
 trap cleanup_tmp_dirs EXIT
 
 # Defaults
@@ -306,6 +299,32 @@ build_download_url() {
     printf 'https://github.com/%s/%s/releases/download/%s/%s\n' "$REPO_OWNER" "$REPO_NAME" "$version" "$asset_name"
 }
 
+download_release_checksums() {
+    local version="$1"
+    local asset_name="$2"
+    local dest_dir="$3"
+    local candidate checksum_url checksum_path
+    local -a candidates=(
+        "checksums.txt"
+        "SHA256SUMS"
+        "${asset_name}.sha256"
+    )
+
+    # Only transport failures fall through to the next release asset. Once a
+    # checksum document downloads, verification treats it as authoritative and
+    # fails closed rather than accepting a different checksum source.
+    for candidate in "${candidates[@]}"; do
+        checksum_url=$(build_download_url "$version" "$candidate")
+        checksum_path="${dest_dir}/${candidate}"
+        if download_file "$checksum_url" "$checksum_path"; then
+            printf '%s\n' "$checksum_path"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 verify_downloaded_asset() {
     local asset_path="$1"
     local checksum_path="$2"
@@ -439,7 +458,7 @@ ensure_install_dir() {
 
 # Main installation function
 install_ntm() {
-    local platform version install_dir tmp_dir asset_name download_url download_path binary_path checksum_url checksum_path
+    local platform version install_dir tmp_dir asset_name download_url download_path binary_path checksum_path
 
     print_info "Installing ${BIN_NAME}..."
 
@@ -531,7 +550,8 @@ install_ntm() {
     print_info "Downloading from $download_url..."
 
     # Create temp directory
-    tmp_dir=$(make_tmp_dir)
+    tmp_dir=$(mktemp -d)
+    TMP_DIRS+=("$tmp_dir")
     download_path="${tmp_dir}/${asset_name}"
     binary_path="${tmp_dir}/${BIN_NAME}"
 
@@ -541,11 +561,9 @@ install_ntm() {
         exit 1
     fi
 
-    checksum_url=$(build_download_url "$version" "checksums.txt")
-    checksum_path="${tmp_dir}/checksums.txt"
     print_info "Verifying checksum..."
-    if ! download_file "$checksum_url" "$checksum_path"; then
-        print_error "Could not download checksums file"
+    if ! checksum_path=$(download_release_checksums "$version" "$asset_name" "$tmp_dir"); then
+        print_error "Could not download release checksums"
         exit 1
     fi
     if ! verify_downloaded_asset "$download_path" "$checksum_path" "$asset_name"; then
