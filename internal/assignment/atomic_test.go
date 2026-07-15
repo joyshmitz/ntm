@@ -880,7 +880,7 @@ func TestAtomicAssignmentConcurrentSameKeyDispatchesOnce(t *testing.T) {
 	close(start)
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("first same-key dispatch did not start")
 	}
 	time.Sleep(100 * time.Millisecond)

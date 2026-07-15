@@ -99,13 +99,13 @@ func TestGetGitInfo_NonExistentDir(t *testing.T) {
 
 func TestGetGitInfoWithTimeout_UsesIndependentCommandBudgets(t *testing.T) {
 	// perCommandBudget needs to comfortably exceed the per-shell
-	// startup cost (which is significantly larger on macOS-latest
-	// runners than on Linux). The sleep is chosen so that three
+	// startup cost (which is significantly larger on macOS DSR workers
+	// than on Linux). The sleep is chosen so that three
 	// sequential commands still exceed perCommandBudget — that
 	// inequality is what proves the three calls did not share one
 	// timeout.
-	const perCommandBudget = 400 * time.Millisecond
-	const fakeGitSleep = "0.2" // seconds; 3 × 200ms > 400ms
+	const perCommandBudget = 5 * time.Second
+	const fakeGitSleep = "1.7" // seconds; 3 × 1.7s > 5s
 
 	tmpBin := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(tmpBin); err == nil {
