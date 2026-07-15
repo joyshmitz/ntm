@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"strconv"
@@ -82,6 +83,38 @@ func RequireTmuxThrottled(t *testing.T) {
 	// multiple packages in parallel.
 	acquireGlobalTmuxTestLock(t)
 	TmuxTestThrottle.AcquireForTest(t)
+}
+
+// AcquireGlobalTmuxTestLockForTest serializes tmux access across package test
+// processes without skipping short-mode coverage or requiring a live session.
+func AcquireGlobalTmuxTestLockForTest(t *testing.T) {
+	t.Helper()
+	acquireGlobalTmuxTestLock(t)
+}
+
+// IsolateTmuxTestProcess gives a package test binary its own tmux server.
+// Call it from TestMain before m.Run so tests and child processes cannot
+// discover or mutate the invoking user's tmux server.
+func IsolateTmuxTestProcess() error {
+	dir, err := os.MkdirTemp("", "ntm-tmux-test-*")
+	if err != nil {
+		return fmt.Errorf("create tmux test directory: %w", err)
+	}
+
+	settings := []struct {
+		key   string
+		value string
+	}{
+		{key: "TMUX", value: ""},
+		{key: "TMUX_PANE", value: ""},
+		{key: "TMUX_TMPDIR", value: dir},
+	}
+	for _, setting := range settings {
+		if err := os.Setenv(setting.key, setting.value); err != nil {
+			return fmt.Errorf("set %s for tmux test isolation: %w", setting.key, err)
+		}
+	}
+	return nil
 }
 
 // IntegrationTestPrecheckThrottled runs integration prechecks with throttling.

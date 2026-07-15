@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 func TestNewDetector(t *testing.T) {
@@ -513,6 +514,7 @@ func tmuxAvailable() bool {
 // createTestSession creates a tmux session for testing and returns the session name
 func createTestSession(t *testing.T) string {
 	t.Helper()
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 	sessionName := "ntm_status_test_" + time.Now().Format("150405")
 
 	cmd := exec.Command(tmux.BinaryPath(), "new-session", "-d", "-s", sessionName)
@@ -584,6 +586,7 @@ func TestDetectNonexistentPane(t *testing.T) {
 	if !tmuxAvailable() {
 		t.Skip("tmux not available")
 	}
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 
 	d := NewDetector()
 	_, err := d.Detect("%999999")
@@ -627,6 +630,7 @@ func TestDetectAllNonexistentSession(t *testing.T) {
 	if !tmuxAvailable() {
 		t.Skip("tmux not available")
 	}
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 
 	d := NewDetector()
 	_, err := d.DetectAll("nonexistent_session_xyz123")

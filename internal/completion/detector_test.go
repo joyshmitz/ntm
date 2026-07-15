@@ -17,6 +17,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 func captureStdout(t *testing.T, fn func()) string {
@@ -1363,6 +1364,7 @@ func TestNewWithConfigCustomSettings(t *testing.T) {
 }
 
 func TestCheckNowWithActiveAssignment(t *testing.T) {
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 	t.Setenv("HOME", t.TempDir())
 
 	session := fmt.Sprintf("completion-active-%d", time.Now().UnixNano())
@@ -1605,6 +1607,7 @@ func TestCompletionPatternRequiresBeadClosedConfirmation(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not available")
 	}
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 	t.Setenv("HOME", t.TempDir())
 
 	session := "promptecho-session"
@@ -1669,6 +1672,7 @@ func TestIdleTimeoutWithOpenBeadReportsFailed(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not available")
 	}
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 	t.Setenv("HOME", t.TempDir())
 
 	session := "idlefail-session"

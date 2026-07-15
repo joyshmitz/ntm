@@ -11,6 +11,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/util"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 func TestTruncate(t *testing.T) {
@@ -73,6 +74,7 @@ func tmuxAvailable() bool {
 // createTestSession creates a tmux session for testing and returns cleanup func
 func createTestSession(t *testing.T) string {
 	t.Helper()
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 	name := fmt.Sprintf("ntm_pipeline_test_%d", time.Now().UnixNano())
 	if err := tmux.CreateSession(name, os.TempDir()); err != nil {
 		// Skip instead of fail when tmux server has issues (common on CI)
@@ -88,6 +90,7 @@ func TestFindPaneForStage_NoSession(t *testing.T) {
 	if !tmuxAvailable() {
 		t.Skip("tmux not available")
 	}
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 
 	// Non-existent session should fail
 	_, err := findPaneForStage("nonexistent-session-xyz", "cc", "")
@@ -209,6 +212,7 @@ func TestExecute_NonExistentSession(t *testing.T) {
 	if !tmuxAvailable() {
 		t.Skip("tmux not available")
 	}
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 
 	p := Pipeline{
 		Session: "nonexistent-session-for-testing-xyz",
@@ -282,6 +286,7 @@ func TestWaitForIdle_InvalidPane(t *testing.T) {
 	if !tmuxAvailable() {
 		t.Skip("tmux not available")
 	}
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()

@@ -104,7 +104,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -135,7 +135,7 @@ jobs:
 
       - name: Test with Coverage
         run: |
-          go test -v -race -covermode=atomic -coverprofile=coverage.out ./...
+          go test -v -race -timeout=15m -covermode=atomic -coverprofile=coverage.out ./...
 
       - name: Upload Coverage to Codecov
         if: matrix.os == 'ubuntu-24.04'

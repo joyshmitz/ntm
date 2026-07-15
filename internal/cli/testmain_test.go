@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -35,6 +36,10 @@ func TestMain(m *testing.M) {
 	// Clean up any orphan test sessions from previous runs before starting.
 	// This catches sessions left behind when tests are interrupted (Ctrl+C, timeout, etc.)
 	testutil.KillAllTestSessionsSilent()
+	if err := testutil.IsolateTmuxTestProcess(); err != nil {
+		fmt.Fprintf(os.Stderr, "isolate CLI tmux tests: %v\n", err)
+		os.Exit(1)
+	}
 
 	code := m.Run()
 

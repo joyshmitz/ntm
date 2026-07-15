@@ -81,10 +81,39 @@ func TestRequireTmux(t *testing.T) {
 }
 
 func TestSessionExists(t *testing.T) {
+	AcquireGlobalTmuxTestLockForTest(t)
+
 	// Test with a session that definitely doesn't exist
 	exists := SessionExists("nonexistent_session_" + t.Name())
 	if exists {
 		t.Error("session should not exist")
+	}
+}
+
+func TestIsolateTmuxTestProcess(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/ambient-tmux,1,0")
+	t.Setenv("TMUX_PANE", "%9")
+	t.Setenv("TMUX_TMPDIR", "/tmp/ambient-tmux-root")
+
+	if err := IsolateTmuxTestProcess(); err != nil {
+		t.Fatalf("IsolateTmuxTestProcess() error = %v", err)
+	}
+	if got := os.Getenv("TMUX"); got != "" {
+		t.Fatalf("TMUX = %q, want empty", got)
+	}
+	if got := os.Getenv("TMUX_PANE"); got != "" {
+		t.Fatalf("TMUX_PANE = %q, want empty", got)
+	}
+	tmuxTmpDir := os.Getenv("TMUX_TMPDIR")
+	if tmuxTmpDir == "" || tmuxTmpDir == "/tmp/ambient-tmux-root" {
+		t.Fatalf("TMUX_TMPDIR = %q, want unique test directory", tmuxTmpDir)
+	}
+	info, err := os.Stat(tmuxTmpDir)
+	if err != nil {
+		t.Fatalf("stat TMUX_TMPDIR: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("TMUX_TMPDIR = %q, want directory", tmuxTmpDir)
 	}
 }
 

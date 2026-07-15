@@ -2202,6 +2202,10 @@ func TestMain(m *testing.M) {
 
 	// Clean up any orphan test sessions from previous runs
 	testutil.KillAllTestSessionsSilent()
+	if err := testutil.IsolateTmuxTestProcess(); err != nil {
+		fmt.Fprintf(os.Stderr, "isolate E2E tmux tests: %v\n", err)
+		os.Exit(1)
+	}
 
 	code := m.Run()
 

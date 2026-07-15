@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 // withTestRequestID adds a test request ID to the context.
@@ -61,6 +62,8 @@ func TestStreamingStatsEndpoint(t *testing.T) {
 }
 
 func TestStartStopStreamEndpointRejectsMissingPane(t *testing.T) {
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
+
 	// Create a minimal server with stream manager
 	s := &Server{
 		wsHub: NewWSHub(),
@@ -152,6 +155,8 @@ func TestStreamEndpointValidation(t *testing.T) {
 }
 
 func TestStreamManagerIntegration(t *testing.T) {
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
+
 	// Test that stream manager correctly formats WebSocket events
 	var receivedEvents []tmux.StreamEvent
 

@@ -107,6 +107,14 @@ func skipSlowRobotShortIntegrationTest(t *testing.T, reason string) {
 	}
 }
 
+func TestMain(m *testing.M) {
+	if err := testutil.IsolateTmuxTestProcess(); err != nil {
+		fmt.Fprintf(os.Stderr, "isolate robot tmux tests: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
+
 func TestDetectAgentType(t *testing.T) {
 	tests := []struct {
 		name     string

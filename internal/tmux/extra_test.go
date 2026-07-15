@@ -220,6 +220,7 @@ func TestBuildPaneCommand(t *testing.T) {
 func TestGetPanes_Error(t *testing.T) {
 	t.Parallel()
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 	_, err := GetPanes("nonexistent_session_12345")
 	if err == nil {
 		t.Error("GetPanes should fail for non-existent session")
@@ -229,6 +230,7 @@ func TestGetPanes_Error(t *testing.T) {
 func TestGetFirstWindow_Error(t *testing.T) {
 	t.Parallel()
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 	_, err := GetFirstWindow("nonexistent_session_12345")
 	if err == nil {
 		t.Error("GetFirstWindow should fail for non-existent session")
@@ -238,6 +240,7 @@ func TestGetFirstWindow_Error(t *testing.T) {
 func TestGetDefaultPaneIndex_Error(t *testing.T) {
 	t.Parallel()
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 	_, err := GetDefaultPaneIndex("nonexistent_session_12345")
 	if err == nil {
 		t.Error("GetDefaultPaneIndex should fail for non-existent session")
@@ -247,6 +250,7 @@ func TestGetDefaultPaneIndex_Error(t *testing.T) {
 func TestZoomPane_Error(t *testing.T) {
 	t.Parallel()
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 	err := ZoomPane("nonexistent_session_12345", 0)
 	if err == nil {
 		t.Error("ZoomPane should fail for non-existent session")
@@ -256,6 +260,7 @@ func TestZoomPane_Error(t *testing.T) {
 func TestGetCurrentSession_Simulated(t *testing.T) {
 	// cannot run in parallel due to t.Setenv
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 	// Simulate being in tmux but command failing (since we aren't actually in a client)
 	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
 

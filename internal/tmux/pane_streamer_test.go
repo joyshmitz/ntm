@@ -136,6 +136,8 @@ func TestStreamManager_Lifecycle(t *testing.T) {
 }
 
 func TestPaneStreamer_DoubleStart(t *testing.T) {
+	acquireGlobalTmuxTestLock(t)
+
 	callback := func(event StreamEvent) {}
 	cfg := DefaultPaneStreamerConfig()
 	cfg.FIFODir = t.TempDir()
@@ -158,6 +160,8 @@ func TestPaneStreamer_DoubleStart(t *testing.T) {
 }
 
 func TestStreamManager_StartStop(t *testing.T) {
+	acquireGlobalTmuxTestLock(t)
+
 	callback := func(event StreamEvent) {}
 	cfg := DefaultPaneStreamerConfig()
 	cfg.FIFODir = t.TempDir()
@@ -193,6 +197,8 @@ func TestStreamManager_StartStop(t *testing.T) {
 }
 
 func TestPaneStreamer_UsingFallback(t *testing.T) {
+	acquireGlobalTmuxTestLock(t)
+
 	callback := func(event StreamEvent) {}
 	cfg := DefaultPaneStreamerConfig()
 	cfg.FIFODir = t.TempDir()
@@ -412,6 +418,8 @@ func TestPaneStreamer_StopWithoutStart(t *testing.T) {
 }
 
 func TestPaneStreamer_StartWaitsForConcurrentStop(t *testing.T) {
+	acquireGlobalTmuxTestLock(t)
+
 	callback := func(event StreamEvent) {}
 	cfg := DefaultPaneStreamerConfig()
 	cfg.FIFODir = t.TempDir()
@@ -482,6 +490,8 @@ func TestPaneStreamer_StartWaitsForConcurrentStop(t *testing.T) {
 }
 
 func TestStreamManager_StatsWithActiveStreams(t *testing.T) {
+	acquireGlobalTmuxTestLock(t)
+
 	callback := func(event StreamEvent) {}
 	cfg := DefaultPaneStreamerConfig()
 	cfg.FIFODir = t.TempDir()
@@ -567,6 +577,8 @@ func TestCreateFIFO_AlreadyExists(t *testing.T) {
 }
 
 func TestStreamManager_MultipleStartsSameTarget(t *testing.T) {
+	acquireGlobalTmuxTestLock(t)
+
 	callback := func(event StreamEvent) {}
 	cfg := DefaultPaneStreamerConfig()
 	cfg.FIFODir = t.TempDir()
@@ -600,6 +612,8 @@ func TestStreamManager_StopNonExistent(t *testing.T) {
 }
 
 func TestPaneStreamer_FIFOPathGeneration(t *testing.T) {
+	acquireGlobalTmuxTestLock(t)
+
 	callback := func(event StreamEvent) {}
 	cfg := DefaultPaneStreamerConfig()
 	cfg.FIFODir = t.TempDir()

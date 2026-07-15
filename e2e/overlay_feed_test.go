@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 type overlayResponse struct {
@@ -32,6 +33,7 @@ func newOverlayHarness(t *testing.T, scenario string) *ScenarioHarness {
 	if testing.Short() {
 		t.Skip("skipping overlay-feed e2e in short mode")
 	}
+	testutil.AcquireGlobalTmuxTestLockForTest(t)
 
 	h, err := NewScenarioHarness(t, HarnessOptions{
 		Scenario:     scenario,
@@ -89,19 +91,26 @@ func runOverlayWithEnv(t *testing.T, h *ScenarioHarness, env []string, args ...s
 	bin := overlayNTMBin(t)
 
 	result, err := h.RunCommand(CommandSpec{
-		Name:    "robot-overlay",
-		Path:    bin,
-		Args:    args,
-		Env:     env,
-		Timeout: 15 * time.Second,
+		Name:         "robot-overlay",
+		Path:         bin,
+		Args:         args,
+		Env:          env,
+		Timeout:      15 * time.Second,
+		AllowFailure: true,
 	})
 	if err != nil {
 		t.Fatalf("RunCommand() error = %v\nstdout=%s\nstderr=%s", err, string(result.Stdout), string(result.Stderr))
 	}
-	if result.ExitCode != 0 {
-		t.Fatalf("overlay exit code = %d, want 0\nstdout=%s\nstderr=%s", result.ExitCode, string(result.Stdout), string(result.Stderr))
+
+	resp := decodeOverlayResponse(t, result.Stdout)
+	wantExitCode := 0
+	if !resp.Success {
+		wantExitCode = 1
 	}
-	return decodeOverlayResponse(t, result.Stdout)
+	if result.ExitCode != wantExitCode {
+		t.Fatalf("overlay exit code = %d, want %d for success=%t\nstdout=%s\nstderr=%s", result.ExitCode, wantExitCode, resp.Success, string(result.Stdout), string(result.Stderr))
+	}
+	return resp
 }
 
 func runOverlayInPane(t *testing.T, h *ScenarioHarness, label string, args ...string) overlayResponse {

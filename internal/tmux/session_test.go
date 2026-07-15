@@ -489,6 +489,7 @@ func TestCreateSessionWithDir(t *testing.T) {
 
 func TestSessionExistsNonExistent(t *testing.T) {
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 
 	nonExistent := "ntm_definitely_nonexistent_12345"
 	if SessionExists(nonExistent) {
@@ -587,6 +588,7 @@ func TestGetSession(t *testing.T) {
 
 func TestGetSessionNonExistent(t *testing.T) {
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 
 	_, err := GetSession("ntm_nonexistent_session")
 	if err == nil {
@@ -989,6 +991,8 @@ func TestGetDefaultPaneIndex(t *testing.T) {
 }
 
 func TestGetCurrentSession(t *testing.T) {
+	acquireGlobalTmuxTestLock(t)
+
 	// This will return empty string when not in tmux
 	session := GetCurrentSession()
 	t.Logf("GetCurrentSession returned: %q", session)
@@ -1163,6 +1167,7 @@ func TestListSessionsNoServer(t *testing.T) {
 	// This just verifies the function handles edge cases
 	// When tmux is running, it should return sessions or empty list
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 
 	sessions, err := ListSessions()
 	// Should not error even if no sessions exist
@@ -1174,6 +1179,7 @@ func TestListSessionsNoServer(t *testing.T) {
 
 func TestGetPanesWithBadSession(t *testing.T) {
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 
 	_, err := GetPanes("nonexistent_session_xyz")
 	if err == nil {
@@ -1183,6 +1189,7 @@ func TestGetPanesWithBadSession(t *testing.T) {
 
 func TestSplitWindowWithBadSession(t *testing.T) {
 	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
 
 	_, err := SplitWindow("nonexistent_session_xyz", os.TempDir())
 	if err == nil {
