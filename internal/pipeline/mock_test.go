@@ -3,11 +3,27 @@ package pipeline
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+func gateScriptedDeliveries(t *testing.T, mock *MockTmuxClient) func() {
+	t.Helper()
+	gate := make(chan struct{})
+	mock.setScriptedDeliveryGate(gate)
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(gate) })
+	}
+	t.Cleanup(func() {
+		release()
+		mock.waitForScriptedDeliveries()
+	})
+	return release
+}
 
 func TestMockTmuxClientGetPanesReturnsSortedCopy(t *testing.T) {
 	mock := NewMockTmuxClient()
@@ -164,9 +180,10 @@ func TestAgentScripterSequentialResponses(t *testing.T) {
 // and the produced count stays at 0.
 func TestAgentScripterResetCancelsInFlightDelayedResponses(t *testing.T) {
 	mock := NewMockTmuxClient(tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentCodex})
+	releaseDelivery := gateScriptedDeliveries(t, mock)
 	scripter := NewAgentScripter().
 		Match("ping", "STALE\n").
-		Delay(150 * time.Millisecond)
+		Delay(time.Nanosecond)
 	mock.SetAgentScripter(scripter)
 	t.Cleanup(mock.Reset)
 
@@ -174,13 +191,11 @@ func TestAgentScripterResetCancelsInFlightDelayedResponses(t *testing.T) {
 		t.Fatalf("PasteKeys returned error: %v", err)
 	}
 
-	// Reset before the delay fires — the scheduled goroutine should observe
-	// the new generation and drop its delivery.
-	time.Sleep(20 * time.Millisecond)
+	// PasteKeys schedules delayed delivery before returning, so Reset can
+	// deterministically invalidate that generation immediately.
 	mock.Reset()
-
-	// Wait long enough for the original timer to fire.
-	time.Sleep(250 * time.Millisecond)
+	releaseDelivery()
+	mock.waitForScriptedDeliveries()
 
 	output, err := mock.CapturePaneOutput("%1", 0)
 	if err != nil {
@@ -191,10 +206,37 @@ func TestAgentScripterResetCancelsInFlightDelayedResponses(t *testing.T) {
 	}
 
 	// Reset clears produced; a stale delivery would have re-incremented it.
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if err := scripter.Wait(ctx, 1); err == nil {
-		t.Fatal("scripter.Wait succeeded after Reset, expected stale delivery to be dropped")
+	if got := scripter.producedCount(); got != 0 {
+		t.Fatalf("produced count = %d after Reset, want 0", got)
+	}
+}
+
+func TestAgentScripterDirectResetCancelsInFlightDelayedResponses(t *testing.T) {
+	mock := NewMockTmuxClient(tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentCodex})
+	releaseDelivery := gateScriptedDeliveries(t, mock)
+	scripter := NewAgentScripter().
+		Match("ping", "STALE\n").
+		Delay(time.Nanosecond)
+	mock.SetAgentScripter(scripter)
+	t.Cleanup(mock.Reset)
+
+	if err := mock.PasteKeys("%1", "ping prompt", true); err != nil {
+		t.Fatalf("PasteKeys returned error: %v", err)
+	}
+	scripter.Reset()
+	releaseDelivery()
+	mock.waitForScriptedDeliveries()
+
+	output, err := mock.CapturePaneOutput("%1", 0)
+	if err != nil {
+		t.Fatalf("CapturePaneOutput returned error: %v", err)
+	}
+	if strings.Contains(output, "STALE") {
+		t.Fatalf("pane output contaminated after direct scripter reset: %q", output)
+	}
+
+	if got := scripter.producedCount(); got != 0 {
+		t.Fatalf("produced count = %d after direct Reset, want 0", got)
 	}
 }
 
@@ -203,18 +245,19 @@ func TestAgentScripterResetCancelsInFlightDelayedResponses(t *testing.T) {
 // generation invariant: only deliveries from the current generation count.
 func TestAgentScripterResetAllowsFreshDeliveryAfterStaleDrop(t *testing.T) {
 	mock := NewMockTmuxClient(tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentCodex})
+	releaseStaleDelivery := gateScriptedDeliveries(t, mock)
 	scripter := NewAgentScripter().
 		Match("first", "STALE\n").
 		Match("second", "FRESH\n").
-		Delay(150 * time.Millisecond)
+		Delay(time.Nanosecond)
 	mock.SetAgentScripter(scripter)
 	t.Cleanup(mock.Reset)
 
 	if err := mock.PasteKeys("%1", "first prompt", true); err != nil {
 		t.Fatalf("first PasteKeys returned error: %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
 	mock.Reset()
+	mock.setScriptedDeliveryGate(nil)
 
 	// Re-arm with a same-pattern rule and dispatch fresh — the new generation
 	// should deliver normally.
@@ -222,6 +265,8 @@ func TestAgentScripterResetAllowsFreshDeliveryAfterStaleDrop(t *testing.T) {
 	if err := mock.PasteKeys("%1", "second prompt", true); err != nil {
 		t.Fatalf("second PasteKeys returned error: %v", err)
 	}
+	releaseStaleDelivery()
+	mock.waitForScriptedDeliveries()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

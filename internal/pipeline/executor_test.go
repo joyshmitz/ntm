@@ -3,9 +3,12 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1664,7 +1667,6 @@ func TestExecutor_Resume_NilState(t *testing.T) {
 
 // TestExecutor_sendNotification tests notification sending
 func TestExecutor_sendNotification(t *testing.T) {
-
 	cfg := DefaultExecutorConfig("test-session")
 	e := NewExecutor(cfg)
 
@@ -1687,20 +1689,61 @@ func TestExecutor_sendNotification(t *testing.T) {
 	}
 
 	// Test with nil notifier (should not panic)
-	e.sendNotification(context.Background(), workflow, NotifyCompleted)
+	e.sendNotification(t.Context(), workflow, NotifyCompleted)
 
-	// Test with notifier set
+	type webhookRequest struct {
+		payload     NotificationPayload
+		method      string
+		contentType string
+		err         error
+	}
+	received := make(chan webhookRequest, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		request := webhookRequest{
+			method:      r.Method,
+			contentType: r.Header.Get("Content-Type"),
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		request.err = decoder.Decode(&request.payload)
+		received <- request
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	// Test with a hermetic notifier set.
 	notifier := NewNotifier(NotifierConfig{
-		Channels: []string{"desktop"},
+		Channels:   []string{"webhook"},
+		WebhookURL: server.URL,
 	})
 	e.SetNotifier(notifier)
 
-	// This should call the notifier (won't actually send since no real desktop)
-	e.sendNotification(context.Background(), workflow, NotifyCompleted)
+	e.sendNotification(t.Context(), workflow, NotifyCompleted)
+	var request webhookRequest
+	select {
+	case request = <-received:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for webhook notification")
+	}
+	if request.err != nil {
+		t.Fatalf("decode webhook payload: %v", request.err)
+	}
+	if request.method != http.MethodPost || request.contentType != "application/json" {
+		t.Fatalf("webhook request = %s content-type %q, want POST application/json", request.method, request.contentType)
+	}
+	if request.payload.Event != NotifyCompleted || request.payload.WorkflowName != workflow.Name || request.payload.RunID != e.state.RunID {
+		t.Fatalf("webhook payload = %+v, want completed event for workflow %q run %q", request.payload, workflow.Name, e.state.RunID)
+	}
 
 	// Test with event that shouldn't notify
 	workflow.Settings.NotifyOnComplete = false
-	e.sendNotification(context.Background(), workflow, NotifyCompleted)
+	e.sendNotification(t.Context(), workflow, NotifyCompleted)
+	select {
+	case request := <-received:
+		t.Fatalf("notification disabled but webhook received %+v", request.payload)
+	default:
+	}
 }
 
 // TestExecutor_selectPane_DryRun tests selectPane returns dummy values in dry run mode
@@ -1843,7 +1886,7 @@ func TestDetectAgentState_EmptyPaneID(t *testing.T) {
 func TestWaitForIdle_ContextCancelled(t *testing.T) {
 
 	cfg := DefaultExecutorConfig("test")
-	cfg.ProgressInterval = 50 * time.Millisecond // Fast for testing
+	cfg.ProgressInterval = MinProgressInterval
 	e := NewExecutor(cfg)
 
 	// Create already cancelled context
@@ -1865,7 +1908,7 @@ func TestWaitForIdle_ContextCancelled(t *testing.T) {
 func TestWaitForIdle_ContextDeadline(t *testing.T) {
 
 	cfg := DefaultExecutorConfig("test")
-	cfg.ProgressInterval = 50 * time.Millisecond // Fast for testing
+	cfg.ProgressInterval = MinProgressInterval
 	e := NewExecutor(cfg)
 
 	// Create context with very short deadline
@@ -2043,7 +2086,7 @@ func TestExecutor_Run_DryRun_WithLoop(t *testing.T) {
 func TestWaitForIdle_SuccessfulDetection(t *testing.T) {
 
 	cfg := DefaultExecutorConfig("test")
-	cfg.ProgressInterval = 50 * time.Millisecond
+	cfg.ProgressInterval = MinProgressInterval
 	e := NewExecutor(cfg)
 
 	var callCount int32
@@ -2072,7 +2115,7 @@ func TestWaitForIdle_SuccessfulDetection(t *testing.T) {
 func TestWaitForIdle_TimeoutWithMock(t *testing.T) {
 
 	cfg := DefaultExecutorConfig("test")
-	cfg.ProgressInterval = 50 * time.Millisecond
+	cfg.ProgressInterval = MinProgressInterval
 	e := NewExecutor(cfg)
 
 	e.detector = &mockDetector{
@@ -2082,7 +2125,8 @@ func TestWaitForIdle_TimeoutWithMock(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	err := e.waitForIdle(ctx, "mock-pane", 3*time.Second)
+	started := time.Now()
+	err := e.waitForIdle(ctx, "mock-pane", 250*time.Millisecond)
 
 	if err == nil {
 		t.Fatal("waitForIdle() should return error on timeout")
@@ -2090,13 +2134,16 @@ func TestWaitForIdle_TimeoutWithMock(t *testing.T) {
 	if !strings.Contains(err.Error(), "timeout") {
 		t.Errorf("expected timeout error, got: %v", err)
 	}
+	if elapsed := time.Since(started); elapsed >= 1500*time.Millisecond {
+		t.Errorf("waitForIdle() returned after %s, want timeout to include the initial debounce", elapsed)
+	}
 }
 
 // TestWaitForIdle_DetectorErrors tests that waitForIdle continues polling when detector returns errors
 func TestWaitForIdle_DetectorErrors(t *testing.T) {
 
 	cfg := DefaultExecutorConfig("test")
-	cfg.ProgressInterval = 50 * time.Millisecond
+	cfg.ProgressInterval = MinProgressInterval
 	e := NewExecutor(cfg)
 
 	var callCount int32
@@ -2124,7 +2171,7 @@ func TestWaitForIdle_DetectorErrors(t *testing.T) {
 // for idleStablePolls consecutive polls.
 func TestWaitForIdle_RequiresStableIdleStreak(t *testing.T) {
 	cfg := DefaultExecutorConfig("test")
-	cfg.ProgressInterval = 50 * time.Millisecond
+	cfg.ProgressInterval = MinProgressInterval
 	e := NewExecutor(cfg)
 
 	// Flap: every idle reading is immediately followed by working readings,
@@ -2151,7 +2198,7 @@ func TestWaitForIdle_RequiresStableIdleStreak(t *testing.T) {
 // exactly idleStablePolls consecutive idle readings.
 func TestWaitForIdle_StableIdleCompletes(t *testing.T) {
 	cfg := DefaultExecutorConfig("test")
-	cfg.ProgressInterval = 50 * time.Millisecond
+	cfg.ProgressInterval = MinProgressInterval
 	e := NewExecutor(cfg)
 
 	var callCount int32

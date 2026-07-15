@@ -83,9 +83,15 @@ func TestExecutor_Run_GlobalTimeoutRunsOnCancelSteps(t *testing.T) {
 		t.Fatal("state.FinishedAt is zero")
 	}
 
-	slow := state.Steps["slow"]
-	if slow.Status != StatusCancelled {
-		t.Fatalf("slow.Status = %q, want %q; error=%+v", slow.Status, StatusCancelled, slow.Error)
+	foundTimeout := false
+	for _, stateErr := range state.Errors {
+		if stateErr.Type == "timeout" {
+			foundTimeout = true
+			break
+		}
+	}
+	if !foundTimeout {
+		t.Fatalf("state.Errors = %+v, want a workflow timeout error", state.Errors)
 	}
 	cleanup := state.Steps["cleanup"]
 	if cleanup.Status != StatusCompleted {
@@ -98,6 +104,88 @@ func TestExecutor_Run_GlobalTimeoutRunsOnCancelSteps(t *testing.T) {
 	}
 	if strings.TrimSpace(string(data)) != "cleanup" {
 		t.Fatalf("cleanup file = %q, want cleanup", string(data))
+	}
+}
+
+func TestExecutor_Run_CancellationRecordsActiveStep(t *testing.T) {
+	tmpDir := t.TempDir()
+	startedPath := filepath.Join(tmpDir, "started.txt")
+
+	cfg := DefaultExecutorConfig("test-active-cancel")
+	cfg.ProjectDir = tmpDir
+	e := NewExecutor(cfg)
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "active-cancel",
+		Settings: WorkflowSettings{
+			Timeout: Duration{Duration: 30 * time.Second},
+			OnError: ErrorActionFail,
+		},
+		Steps: []Step{
+			{
+				ID:      "slow",
+				Command: "printf started > " + strconv.Quote(startedPath) + "; sleep 10",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type runOutcome struct {
+		state *ExecutionState
+		err   error
+	}
+	runDone := make(chan runOutcome, 1)
+	go func() {
+		state, err := e.Run(ctx, workflow, nil, nil)
+		runDone <- runOutcome{state: state, err: err}
+	}()
+
+	waitForRun := func() runOutcome {
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+		select {
+		case outcome := <-runDone:
+			return outcome
+		case <-timer.C:
+			t.Fatal("Run() did not return within 10s of cancellation")
+			return runOutcome{}
+		}
+	}
+
+	markerTimer := time.NewTimer(10 * time.Second)
+	defer markerTimer.Stop()
+	markerPoll := time.NewTicker(10 * time.Millisecond)
+	defer markerPoll.Stop()
+	var lastMarkerErr error
+
+waitForStart:
+	for {
+		select {
+		case <-markerPoll.C:
+			data, err := os.ReadFile(startedPath)
+			lastMarkerErr = err
+			if err == nil && strings.TrimSpace(string(data)) == "started" {
+				break waitForStart
+			}
+		case <-markerTimer.C:
+			cancel()
+			outcome := waitForRun()
+			t.Fatalf("slow command did not publish its start marker: last error=%v state=%+v run error=%v", lastMarkerErr, outcome.state, outcome.err)
+		}
+	}
+
+	cancel()
+	outcome := waitForRun()
+	if outcome.err == nil {
+		t.Fatal("Run() error = nil, want cancellation error")
+	}
+	if outcome.state == nil || outcome.state.Status != StatusCancelled {
+		t.Fatalf("state = %+v, want cancelled workflow", outcome.state)
+	}
+	slow := outcome.state.Steps["slow"]
+	if slow.Status != StatusCancelled {
+		t.Fatalf("slow.Status = %q, want %q; error=%+v", slow.Status, StatusCancelled, slow.Error)
 	}
 }
 

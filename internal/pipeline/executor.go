@@ -3009,13 +3009,18 @@ func (e *Executor) waitForIdle(ctx context.Context, paneID string, timeout time.
 	ticker := time.NewTicker(e.config.ProgressInterval)
 	defer ticker.Stop()
 
-	deadline := time.After(timeout)
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	debounce := time.NewTimer(2 * time.Second)
+	defer debounce.Stop()
 
 	// Initial debounce to let agent start working
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(2 * time.Second):
+	case <-deadline.C:
+		return fmt.Errorf("timeout after %s", timeout)
+	case <-debounce.C:
 	}
 
 	idleStreak := 0
@@ -3023,7 +3028,7 @@ func (e *Executor) waitForIdle(ctx context.Context, paneID string, timeout time.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-deadline:
+		case <-deadline.C:
 			return fmt.Errorf("timeout after %s", timeout)
 		case <-ticker.C:
 			state, err := e.detector.Detect(paneID)

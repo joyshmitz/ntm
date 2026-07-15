@@ -27,7 +27,7 @@ func TestIntegrationCommandAndTemplatePipeline(t *testing.T) {
 
 	cfg := DefaultExecutorConfig("command-template-session")
 	cfg.ProjectDir = projectDir
-	cfg.DefaultTimeout = time.Second
+	cfg.DefaultTimeout = 10 * time.Second
 	executor := NewExecutor(cfg)
 	executor.SetTmuxClient(mock)
 
@@ -62,7 +62,7 @@ func TestIntegrationCommandAndTemplatePipeline(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	state, err := executor.Run(ctx, workflow, nil, nil)
 	if err != nil {
@@ -141,7 +141,7 @@ func TestIntegrationForeachPaneTemplateRendersPerPaneSubstitution(t *testing.T) 
 
 	cfg := DefaultExecutorConfig("mo-onboarding-session")
 	cfg.ProjectDir = projectDir
-	cfg.DefaultTimeout = time.Second
+	cfg.DefaultTimeout = 10 * time.Second
 	executor := NewExecutor(cfg)
 	executor.SetTmuxClient(mock)
 
@@ -170,7 +170,7 @@ func TestIntegrationForeachPaneTemplateRendersPerPaneSubstitution(t *testing.T) 
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	state, err := executor.Run(ctx, workflow, nil, nil)
 	if err != nil {

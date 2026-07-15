@@ -311,7 +311,9 @@ func TestForeachMaxRounds_NegativeLiteralRejectedAtParse(t *testing.T) {
 // value cannot drive the body loop unbounded. Literal values are not
 // clamped (parser already rejected the dangerous shapes).
 func TestForeachMaxRounds_ExprResolvedAboveCapClampsToDefault(t *testing.T) {
-	executor := NewExecutor(DefaultExecutorConfig("max-rounds-cap"))
+	cfg := DefaultExecutorConfig("max-rounds-cap")
+	cfg.DryRun = true
+	executor := NewExecutor(cfg)
 
 	workflow := &Workflow{
 		SchemaVersion: SchemaVersion,
@@ -360,7 +362,9 @@ func TestForeachMaxRounds_ExprResolvedAboveCapClampsToDefault(t *testing.T) {
 // well above the operator's chosen cap so we observe the clamp at the new
 // boundary instead of at DefaultMaxRounds.
 func TestForeachMaxRounds_OperatorOverrideRaisesCap(t *testing.T) {
-	executor := NewExecutor(DefaultExecutorConfig("max-rounds-override"))
+	cfg := DefaultExecutorConfig("max-rounds-override")
+	cfg.DryRun = true
+	executor := NewExecutor(cfg)
 
 	settings := DefaultWorkflowSettings()
 	settings.Limits.MaxForeachRounds = 250

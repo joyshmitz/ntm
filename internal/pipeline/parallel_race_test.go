@@ -13,6 +13,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -35,19 +36,25 @@ func newRaceExecutor(t *testing.T, workflowName string) *Executor {
 	return e
 }
 
-// stressSnapshots spins concurrent snapshotState + substituteVariables readers
-// until stop is closed. Returns a WaitGroup the caller should wg.Wait() on
-// after closing stop.
-func stressSnapshots(t *testing.T, e *Executor, readers int, stop <-chan struct{}, templates ...string) *sync.WaitGroup {
+// stressSnapshots runs concurrent snapshotState + substituteVariables readers
+// until stop is closed. Readers are ready and blocked on start before this
+// returns, so closing start immediately before dispatch guarantees pressure is
+// present while the worker runs. Each pass yields to avoid monopolizing a CPU
+// under the race detector.
+func stressSnapshots(t *testing.T, e *Executor, readers int, start, stop <-chan struct{}, templates ...string) *sync.WaitGroup {
 	t.Helper()
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	if len(templates) == 0 {
 		templates = []string{"${vars.absent | \"x\"}"}
 	}
+	ready.Add(readers)
 	for i := 0; i < readers; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			ready.Done()
+			<-start
 			for {
 				select {
 				case <-stop:
@@ -59,9 +66,11 @@ func stressSnapshots(t *testing.T, e *Executor, readers int, stop <-chan struct{
 					return
 				}
 				_ = e.substituteVariables(templates[idx%len(templates)])
+				runtime.Gosched()
 			}
 		}(i)
 	}
+	ready.Wait()
 	return &wg
 }
 
@@ -94,9 +103,12 @@ func TestRace_ParallelInline_50steps(t *testing.T) {
 		Parallel: ParallelSpec{Steps: parallelSteps},
 	}
 
+	start := make(chan struct{})
 	stop := make(chan struct{})
-	wg := stressSnapshots(t, e, 4, stop, "ping ${vars.absent | \"x\"}")
+	wg := stressSnapshots(t, e, 4, start, stop, "ping ${vars.absent | \"x\"}")
 
+	close(start)
+	runtime.Gosched()
 	result := e.executeParallel(context.Background(), step, workflow)
 
 	close(stop)
@@ -149,13 +161,16 @@ func TestRace_ForeachLoopUnderSnapshotPressure(t *testing.T) {
 		},
 	}
 
+	start := make(chan struct{})
 	stop := make(chan struct{})
-	wg := stressSnapshots(t, e, 8, stop,
+	wg := stressSnapshots(t, e, 8, start, stop,
 		"loop ${loop.row | \"none\"}",
 		"index ${loop.index | \"-\"}",
 		"data ${data | \"none\"}",
 	)
 
+	close(start)
+	runtime.Gosched()
 	res := e.executeLoop(context.Background(), step, workflow)
 	close(stop)
 	wg.Wait()
@@ -213,12 +228,15 @@ func TestRace_NestedForeachParallel(t *testing.T) {
 		},
 	}
 
+	start := make(chan struct{})
 	stop := make(chan struct{})
-	wg := stressSnapshots(t, e, 4, stop,
+	wg := stressSnapshots(t, e, 4, start, stop,
 		"snap ${loop.row | \"-\"}",
 		"snap2 ${loop.index | \"-\"}",
 	)
 
+	close(start)
+	runtime.Gosched()
 	res := e.executeLoop(context.Background(), step, workflow)
 	close(stop)
 	wg.Wait()
@@ -255,13 +273,18 @@ func TestRace_VariableScopeStackUnderForeach(t *testing.T) {
 
 	var writerWG sync.WaitGroup
 	var readerWG sync.WaitGroup
+	var ready sync.WaitGroup
+	start := make(chan struct{})
 	stop := make(chan struct{})
 	var pushes int64
 
+	ready.Add(readers + writers)
 	for i := 0; i < readers; i++ {
 		readerWG.Add(1)
 		go func() {
 			defer readerWG.Done()
+			ready.Done()
+			<-start
 			for {
 				select {
 				case <-stop:
@@ -270,6 +293,7 @@ func TestRace_VariableScopeStackUnderForeach(t *testing.T) {
 				}
 				_ = e.substituteVariables("${base | \"-\"} ${loop.row_w0 | \"-\"} ${loop.index | \"-\"}")
 				_ = e.snapshotState()
+				runtime.Gosched()
 			}
 		}()
 	}
@@ -278,15 +302,21 @@ func TestRace_VariableScopeStackUnderForeach(t *testing.T) {
 		writerWG.Add(1)
 		go func(id int) {
 			defer writerWG.Done()
+			ready.Done()
+			<-start
 			varName := fmt.Sprintf("row_w%d", id)
 			for i := 0; i < itersPerWriter; i++ {
 				scope := e.loopExec.pushLoopVars(varName, fmt.Sprintf("v-%d-%d", id, i), i, itersPerWriter)
 				atomic.AddInt64(&pushes, 1)
 				e.loopExec.popLoopVars(scope)
+				runtime.Gosched()
 			}
 		}(w)
 	}
 
+	ready.Wait()
+	close(start)
+	runtime.Gosched()
 	writerWG.Wait()
 	close(stop)
 	readerWG.Wait()
