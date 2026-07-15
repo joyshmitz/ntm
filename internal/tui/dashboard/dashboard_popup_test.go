@@ -834,7 +834,7 @@ func TestPopupModeVsNormalModeComparison(t *testing.T) {
 	}
 
 	t.Log("Popup Mode vs Normal Mode Behavior Comparison:")
-	t.Log("=" + string(make([]byte, 70)))
+	t.Log(strings.Repeat("=", 71))
 
 	for _, c := range comparisons {
 		t.Run(c.action, func(t *testing.T) {
