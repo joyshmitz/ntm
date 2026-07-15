@@ -4012,10 +4012,9 @@ func TestE2EAtomicAssignmentAmbiguousTMUXDeliveryDoesNotRetry(t *testing.T) {
 	fixture := newAtomicAssignmentCLIFixture(t)
 	beadID := fixture.createBead(t, "Ambiguous tmux delivery")
 	prompt := fmt.Sprintf("NTM_ATOMIC_AMBIGUOUS_TMUX_%d", time.Now().UnixNano())
-	originalPaneIDs := map[int]string{0: fixture.panes[0].ID, 1: fixture.panes[1].ID}
-	fixture.mustTMUX(t, "set-hook", "-g", "after-send-keys", "kill-server")
+	tmuxBinary, fired := fixture.armTMUXPostActuationFailure(t)
 
-	first := fixture.runNTM(t, nil, atomicDirectArgs(fixture, beadID, prompt, false)...)
+	first := fixture.runNTM(t, map[string]string{"NTM_TMUX_BINARY": tmuxBinary}, atomicDirectArgs(fixture, beadID, prompt, false)...)
 	if first.exitCode != 1 || len(bytes.TrimSpace(first.stderr)) != 0 {
 		t.Fatalf("ambiguous tmux assignment exit=%d stdout=%s stderr=%s", first.exitCode, first.stdout, first.stderr)
 	}
@@ -4029,15 +4028,13 @@ func TestE2EAtomicAssignmentAmbiguousTMUXDeliveryDoesNotRetry(t *testing.T) {
 		pending.DispatchedAt != nil || pending.DispatchStartedAt == nil || pending.IdempotencyKey == "" {
 		t.Fatalf("ambiguous tmux durable state = %+v", pending)
 	}
+	if _, statErr := os.Stat(fired); statErr != nil {
+		t.Fatalf("ambiguous tmux wrapper did not fail after actuation: %v", statErr)
+	}
+	fixture.waitForMarkerCount(t, 0, prompt, 1)
 	fixture.assertBead(t, beadID, "in_progress", pending.ClaimActor)
 
-	fixture.startAgentPanes(t)
-	for pane, id := range originalPaneIDs {
-		if fixture.panes[pane].ID != id {
-			t.Fatalf("private tmux restart changed pane %d ID: before=%s after=%s", pane, id, fixture.panes[pane].ID)
-		}
-	}
-	second := fixture.runNTM(t, nil, atomicDirectArgs(fixture, beadID, prompt, false)...)
+	second := fixture.runNTM(t, map[string]string{"NTM_TMUX_BINARY": fixture.tmuxPath}, atomicDirectArgs(fixture, beadID, prompt, false)...)
 	if second.exitCode != 1 || len(bytes.TrimSpace(second.stderr)) != 0 {
 		t.Fatalf("ambiguous tmux replay exit=%d stdout=%s stderr=%s", second.exitCode, second.stdout, second.stderr)
 	}
@@ -4049,7 +4046,7 @@ func TestE2EAtomicAssignmentAmbiguousTMUXDeliveryDoesNotRetry(t *testing.T) {
 	if after := fixture.readLedgerAssignment(t, beadID); !reflect.DeepEqual(after, pending) {
 		t.Fatalf("ambiguous tmux replay mutated or retried generation: before=%+v after=%+v", pending, after)
 	}
-	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 0, 1: 0})
+	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 1, 1: 0})
 }
 
 func TestE2EAtomicAssignmentReassignTransfersReservation(t *testing.T) {
@@ -7565,7 +7562,22 @@ func waitForAtomicAssignmentSignal(t *testing.T, signal <-chan struct{}, descrip
 	}
 }
 
+func (f *atomicAssignmentCLIFixture) armTMUXPostActuationFailure(t *testing.T) (string, string) {
+	t.Helper()
+	return f.armNthTMUXCommandFault(t, "ambiguous-delivery", "Enter", f.panes[0].ID, 1, true)
+}
+
 func (f *atomicAssignmentCLIFixture) armNthTMUXCommandBlock(t *testing.T, name, command string, occurrence int) (string, string) {
+	t.Helper()
+	return f.armNthTMUXCommandFault(t, name, command, "", occurrence, false)
+}
+
+func (f *atomicAssignmentCLIFixture) armNthTMUXCommandFault(
+	t *testing.T,
+	name, command, requiredArg string,
+	occurrence int,
+	failAfterActuation bool,
+) (string, string) {
 	t.Helper()
 	if occurrence < 1 {
 		t.Fatalf("tmux block occurrence=%d, want positive", occurrence)
@@ -7582,19 +7594,25 @@ func (f *atomicAssignmentCLIFixture) armNthTMUXCommandBlock(t *testing.T, name, 
 		"counter=" + tmux.ShellQuote(counter),
 		"reached=" + tmux.ShellQuote(reached),
 		"wanted_command=" + tmux.ShellQuote(command),
+		"wanted_arg=" + tmux.ShellQuote(requiredArg),
 		fmt.Sprintf("wanted_occurrence=%d", occurrence),
+		fmt.Sprintf("fail_after_actuation=%t", failAfterActuation),
 		"matched=0",
+		`has_wanted_arg=0; if [ -z "$wanted_arg" ]; then has_wanted_arg=1; fi`,
 		`for arg in "$@"; do`,
 		`  if [ "$arg" = "$wanted_command" ]; then matched=1; fi`,
+		`  if [ "$arg" = "$wanted_arg" ]; then has_wanted_arg=1; fi`,
 		"done",
-		`if [ "$matched" -eq 1 ]; then`,
+		`if [ "$matched" -eq 1 ] && [ "$has_wanted_arg" -eq 1 ]; then`,
 		"  count=0",
 		`  if [ -f "$counter" ]; then IFS= read -r count < "$counter"; fi`,
 		`  case "$count" in ''|*[!0-9]*) count=0 ;; esac`,
 		"  count=$((count + 1))",
 		`  printf '%s\n' "$count" > "$counter"`,
 		`  if [ "$count" -eq "$wanted_occurrence" ]; then`,
+		`    if [ "$fail_after_actuation" = true ]; then "$real_tmux" "$@" || exit $?; fi`,
 		`    printf 'reached\n' > "$reached"`,
+		`    if [ "$fail_after_actuation" = true ]; then printf 'injected tmux failure after actuation\n' >&2; exit 91; fi`,
 		"    while :; do :; done",
 		"  fi",
 		"fi",
