@@ -148,9 +148,7 @@ func TestFindingToMap(t *testing.T) {
 }
 
 func TestHandleScannerStatusUnavailable(t *testing.T) {
-	if scanner.IsAvailable() {
-		t.Skip("ubs installed; unavailable path not deterministic")
-	}
+	t.Setenv("PATH", t.TempDir())
 	resetScannerStoreForTest()
 	addTestScan("scan-running", ScanStateRunning)
 	addTestScan("scan-done", ScanStateCompleted)
@@ -519,9 +517,7 @@ func TestHandleBugsNotify(t *testing.T) {
 }
 
 func TestHandleRunScanUnavailable(t *testing.T) {
-	if scanner.IsAvailable() {
-		t.Skip("ubs installed; unavailable path not deterministic")
-	}
+	t.Setenv("PATH", t.TempDir())
 	resetScannerStoreForTest()
 	srv, _ := setupTestServer(t)
 
@@ -535,6 +531,7 @@ func TestHandleRunScanUnavailable(t *testing.T) {
 }
 
 func TestHandleRunScanAlreadyRunning(t *testing.T) {
+	skipServeRealToolsInShort(t, "ubs")
 	if !scanner.IsAvailable() {
 		t.Skip("ubs not installed; cannot test running scan conflict")
 	}

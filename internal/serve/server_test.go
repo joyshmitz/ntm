@@ -37,6 +37,13 @@ import (
 
 var errServeTestAgentSpawnDisabled = errors.New("agent spawning disabled in serve unit tests")
 
+func skipServeRealToolsInShort(t *testing.T, tools ...string) {
+	t.Helper()
+	if testing.Short() {
+		t.Skipf("skipping real %s integration in short mode", strings.Join(tools, ", "))
+	}
+}
+
 func setupTestServer(t *testing.T) (*Server, *state.Store) {
 	t.Helper()
 
@@ -69,6 +76,7 @@ func setupTestServer(t *testing.T) (*Server, *state.Store) {
 		EventBus:   eventBus,
 		StateStore: store,
 	})
+	srv.projectDir = t.TempDir()
 	srv.spawnAgents = func(context.Context, robot.SpawnOptions) (*robot.SpawnOutput, error) {
 		return nil, errServeTestAgentSpawnDisabled
 	}
@@ -94,6 +102,14 @@ func TestSetupTestServerIsolatesTMUXAndAgentSpawn(t *testing.T) {
 	}
 	if got := os.Getenv("TMUX_TMPDIR"); got == "" {
 		t.Fatal("TMUX_TMPDIR must identify an isolated socket root")
+	}
+	if srv.projectDir == "" {
+		t.Fatal("projectDir must identify an isolated project root")
+	}
+	if cwd, err := os.Getwd(); err != nil {
+		t.Fatalf("get working directory: %v", err)
+	} else if filepath.Clean(srv.projectDir) == filepath.Clean(cwd) {
+		t.Fatalf("projectDir = %q, must not use package working directory", srv.projectDir)
 	}
 
 	result, err := srv.spawnAgents(context.Background(), robot.SpawnOptions{Session: "must-not-launch", CCCount: 1})

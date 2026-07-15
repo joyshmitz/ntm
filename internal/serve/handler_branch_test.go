@@ -4693,6 +4693,7 @@ func TestHandleRunScan_BadJSON(t *testing.T) {
 // --- handleRunScan: successful start (ubs installed, no running scan, empty body) ---
 
 func TestHandleRunScan_SuccessEmptyBody(t *testing.T) {
+	skipServeRealToolsInShort(t, "ubs")
 	if !scanner.IsAvailable() {
 		t.Skip("ubs not installed")
 	}
@@ -4725,6 +4726,7 @@ func TestHandleRunScan_SuccessEmptyBody(t *testing.T) {
 // --- handleRunScan: successful start with custom path ---
 
 func TestHandleRunScan_SuccessWithPath(t *testing.T) {
+	skipServeRealToolsInShort(t, "ubs")
 	if !scanner.IsAvailable() {
 		t.Skip("ubs not installed")
 	}
@@ -4746,6 +4748,8 @@ func TestHandleRunScan_SuccessWithPath(t *testing.T) {
 // --- handleScannerStatus: with ubs available (tests version retrieval path) ---
 
 func TestHandleScannerStatus_Available(t *testing.T) {
+	skipServeRealToolsInShort(t, "ubs")
+
 	if !scanner.IsAvailable() {
 		t.Skip("ubs not installed")
 	}
@@ -5112,6 +5116,7 @@ func TestIdempotencyStore_Get_Expired(t *testing.T) {
 // --- handleCASSSearch: valid query (cass installed, full search path) ---
 
 func TestHandleCASSSearch_ValidQuery(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -5145,6 +5150,7 @@ func TestHandleCASSSearch_ValidQuery(t *testing.T) {
 // --- handleCASSPreview: valid path (cass installed) ---
 
 func TestHandleCASSPreview_ValidPath(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -5184,6 +5190,7 @@ func TestHandleCASSPreview_MissingPath(t *testing.T) {
 // --- handleListBeads: br installed but non-git project dir (exercises RunBd error path) ---
 
 func TestHandleListBeads_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5203,6 +5210,7 @@ func TestHandleListBeads_BrInstalledBadDir(t *testing.T) {
 // --- handleListBeads: with filters query params ---
 
 func TestHandleListBeads_WithFilters(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5222,6 +5230,7 @@ func TestHandleListBeads_WithFilters(t *testing.T) {
 // --- handleBeadsStats: br installed, temp dir ---
 
 func TestHandleBeadsStats_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5241,6 +5250,7 @@ func TestHandleBeadsStats_BrInstalledBadDir(t *testing.T) {
 // --- handleBeadsReady: br installed, temp dir ---
 
 func TestHandleBeadsReady_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5259,6 +5269,7 @@ func TestHandleBeadsReady_BrInstalledBadDir(t *testing.T) {
 // --- handleBeadsBlocked: br installed, temp dir ---
 
 func TestHandleBeadsBlocked_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5277,6 +5288,7 @@ func TestHandleBeadsBlocked_BrInstalledBadDir(t *testing.T) {
 // --- handleBeadsInProgress: br installed, temp dir ---
 
 func TestHandleBeadsInProgress_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5295,6 +5307,7 @@ func TestHandleBeadsInProgress_BrInstalledBadDir(t *testing.T) {
 // --- handleBeadsSync: br installed, temp dir ---
 
 func TestHandleBeadsSync_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5318,6 +5331,7 @@ func TestHandleBeadsSync_BrInstalledBadDir(t *testing.T) {
 // --- handleCASSCapabilities: full path (cass installed) ---
 
 func TestHandleCASSCapabilities_Installed(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -5342,6 +5356,7 @@ func TestHandleCASSCapabilities_Installed(t *testing.T) {
 // --- handleCASSInsights: full path (cass installed) ---
 
 func TestHandleCASSInsights_Installed(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -5359,6 +5374,7 @@ func TestHandleCASSInsights_Installed(t *testing.T) {
 // --- handleCASSTimeline: full path (cass installed) ---
 
 func TestHandleCASSTimeline_Installed(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -5377,6 +5393,7 @@ func TestHandleCASSTimeline_Installed(t *testing.T) {
 // --- handleGetBead: br installed, bead not found in temp dir ---
 
 func TestHandleGetBead_NotFound(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5399,6 +5416,7 @@ func TestHandleGetBead_NotFound(t *testing.T) {
 // --- handleUpdateBead: br installed, valid JSON but no .beads ---
 
 func TestHandleUpdateBead_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5425,6 +5443,7 @@ func TestHandleUpdateBead_BrInstalledBadDir(t *testing.T) {
 // --- handleCloseBead: br installed, bead not found ---
 
 func TestHandleCloseBead_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5446,6 +5465,7 @@ func TestHandleCloseBead_BrInstalledBadDir(t *testing.T) {
 // --- handleListBeadDeps: br installed, bad dir ---
 
 func TestHandleListBeadDeps_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5467,6 +5487,7 @@ func TestHandleListBeadDeps_BrInstalledBadDir(t *testing.T) {
 // --- handleRemoveBeadDep: br installed, bad dir ---
 
 func TestHandleRemoveBeadDep_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5489,6 +5510,7 @@ func TestHandleRemoveBeadDep_BrInstalledBadDir(t *testing.T) {
 // --- handleCreateBead: br installed, valid title but bad dir ---
 
 func TestHandleCreateBead_BrInstalledBadDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -5512,6 +5534,7 @@ func TestHandleCreateBead_BrInstalledBadDir(t *testing.T) {
 // --- handleMemoryDaemonStart: cm installed, temp dir (no existing daemon) ---
 
 func TestHandleMemoryDaemonStart_CmInstalled(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -5715,6 +5738,7 @@ func TestHandleMemoryDaemonStart_BadJSON(t *testing.T) {
 // --- handleMemoryContext: cm installed ---
 
 func TestHandleMemoryContext_CmInstalled(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -5783,6 +5807,7 @@ func TestHandleMemoryOutcome_BadJSON_Branch(t *testing.T) {
 // --- handleBeadsRecipes: bv installed check ---
 
 func TestHandleBeadsRecipes_BvInstalled(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	if !bv.IsInstalled() {
 		t.Skip("bv not installed")
 	}
@@ -6405,6 +6430,7 @@ func TestHandleRenewReservation_ValidBody_Branch(t *testing.T) {
 // --- handleMemoryRules: cm installed, exercises full path ---
 
 func TestHandleMemoryRules_CmInstalled_Branch(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -6613,6 +6639,7 @@ func TestHandleCreateMailAgent_ValidBody_Branch(t *testing.T) {
 // --- handleCASSInsights: cass installed exercises full path ---
 
 func TestHandleCASSInsights_CassInstalled(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -6634,6 +6661,7 @@ func TestHandleCASSInsights_CassInstalled(t *testing.T) {
 // --- handleCASSPreview: cass installed with existing file ---
 
 func TestHandleCASSPreview_CassInstalled_ValidPath(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -6655,6 +6683,7 @@ func TestHandleCASSPreview_CassInstalled_ValidPath(t *testing.T) {
 // --- handleMemoryContext: cm installed with valid task ---
 
 func TestHandleMemoryContext_CmInstalledValidTask(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -6741,6 +6770,7 @@ func TestHandleReservePaths_DefaultTTL_Branch(t *testing.T) {
 // --- Bead handlers with real project dir (success paths) ---
 
 func TestHandleListBeads_WithProjectDir_Filters(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6758,6 +6788,7 @@ func TestHandleListBeads_WithProjectDir_Filters(t *testing.T) {
 }
 
 func TestHandleBeadsStats_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6781,6 +6812,7 @@ func TestHandleBeadsStats_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsReady_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6797,6 +6829,7 @@ func TestHandleBeadsReady_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsBlocked_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6813,6 +6846,7 @@ func TestHandleBeadsBlocked_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsInProgress_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6829,6 +6863,7 @@ func TestHandleBeadsInProgress_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleListBeadDeps_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6849,6 +6884,7 @@ func TestHandleListBeadDeps_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleClaimBead_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6870,6 +6906,7 @@ func TestHandleClaimBead_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsInsights_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	if !bv.IsInstalled() {
 		t.Skip("bv not installed")
 	}
@@ -6886,6 +6923,7 @@ func TestHandleBeadsInsights_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsPlan_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	if !bv.IsInstalled() {
 		t.Skip("bv not installed")
 	}
@@ -6902,6 +6940,7 @@ func TestHandleBeadsPlan_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsPriority_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	if !bv.IsInstalled() {
 		t.Skip("bv not installed")
 	}
@@ -6918,6 +6957,7 @@ func TestHandleBeadsPriority_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsRecipes_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	if !bv.IsInstalled() {
 		t.Skip("bv not installed")
 	}
@@ -6934,6 +6974,7 @@ func TestHandleBeadsRecipes_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleRemoveBeadDep_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7082,6 +7123,7 @@ func TestHandleMemoryOutcome_PartialStatus(t *testing.T) {
 // --- Memory privacy with project dir ---
 
 func TestHandleMemoryPrivacyGet_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -7098,6 +7140,7 @@ func TestHandleMemoryPrivacyGet_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleMemoryPrivacyUpdate_EnabledWithAgents(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -7116,6 +7159,7 @@ func TestHandleMemoryPrivacyUpdate_EnabledWithAgents(t *testing.T) {
 }
 
 func TestHandleMemoryPrivacyUpdate_Disabled(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -7135,6 +7179,7 @@ func TestHandleMemoryPrivacyUpdate_Disabled(t *testing.T) {
 // --- CASS handlers with project dir ---
 
 func TestHandleCASSCapabilities_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -7151,6 +7196,7 @@ func TestHandleCASSCapabilities_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleCASSTimeline_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -7407,6 +7453,7 @@ func TestHandleSafetyUninstallV1_Branch(t *testing.T) {
 // --- Bead CRUD with real project dir ---
 
 func TestHandleGetBead_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7438,6 +7485,7 @@ func TestHandleGetBead_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleUpdateBead_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7460,6 +7508,7 @@ func TestHandleUpdateBead_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleCloseBead_WithProjectDir(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7618,6 +7667,7 @@ func TestLogRedactionSummary_ValidSummary(t *testing.T) {
 // --- handleListBeadDeps deeper success path (JSON parse branch) ---
 
 func TestHandleListBeadDeps_JSONParse(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7641,6 +7691,7 @@ func TestHandleListBeadDeps_JSONParse(t *testing.T) {
 // --- handleRemoveBeadDep deeper path with different bead ---
 
 func TestHandleRemoveBeadDep_UnlinkPath(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7664,6 +7715,7 @@ func TestHandleRemoveBeadDep_UnlinkPath(t *testing.T) {
 // --- handleListBeads with status filter ---
 
 func TestHandleListBeads_WithStatusFilter(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -8437,6 +8489,7 @@ func TestNewJWKSCache_CustomTTL(t *testing.T) {
 // --- handleCASSCapabilities with real cass ---
 
 func TestHandleCASSCapabilities_WithRealCass(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	client := cass.NewClient()
 	if !client.IsInstalled() {
 		t.Skip("cass not installed")
@@ -8460,6 +8513,7 @@ func TestHandleCASSCapabilities_WithRealCass(t *testing.T) {
 // --- handleCASSInsights with real cass ---
 
 func TestHandleCASSInsights_WithRealCass(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	client := cass.NewClient()
 	if !client.IsInstalled() {
 		t.Skip("cass not installed")
@@ -8479,6 +8533,7 @@ func TestHandleCASSInsights_WithRealCass(t *testing.T) {
 // --- handleCASSTimeline with real cass ---
 
 func TestHandleCASSTimeline_WithRealCass(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	client := cass.NewClient()
 	if !client.IsInstalled() {
 		t.Skip("cass not installed")
@@ -8498,6 +8553,7 @@ func TestHandleCASSTimeline_WithRealCass(t *testing.T) {
 // --- handleMemoryRules with real cm ---
 
 func TestHandleMemoryRules_WithRealCM(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}

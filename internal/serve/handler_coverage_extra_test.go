@@ -519,6 +519,8 @@ func TestHandleRobotStatusV1(t *testing.T) {
 }
 
 func TestHandleRobotHealthV1(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
+
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/robot/health", nil)
 	rec := httptest.NewRecorder()
@@ -617,6 +619,7 @@ func TestHandleSessionEventsV1(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleBeadsTriage_BVUnavailable(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/beads/triage?limit=5", nil)
 	rec := httptest.NewRecorder()
@@ -629,6 +632,7 @@ func TestHandleBeadsTriage_BVUnavailable(t *testing.T) {
 }
 
 func TestHandleBeadsInsights_BVUnavailable(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/beads/insights", nil)
 	rec := httptest.NewRecorder()
@@ -640,6 +644,7 @@ func TestHandleBeadsInsights_BVUnavailable(t *testing.T) {
 }
 
 func TestHandleBeadsPlan(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/beads/plan", nil)
 	rec := httptest.NewRecorder()
@@ -651,6 +656,7 @@ func TestHandleBeadsPlan(t *testing.T) {
 }
 
 func TestHandleBeadsPriority(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/beads/priority", nil)
 	rec := httptest.NewRecorder()
@@ -662,6 +668,7 @@ func TestHandleBeadsPriority(t *testing.T) {
 }
 
 func TestHandleBeadsRecipes(t *testing.T) {
+	skipServeRealToolsInShort(t, "bv")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/beads/recipes", nil)
 	rec := httptest.NewRecorder()
@@ -673,6 +680,7 @@ func TestHandleBeadsRecipes(t *testing.T) {
 }
 
 func TestHandleListBeadDeps(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/beads/bd-123/deps", nil)
 	rctx := chi.NewRouteContext()
@@ -688,6 +696,7 @@ func TestHandleListBeadDeps(t *testing.T) {
 }
 
 func TestHandleAddBeadDep_BdUnavailable(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	srv, _ := setupTestServer(t)
 	body := `{"blocked_by":"bd-456"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/beads/bd-123/deps", strings.NewReader(body))
@@ -719,6 +728,7 @@ func TestHandleAddBeadDep_MissingBlockedBy(t *testing.T) {
 }
 
 func TestHandleRemoveBeadDep(t *testing.T) {
+	skipServeRealToolsInShort(t, "br")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/beads/bd-123/deps/bd-456", nil)
 	rctx := chi.NewRouteContext()
@@ -738,6 +748,7 @@ func TestHandleRemoveBeadDep(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleCASSStatus(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/cass/status", nil)
 	rec := httptest.NewRecorder()
@@ -758,6 +769,7 @@ func TestHandleCASSStatus(t *testing.T) {
 }
 
 func TestHandleCASSCapabilities(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/cass/capabilities", nil)
 	rec := httptest.NewRecorder()
@@ -793,6 +805,7 @@ func TestHandleCASSSearch_BadRequest(t *testing.T) {
 }
 
 func TestHandleCASSInsights(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/cass/insights", nil)
 	rec := httptest.NewRecorder()
@@ -804,6 +817,7 @@ func TestHandleCASSInsights(t *testing.T) {
 }
 
 func TestHandleCASSTimeline(t *testing.T) {
+	skipServeRealToolsInShort(t, "cass")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/cass/timeline", nil)
 	rec := httptest.NewRecorder()
@@ -859,6 +873,7 @@ func TestHandleMemoryDaemonStop_NotRunning(t *testing.T) {
 }
 
 func TestHandleMemoryPrivacyGet(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/memory/privacy", nil)
 	rec := httptest.NewRecorder()
@@ -871,6 +886,7 @@ func TestHandleMemoryPrivacyGet(t *testing.T) {
 }
 
 func TestHandleMemoryPrivacyUpdate(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	srv, _ := setupTestServer(t)
 	body := `{"enabled":true,"anonymize_paths":true}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/memory/privacy", strings.NewReader(body))
@@ -884,6 +900,7 @@ func TestHandleMemoryPrivacyUpdate(t *testing.T) {
 }
 
 func TestHandleMemoryRules(t *testing.T) {
+	skipServeRealToolsInShort(t, "cm")
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/memory/rules", nil)
 	rec := httptest.NewRecorder()
