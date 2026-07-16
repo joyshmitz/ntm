@@ -583,6 +583,8 @@ func TestGetModelName(t *testing.T) {
 		{"cc", "", models.DefaultClaude},
 		{"codex", "", models.DefaultCodex},
 		{"gemini", "", models.DefaultGemini},
+		{"grok", "", ""},
+		{"grok-build", "", ""},
 		{"claude", "opus", "claude-opus-4-8"},
 		{"codex", "gpt4", "gpt-4"},
 		{"gemini", "flash", "gemini-3-flash"},
@@ -591,6 +593,7 @@ func TestGetModelName(t *testing.T) {
 		{"codex-cli", "gpt4", "gpt-4"},
 		{"openai-codex", "", models.DefaultCodex},
 		{"google-gemini", "flash", "gemini-3-flash"},
+		{"xai-grok-build", "account-model", "account-model"},
 		{"  CodEx-Cli  ", "o3", "o3"},
 		{"unknown", "", ""},
 	}
@@ -674,6 +677,11 @@ func TestPrint(t *testing.T) {
 	}
 	if !strings.Contains(output, "supervisor_enabled = false") {
 		t.Error("Expected printed config to make Agent Mail supervisor ownership explicit")
+	}
+	for _, want := range []string{"grok = \"grok --always-approve", "default_grok = \"\"", "[models.grok]"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("Expected printed config to contain %q", want)
+		}
 	}
 }
 

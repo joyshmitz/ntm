@@ -514,6 +514,8 @@ func agentTypeToString(t tmux.AgentType) string {
 		return "codex"
 	case tmux.AgentGemini:
 		return "gemini"
+	case tmux.AgentGrok:
+		return "grok"
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:
@@ -551,6 +553,8 @@ func incrementAgentCounts(counts *output.AgentCountsResponse, t tmux.AgentType) 
 		counts.Gemini++
 	case tmux.AgentAntigravity:
 		counts.Antigravity++
+	case tmux.AgentGrok:
+		counts.Grok++
 	case tmux.AgentOllama:
 		counts.Ollama++
 	case tmux.AgentCursor:

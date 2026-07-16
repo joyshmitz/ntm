@@ -178,7 +178,18 @@ func detectFromPaneType(pane tmux.Pane) AgentDetection {
 
 // detectFromProcess checks the running command for agent process names
 func detectFromProcess(command string) AgentDetection {
-	command = strings.ToLower(command)
+	command = strings.ToLower(strings.TrimSpace(command))
+
+	// "grok" is a generic word used by unrelated binaries and arguments. Only
+	// the exact executable basename identifies xAI's Grok Build CLI; never add a
+	// bare substring entry to processPatterns.
+	if exactProcessExecutable(command, "grok") {
+		return AgentDetection{
+			Type:       "grok",
+			Confidence: 0.95,
+			Method:     MethodProcess,
+		}
+	}
 
 	for pattern, agentType := range processPatterns {
 		if strings.Contains(command, pattern) {
@@ -191,6 +202,19 @@ func detectFromProcess(command string) AgentDetection {
 	}
 
 	return AgentDetection{Type: "unknown", Confidence: 0.0, Method: MethodUnknown}
+}
+
+func exactProcessExecutable(command, executable string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	first := strings.Trim(fields[0], "'\"")
+	if i := strings.LastIndexAny(first, "/\\"); i >= 0 {
+		first = first[i+1:]
+	}
+	first = strings.TrimSuffix(first, ".exe")
+	return strings.EqualFold(first, executable)
 }
 
 // detectFromContent analyzes pane content for agent signatures
@@ -244,6 +268,8 @@ func DetectFromNTMTitle(title string) AgentDetection {
 		return AgentDetection{Type: "codex", Confidence: 0.9, Method: MethodTitle}
 	case containsShortForm(lower, "gmi"):
 		return AgentDetection{Type: "gemini", Confidence: 0.9, Method: MethodTitle}
+	case containsShortForm(lower, "grok"):
+		return AgentDetection{Type: "grok", Confidence: 0.9, Method: MethodTitle}
 	case containsShortForm(lower, "cursor"):
 		return AgentDetection{Type: "cursor", Confidence: 0.9, Method: MethodTitle}
 	case containsShortForm(lower, "windsurf"), containsShortForm(lower, "ws"):

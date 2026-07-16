@@ -333,6 +333,7 @@ func validateAgentExecutables(cfg *config.Config, result *ValidationResult) {
 		"agents.claude": cfg.Agents.Claude,
 		"agents.codex":  cfg.Agents.Codex,
 		"agents.gemini": cfg.Agents.Gemini,
+		"agents.grok":   cfg.Agents.Grok,
 	}
 
 	for field, cmd := range agents {

@@ -336,12 +336,13 @@ func Emit(eventType EventType, session string, data interface{}) {
 }
 
 // EmitSessionCreate logs a session creation event.
-func EmitSessionCreate(session string, claudeCount, codexCount, geminiCount, antigravityCount, cursorCount, windsurfCount, aiderCount, opencodeCount, ollamaCount int, workDir, recipe string) {
+func EmitSessionCreate(session string, claudeCount, codexCount, geminiCount, antigravityCount, grokCount, cursorCount, windsurfCount, aiderCount, opencodeCount, ollamaCount int, workDir, recipe string) {
 	Emit(EventSessionCreate, session, SessionCreateData{
 		ClaudeCount:      claudeCount,
 		CodexCount:       codexCount,
 		GeminiCount:      geminiCount,
 		AntigravityCount: antigravityCount,
+		GrokCount:        grokCount,
 		CursorCount:      cursorCount,
 		WindsurfCount:    windsurfCount,
 		AiderCount:       aiderCount,

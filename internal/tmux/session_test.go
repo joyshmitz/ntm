@@ -1471,6 +1471,16 @@ func TestDetectAgentFromCommandEdgeCases(t *testing.T) {
 		{"gmi alias", "gmi", AgentUser},
 		{"gmi with args", "gmi start", AgentUser},
 
+		// Grok Build requires an exact executable basename because "grok" is
+		// common in unrelated executable names and search arguments.
+		{"grok bare", "grok", AgentGrok},
+		{"grok with args", "grok --always-approve", AgentGrok},
+		{"grok path", "/home/user/.local/bin/grok --always-approve", AgentGrok},
+		{"grok windows path", `C:\\Tools\\grok.exe --always-approve`, AgentGrok},
+		{"ngrok", "ngrok http 8080", AgentUser},
+		{"grok exporter", "grok-exporter", AgentUser},
+		{"grok search argument", "rg grok", AgentUser},
+
 		// Cursor
 		{"cursor bare", "cursor", AgentCursor},
 		{"cursor with args", "cursor .", AgentCursor},
@@ -1506,6 +1516,21 @@ func TestDetectAgentFromCommandEdgeCases(t *testing.T) {
 				t.Errorf("detectAgentFromCommand(%q) = %q, want %q", tt.command, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDetectAgentFromArgvRequiresGrokExecutable(t *testing.T) {
+	positive := [][]string{{"grok", "--always-approve"}, {"/opt/xai/grok", "--model", "current"}}
+	for _, argv := range positive {
+		if got := detectAgentFromArgv(argv); got != AgentGrok {
+			t.Errorf("detectAgentFromArgv(%q) = %q, want %q", argv, got, AgentGrok)
+		}
+	}
+	negative := [][]string{{"ngrok", "http", "8080"}, {"grok-exporter"}, {"rg", "grok"}, {"bash", "-lc", "echo grok"}}
+	for _, argv := range negative {
+		if got := detectAgentFromArgv(argv); got == AgentGrok {
+			t.Errorf("detectAgentFromArgv(%q) falsely detected Grok", argv)
+		}
 	}
 }
 

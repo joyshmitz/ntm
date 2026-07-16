@@ -966,6 +966,10 @@
             "description": "Gemini count",
             "type": "integer"
           },
+          "grok_count": {
+            "description": "Grok count",
+            "type": "integer"
+          },
           "health_score": {
             "description": "Health score",
             "type": "number"
@@ -1019,6 +1023,7 @@
           "codex_count",
           "gemini_count",
           "antigravity_count",
+          "grok_count",
           "cursor_count",
           "windsurf_count",
           "aider_count",

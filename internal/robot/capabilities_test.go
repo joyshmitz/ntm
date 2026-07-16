@@ -251,6 +251,23 @@ func TestBuildCommandRegistry_CanonicalPaneContracts(t *testing.T) {
 	}
 }
 
+func TestSpawnCapabilitiesAdvertiseGrokPhaseOne(t *testing.T) {
+	output, err := GetCapabilitiesWithOptions(CapabilitiesOptions{Command: "spawn"})
+	if err != nil || !output.Success || len(output.Commands) != 1 {
+		t.Fatalf("spawn capabilities output=%+v err=%v", output, err)
+	}
+	command := output.Commands[0]
+	for _, parameter := range command.Parameters {
+		if parameter.Flag == "--spawn-grok" {
+			if !strings.Contains(strings.ToLower(parameter.Description), "launch only") {
+				t.Fatalf("spawn-grok description does not expose phase-one boundary: %q", parameter.Description)
+			}
+			return
+		}
+	}
+	t.Fatal("spawn capabilities omit --spawn-grok")
+}
+
 // =============================================================================
 // categoryIndex tests
 // =============================================================================

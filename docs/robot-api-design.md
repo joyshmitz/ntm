@@ -149,6 +149,7 @@ Only use tool prefix for options unique to that tool:
 | `--spawn-cc=N` | Claude agents to spawn | spawn-specific |
 | `--spawn-cod=N` | Codex agents to spawn | spawn-specific |
 | `--spawn-agy=N` | Antigravity agents to spawn | spawn-specific |
+| `--spawn-grok=N` | Grok Build agents to spawn (phase one: launch only) | spawn-specific |
 | `--spawn-gmi=N` | Gemini agents to spawn (legacy) | spawn-specific |
 | `--spawn-preset=NAME` | Use preset recipe | spawn-specific |
 | `--probe-method=M` | Probe detection method | probe-specific |

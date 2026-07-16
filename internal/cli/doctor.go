@@ -34,7 +34,7 @@ func newDoctorCmd() *cobra.Command {
 and configured. Checks:
 
   - Tool detection (bv, bd, am, cm, cass, s2p)
-  - Version compatibility
+  - Version compatibility (including optional Grok Build discovery)
   - Daemon health and port availability
   - Configuration files
 
@@ -316,7 +316,7 @@ func checkDependencies(ctx context.Context) []DepCheck {
 		cmd := exec.CommandContext(ctx, path, "-V")
 		cmd.WaitDelay = 2 * time.Second
 		if out, err := cmd.Output(); err == nil {
-			tmuxCheck.Version = strings.TrimSpace(string(out))
+			tmuxCheck.Version = sanitizeDependencyVersion(string(out))
 		}
 		tmuxCheck.Status = "ok"
 	} else {
@@ -352,6 +352,24 @@ func checkDependencies(ctx context.Context) []DepCheck {
 		goCheck.Message = "not found (needed for plugins)"
 	}
 	checks = append(checks, goCheck)
+
+	// Grok Build is optional. Absence is healthy; presence is reported with a
+	// sanitized version so doctor output is safe to render or embed in JSON.
+	grokStatus, grokVersion, _ := checkDepWithPath(depCheck{
+		Name:        "Grok Build (xAI)",
+		Command:     "grok",
+		VersionArgs: []string{"--version"},
+	})
+	grokCheck := DepCheck{
+		Name:      "grok",
+		Installed: grokStatus == "found",
+		Version:   grokVersion,
+		Status:    "ok",
+	}
+	if !grokCheck.Installed {
+		grokCheck.Message = "optional agent not found"
+	}
+	checks = append(checks, grokCheck)
 
 	return checks
 }

@@ -44,6 +44,7 @@ const (
 	AgentCodex       = agent.AgentTypeCodex
 	AgentGemini      = agent.AgentTypeGemini
 	AgentAntigravity = agent.AgentTypeAntigravity
+	AgentGrok        = agent.AgentTypeGrok
 	AgentCursor      = agent.AgentTypeCursor
 	AgentWindsurf    = agent.AgentTypeWindsurf
 	AgentAider       = agent.AgentTypeAider
@@ -442,7 +443,17 @@ func FormatTags(tags []string) string {
 // This is a fallback when the pane title doesn't match the NTM format (e.g., when
 // shell prompts or tmux hooks change the title dynamically).
 func detectAgentFromCommand(command string) AgentType {
-	cmd := strings.ToLower(command)
+	cmd := strings.ToLower(strings.TrimSpace(command))
+
+	// Grok Build deliberately uses the generic executable name "grok", which is
+	// also present in unrelated project names and command arguments. Recognize it
+	// only when the command's executable token has the exact basename "grok";
+	// substring matching here would misclassify tools such as ngrok,
+	// grok-exporter, and `rg grok`. The process-tree path applies the same rule to
+	// argv[0] before considering legacy agent heuristics.
+	if commandExecutableIs(cmd, "grok") {
+		return AgentGrok
+	}
 
 	// Helper to check if a command matches an agent
 	isAgent := func(name string) bool {
@@ -488,6 +499,46 @@ func detectAgentFromCommand(command string) AgentType {
 		return AgentOllama
 	}
 
+	return AgentUser
+}
+
+// commandExecutableIs reports whether command starts with an exact executable
+// basename. It intentionally does not interpret shell syntax or search later
+// arguments: process discovery supplies the real argv separately, and treating
+// arbitrary arguments as executables creates false positives for a generic name
+// such as "grok".
+func commandExecutableIs(command, executable string) bool {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 {
+		return false
+	}
+	first := strings.Trim(fields[0], "'\"")
+	if i := strings.LastIndexAny(first, "/\\"); i >= 0 {
+		first = first[i+1:]
+	}
+	first = strings.TrimSuffix(first, ".exe")
+	return strings.EqualFold(first, executable)
+}
+
+func detectAgentFromArgv(argv []string) AgentType {
+	if len(argv) == 0 {
+		return AgentUser
+	}
+
+	// Grok Build must be the process executable, never a coincidental argument.
+	if commandExecutableIs(argv[0], "grok") {
+		return AgentGrok
+	}
+
+	joined := strings.Join(argv, " ")
+	if t := detectAgentFromCommand(joined); t != AgentUser && t != AgentGrok {
+		return t
+	}
+	for _, arg := range argv {
+		if t := detectAgentFromCommand(arg); t != AgentUser && t != AgentGrok {
+			return t
+		}
+	}
 	return AgentUser
 }
 
@@ -561,14 +612,8 @@ func detectAgentFromProcessTree(shellPID int, maxDepth int) AgentType {
 		// so wrappers like `bun /home/.../codex ...` get caught: the
 		// agent name appears as a path component of one of argv's
 		// arguments rather than as the immediate command.
-		joined := strings.Join(argv, " ")
-		if t := detectAgentFromCommand(joined); t != AgentUser {
+		if t := detectAgentFromArgv(argv); t != AgentUser {
 			return t
-		}
-		for _, arg := range argv {
-			if t := detectAgentFromCommand(arg); t != AgentUser {
-				return t
-			}
 		}
 
 		if top.depth >= maxDepth {

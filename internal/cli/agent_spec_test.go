@@ -431,6 +431,8 @@ func TestResolveModel_WithConfig(t *testing.T) {
 		{"claude alias sonnet", AgentTypeClaude, "sonnet", "claude-sonnet-4-6"},
 		{"codex alias o3", AgentTypeCodex, "o3", "o3"},
 		{"gemini alias flash", AgentTypeGemini, "flash", "gemini-3-flash"},
+		{"grok exact account model", AgentTypeGrok, "account-current", "account-current"},
+		{"grok default delegated", AgentTypeGrok, "", ""},
 		{"unknown alias passthrough", AgentTypeClaude, "unknown-custom", "unknown-custom"},
 		{"claude default", AgentTypeClaude, "", "claude-opus-4-8"},
 		{"codex default", AgentTypeCodex, "", config.DefaultCodexModel},
@@ -445,6 +447,15 @@ func TestResolveModel_WithConfig(t *testing.T) {
 					tc.agentType, tc.modelSpec, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateModelAliasAcceptsDynamicGrokModel(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+	cfg = config.Default()
+	if err := ValidateModelAlias(AgentTypeGrok, "account-current"); err != nil {
+		t.Fatalf("dynamic Grok model ID rejected: %v", err)
 	}
 }
 

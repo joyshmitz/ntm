@@ -197,6 +197,7 @@ func TestValidateSpawnAgentTypes(t *testing.T) {
 		{Type: AgentTypeCodex},
 		{Type: AgentTypeGemini},
 		{Type: AgentTypeAntigravity},
+		{Type: AgentTypeGrok},
 		{Type: AgentTypeOllama},
 		{Type: AgentTypeCursor},
 		{Type: AgentTypeWindsurf},
@@ -217,6 +218,72 @@ func TestValidateSpawnAgentTypes(t *testing.T) {
 	err := validateSpawnAgentTypes([]FlatAgent{{Type: AgentType("mystery")}}, pluginMap)
 	if err == nil || !strings.Contains(err.Error(), `unknown agent type "mystery"`) {
 		t.Fatalf("unknown agent validation error = %v", err)
+	}
+}
+
+func TestValidateGrokPhaseOneSpawnFailsClosed(t *testing.T) {
+	base := SpawnOptions{Agents: []FlatAgent{{Type: AgentTypeGrok, Index: 1}}}
+	if err := validateGrokPhaseOneSpawn(base); err != nil {
+		t.Fatalf("plain Grok spawn should be supported: %v", err)
+	}
+
+	tests := []SpawnOptions{
+		{Agents: base.Agents, Prompt: "work"},
+		{Agents: base.Agents, InitPrompt: "work"},
+		{Agents: base.Agents, MarchingOrders: map[int]string{0: "work"}},
+		{Agents: base.Agents, Assign: true},
+		{Agents: base.Agents, AutoRestart: true},
+		{Agents: []FlatAgent{{Type: AgentTypeGrok, Index: 1, Persona: &persona.Persona{Name: "reviewer"}}}},
+	}
+	for _, opts := range tests {
+		if err := validateGrokPhaseOneSpawn(opts); err == nil {
+			t.Fatalf("unsupported Grok options unexpectedly accepted: %+v", opts)
+		}
+	}
+}
+
+func TestValidateGrokPhaseOneAddFailsClosed(t *testing.T) {
+	base := AddOptions{Agents: AgentSpecs{{Type: AgentTypeGrok, Count: 1}}}
+	if err := validateGrokPhaseOneAdd(base); err != nil {
+		t.Fatalf("plain Grok add should be supported: %v", err)
+	}
+	if err := validateGrokPhaseOneAdd(AddOptions{
+		Agents: base.Agents, NoCassContext: true, CassContextQuery: "ignored",
+	}); err != nil {
+		t.Fatalf("disabled CASS context should not block Grok add: %v", err)
+	}
+
+	tests := []AddOptions{
+		{Agents: base.Agents, Prompt: "work"},
+		{Agents: base.Agents, CassContextQuery: "history"},
+		{
+			Agents:     AgentSpecs{{Type: AgentTypeGrok, Count: 1, Model: "reviewer"}},
+			PersonaMap: map[string]*persona.Persona{"reviewer": {Name: "reviewer"}},
+		},
+	}
+	for _, opts := range tests {
+		if err := validateGrokPhaseOneAdd(opts); err == nil {
+			t.Fatalf("unsupported Grok add options unexpectedly accepted: %+v", opts)
+		}
+	}
+}
+
+func TestNormalizeSpawnOptionsGrok(t *testing.T) {
+	opts := SpawnOptions{GrokCount: 2}
+	normalizeSpawnOptions(&opts)
+	if opts.GrokCount != 2 || len(opts.Agents) != 2 {
+		t.Fatalf("normalized Grok spawn = count:%d agents:%+v", opts.GrokCount, opts.Agents)
+	}
+	for i, spec := range opts.Agents {
+		if spec.Type != AgentTypeGrok || spec.Index != i+1 {
+			t.Fatalf("normalized Grok agent[%d] = %+v", i, spec)
+		}
+	}
+	if newSpawnCmd().Flags().Lookup("grok") == nil {
+		t.Fatal("spawn command omits --grok")
+	}
+	if newAddCmd().Flags().Lookup("grok") == nil {
+		t.Fatal("add command omits --grok")
 	}
 }
 

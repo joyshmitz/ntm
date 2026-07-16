@@ -36,6 +36,7 @@ const (
 	AgentTypeCodex       AgentType = "cod"
 	AgentTypeGemini      AgentType = "gmi"
 	AgentTypeAntigravity AgentType = "agy"
+	AgentTypeGrok        AgentType = "grok"
 	AgentTypeOllama      AgentType = "ollama"
 	AgentTypeCursor      AgentType = "cursor"
 	AgentTypeWindsurf    AgentType = "windsurf"
@@ -262,6 +263,11 @@ func ValidateModelAlias(agentType AgentType, alias string) error {
 		aliases = cfg.Models.Codex
 	case AgentTypeGemini:
 		aliases = cfg.Models.Gemini
+	case AgentTypeGrok:
+		// Grok Build's available model IDs are account- and release-dependent.
+		// Known aliases still resolve through Models.Grok, but an exact model ID
+		// must remain valid without NTM shipping a stale allowlist.
+		return nil
 	case AgentTypeAntigravity:
 		// agy's model is hard-pinned to "Gemini 3.1 Pro (High)" (see
 		// config.AntigravityRequiredModel), so there is no per-user alias map to

@@ -97,6 +97,7 @@ func TestValidateSpawnRequestRejectsInvalidCountsAndEmptySpawn(t *testing.T) {
 		{name: "negative codex", opts: SpawnOptions{Session: "invalid-cod", CCCount: 1, CodCount: -1}, want: "--spawn-cod"},
 		{name: "negative gemini", opts: SpawnOptions{Session: "invalid-gmi", CCCount: 1, GmiCount: -1}, want: "--spawn-gmi"},
 		{name: "negative antigravity", opts: SpawnOptions{Session: "invalid-agy", CCCount: 1, AgyCount: -1}, want: "--spawn-agy"},
+		{name: "negative grok", opts: SpawnOptions{Session: "invalid-grok", CCCount: 1, GrokCount: -1}, want: "--spawn-grok"},
 		{name: "zero total", opts: SpawnOptions{Session: "invalid-zero"}, want: "no agents specified"},
 	}
 
@@ -113,6 +114,44 @@ func TestValidateSpawnRequestRejectsInvalidCountsAndEmptySpawn(t *testing.T) {
 				t.Fatal("agents must be initialized on invalid requests")
 			}
 		})
+	}
+}
+
+func TestGetSpawnGrokUsesExactCommandWithFakeLifecycle(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}}
+	deps := testSpawnLifecycleDependencies(panes)
+	var gotType, gotCommand string
+	deps.LaunchAgent = func(_ context.Context, pane tmux.Pane, session, agentType string, number int, _, command string) (SpawnedAgent, error) {
+		gotType, gotCommand = agentType, command
+		return SpawnedAgent{Pane: "0.0", Type: agentType, Title: fmt.Sprintf("%s__grok_%d", session, number)}, nil
+	}
+
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "grok-fake", GrokCount: 1, NoUserPane: true, WorkingDir: t.TempDir(), LifecycleDeps: deps,
+	}, testSpawnConfig())
+	if err != nil || !out.Success {
+		t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+	}
+	if gotType != "grok" || gotCommand != "grok --always-approve" {
+		t.Fatalf("fake launch type=%q command=%q", gotType, gotCommand)
+	}
+	if len(out.Agents) != 1 || out.Agents[0].Title != "grok-fake__grok_1" {
+		t.Fatalf("spawned agents=%+v", out.Agents)
+	}
+}
+
+func TestGetSpawnGrokRejectsUnverifiedTUISemantics(t *testing.T) {
+	for _, opts := range []SpawnOptions{
+		{Session: "grok-wait", GrokCount: 1, WaitReady: true},
+		{Session: "grok-assign", GrokCount: 1, AssignWork: true, AssignStrategy: "top-n"},
+	} {
+		out, err := GetSpawn(t.Context(), opts, testSpawnConfig())
+		if err != nil {
+			t.Fatalf("GetSpawn returned transport error: %v", err)
+		}
+		if out.Success || out.ErrorCode != ErrCodeInvalidFlag || !strings.Contains(strings.ToLower(out.Error), "grok") {
+			t.Fatalf("output=%+v, want Grok INVALID_FLAG", out)
+		}
 	}
 }
 
@@ -783,7 +822,7 @@ func TestSpawnOptions_NoAgentsSpecified(t *testing.T) {
 	if resp.Error == "" {
 		t.Error("[E2E-SPAWN] Expected error for no agents specified")
 	}
-	if resp.Error != "no agents specified (use cc, cod, gmi, or agy counts)" {
+	if resp.Error != "no agents specified (use cc, cod, gmi, agy, or grok counts)" {
 		t.Errorf("[E2E-SPAWN] Unexpected error message: %s", resp.Error)
 	}
 

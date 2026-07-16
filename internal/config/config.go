@@ -879,6 +879,7 @@ type AgentConfig struct {
 	Codex        string            `toml:"codex"`
 	Gemini       string            `toml:"gemini"`
 	Antigravity  string            `toml:"antigravity"` // Antigravity (agy) launch command — successor to the Gemini CLI
+	Grok         string            `toml:"grok"`        // Official xAI Grok Build launch command
 	Ollama       string            `toml:"ollama"`
 	Cursor       string            `toml:"cursor"`
 	Windsurf     string            `toml:"windsurf"`
@@ -1808,10 +1809,12 @@ type ModelsConfig struct {
 	DefaultClaude string            `toml:"default_claude"` // Default model for Claude
 	DefaultCodex  string            `toml:"default_codex"`  // Default model for Codex
 	DefaultGemini string            `toml:"default_gemini"` // Default model for Gemini
+	DefaultGrok   string            `toml:"default_grok"`   // Optional Grok Build default; empty delegates to the CLI
 	DefaultOllama string            `toml:"default_ollama"` // Default model for Ollama
 	Claude        map[string]string `toml:"claude"`         // Claude model aliases
 	Codex         map[string]string `toml:"codex"`          // Codex model aliases
 	Gemini        map[string]string `toml:"gemini"`         // Gemini model aliases
+	Grok          map[string]string `toml:"grok"`           // Grok Build model aliases
 	Ollama        map[string]string `toml:"ollama"`         // Ollama model aliases
 	Cursor        map[string]string `toml:"cursor"`         // Cursor model aliases
 	Windsurf      map[string]string `toml:"windsurf"`       // Windsurf model aliases
@@ -1830,6 +1833,7 @@ func DefaultModels() ModelsConfig {
 		DefaultClaude: "claude-opus-4-8",
 		DefaultCodex:  DefaultCodexModel,
 		DefaultGemini: "gemini-3-pro-preview",
+		DefaultGrok:   "",
 		DefaultOllama: "llama3",
 		Claude: map[string]string{
 			"opus":      "claude-opus-4-8",
@@ -1851,6 +1855,7 @@ func DefaultModels() ModelsConfig {
 			"flash":  "gemini-3-flash",
 			"flash2": "gemini-2.0-flash",
 		},
+		Grok: map[string]string{},
 		Ollama: map[string]string{
 			"llama3": "llama3",
 			"phi3":   "phi3",
@@ -1867,6 +1872,8 @@ func canonicalModelLookupAgentType(agentType string) string {
 		return "gemini"
 	case agent.AgentTypeAntigravity:
 		return "antigravity"
+	case agent.AgentTypeGrok:
+		return "grok"
 	case agent.AgentTypeOllama:
 		return "ollama"
 	case agent.AgentTypeCursor:
@@ -1907,6 +1914,8 @@ func (m *ModelsConfig) GetModelName(agentType, alias string) string {
 			return m.DefaultCodex
 		case "gemini":
 			return m.DefaultGemini
+		case "grok":
+			return m.DefaultGrok
 		case "ollama":
 			return m.DefaultOllama
 		}
@@ -1922,6 +1931,8 @@ func (m *ModelsConfig) GetModelName(agentType, alias string) string {
 		aliases = m.Codex
 	case "gemini":
 		aliases = m.Gemini
+	case "grok":
+		aliases = m.Grok
 	case "ollama":
 		aliases = m.Ollama
 	case "cursor":
@@ -3110,6 +3121,7 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "claude = %q\n", cfg.Agents.Claude)
 	fmt.Fprintf(w, "codex = %q\n", cfg.Agents.Codex)
 	fmt.Fprintf(w, "gemini = %q\n", cfg.Agents.Gemini)
+	fmt.Fprintf(w, "grok = %q\n", cfg.Agents.Grok)
 	if cfg.Agents.Antigravity != "" {
 		fmt.Fprintf(w, "antigravity = %q\n", cfg.Agents.Antigravity)
 	}
@@ -3457,6 +3469,7 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "default_claude = %q\n", cfg.Models.DefaultClaude)
 	fmt.Fprintf(w, "default_codex = %q\n", cfg.Models.DefaultCodex)
 	fmt.Fprintf(w, "default_gemini = %q\n", cfg.Models.DefaultGemini)
+	fmt.Fprintf(w, "default_grok = %q  # Empty delegates model selection to Grok Build\n", cfg.Models.DefaultGrok)
 	fmt.Fprintln(w)
 
 	// Write Claude model aliases
@@ -3482,6 +3495,16 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintln(w, "# Gemini model aliases (e.g., --gmi=1:flash)")
 	for _, alias := range sortedStringMapKeys(cfg.Models.Gemini) {
 		fullName := cfg.Models.Gemini[alias]
+		fmt.Fprintf(w, "%s = %q\n", alias, fullName)
+	}
+	fmt.Fprintln(w)
+
+	// Grok Build model availability is account- and release-dependent, so the
+	// alias table is intentionally empty unless the operator configures it.
+	fmt.Fprintln(w, "[models.grok]")
+	fmt.Fprintln(w, "# Grok Build model aliases (e.g., --grok=1:MODEL_ID)")
+	for _, alias := range sortedStringMapKeys(cfg.Models.Grok) {
+		fullName := cfg.Models.Grok[alias]
 		fmt.Fprintf(w, "%s = %q\n", alias, fullName)
 	}
 	fmt.Fprintln(w)
@@ -4232,6 +4255,8 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Agents.Gemini, nil
 		case "antigravity":
 			return cfg.Agents.Antigravity, nil
+		case "grok":
+			return cfg.Agents.Grok, nil
 		case "cursor":
 			return cfg.Agents.Cursor, nil
 		case "windsurf":
@@ -4472,12 +4497,16 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Models.DefaultCodex, nil
 		case "default_gemini":
 			return cfg.Models.DefaultGemini, nil
+		case "default_grok":
+			return cfg.Models.DefaultGrok, nil
 		case "claude":
 			return cfg.Models.Claude, nil
 		case "codex":
 			return cfg.Models.Codex, nil
 		case "gemini":
 			return cfg.Models.Gemini, nil
+		case "grok":
+			return cfg.Models.Grok, nil
 		}
 	case "alerts":
 		if len(parts) < 2 {
@@ -5380,6 +5409,7 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("agents.claude", defaults.Agents.Claude, cfg.Agents.Claude)
 	addDiff("agents.codex", defaults.Agents.Codex, cfg.Agents.Codex)
 	addDiff("agents.gemini", defaults.Agents.Gemini, cfg.Agents.Gemini)
+	addDiff("agents.grok", defaults.Agents.Grok, cfg.Agents.Grok)
 	addDiff("agents.cursor", defaults.Agents.Cursor, cfg.Agents.Cursor)
 	addDiff("agents.windsurf", defaults.Agents.Windsurf, cfg.Agents.Windsurf)
 	addDiff("agents.aider", defaults.Agents.Aider, cfg.Agents.Aider)
@@ -5456,9 +5486,11 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("models.default_claude", defaults.Models.DefaultClaude, cfg.Models.DefaultClaude)
 	addDiff("models.default_codex", defaults.Models.DefaultCodex, cfg.Models.DefaultCodex)
 	addDiff("models.default_gemini", defaults.Models.DefaultGemini, cfg.Models.DefaultGemini)
+	addDiff("models.default_grok", defaults.Models.DefaultGrok, cfg.Models.DefaultGrok)
 	addDiff("models.claude", defaults.Models.Claude, cfg.Models.Claude)
 	addDiff("models.codex", defaults.Models.Codex, cfg.Models.Codex)
 	addDiff("models.gemini", defaults.Models.Gemini, cfg.Models.Gemini)
+	addDiff("models.grok", defaults.Models.Grok, cfg.Models.Grok)
 
 	// Alerts
 	addDiff("alerts.enabled", defaults.Alerts.Enabled, cfg.Alerts.Enabled)

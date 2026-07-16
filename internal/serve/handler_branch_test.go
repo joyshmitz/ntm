@@ -1661,6 +1661,29 @@ func TestHandleAgentSpawnV1_SpawnError(t *testing.T) {
 	}
 }
 
+func TestHandleAgentSpawnV1_ForwardsGrokCount(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	called := false
+	srv.spawnAgents = func(_ context.Context, opts robot.SpawnOptions) (*robot.SpawnOutput, error) {
+		called = true
+		if opts.Session != "grok-session" || opts.GrokCount != 2 {
+			t.Fatalf("spawn options = %+v", opts)
+		}
+		return nil, errServeTestAgentSpawnDisabled
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/grok-session/agents/spawn", strings.NewReader(`{"grok_count":2}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "grok-session")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	srv.handleAgentSpawnV1(rec, req)
+
+	if !called || rec.Code != http.StatusInternalServerError {
+		t.Fatalf("called=%v status=%d", called, rec.Code)
+	}
+}
+
 func TestHandleAgentSpawnV1_MissingDependencyFailsClosed(t *testing.T) {
 	srv := &Server{}
 	rec := httptest.NewRecorder()

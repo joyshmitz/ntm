@@ -3630,6 +3630,7 @@ type AgentSpawnRequest struct {
 	CodCount  int    `json:"cod_count,omitempty"`
 	GmiCount  int    `json:"gmi_count,omitempty"`
 	AgyCount  int    `json:"agy_count,omitempty"`
+	GrokCount int    `json:"grok_count,omitempty"`
 	Preset    string `json:"preset,omitempty"`
 	WaitReady bool   `json:"wait_ready,omitempty"`
 	Label     string `json:"label,omitempty"` // Goal label for multi-session support
@@ -3651,8 +3652,8 @@ func (s *Server) handleAgentSpawnV1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// At least one agent count or preset must be specified
-	if req.CCCount == 0 && req.CodCount == 0 && req.GmiCount == 0 && req.AgyCount == 0 && req.Preset == "" {
-		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "at least one agent count (cc_count, cod_count, gmi_count, agy_count) or preset required", nil, reqID)
+	if req.CCCount == 0 && req.CodCount == 0 && req.GmiCount == 0 && req.AgyCount == 0 && req.GrokCount == 0 && req.Preset == "" {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "at least one agent count (cc_count, cod_count, gmi_count, agy_count, grok_count) or preset required", nil, reqID)
 		return
 	}
 
@@ -3663,6 +3664,7 @@ func (s *Server) handleAgentSpawnV1(w http.ResponseWriter, r *http.Request) {
 		CodCount:  req.CodCount,
 		GmiCount:  req.GmiCount,
 		AgyCount:  req.AgyCount,
+		GrokCount: req.GrokCount,
 		Preset:    req.Preset,
 		WaitReady: req.WaitReady,
 	}

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -34,6 +36,7 @@ Optional agents:
   - claude (Claude Code CLI)
   - codex (OpenAI Codex CLI)
   - agy (Antigravity CLI, Google agent)
+  - grok (Grok Build CLI, xAI)
   - gemini (Google Gemini CLI, legacy)
 
 Also checks for recommended tools like fzf.
@@ -141,6 +144,14 @@ func defaultDepChecks() []depCheck {
 			Required:    false,
 			Category:    "AI Agents",
 			InstallHint: "curl -fsSL https://antigravity.google/cli/install.sh | bash (then `agy` once to authenticate via Google OAuth)",
+		},
+		{
+			Name:        "Grok Build (xAI)",
+			Command:     "grok",
+			VersionArgs: []string{"--version"},
+			Required:    false,
+			Category:    "AI Agents",
+			InstallHint: "curl -fsSL https://x.ai/cli/install.sh | bash (then `grok login`; use `grok login --device-auth` on a remote host)",
 		},
 		{
 			Name:        "Gemini CLI (legacy)",
@@ -509,7 +520,7 @@ func checkDepWithPath(dep depCheck) (status string, version string, path string)
 
 		// Some commands print version info but exit non-zero (or get killed on timeout).
 		// Return any output we got, otherwise fall back to "installed".
-		if s := strings.TrimSpace(string(out)); s != "" {
+		if s := sanitizeDependencyVersion(string(out)); s != "" {
 			return "found", s, path
 		}
 		_ = err
@@ -517,4 +528,34 @@ func checkDepWithPath(dep depCheck) (status string, version string, path string)
 	}
 
 	return "found", "", path
+}
+
+// sanitizeDependencyVersion constrains untrusted child-process output before it
+// reaches JSON, logs, or a terminal. Version commands should be one short line;
+// ANSI/OSC sequences, controls, bidi formatting, and whitespace runs have no
+// legitimate role in that contract.
+func sanitizeDependencyVersion(raw string) string {
+	clean := statuspkg.StripANSI(raw)
+	runes := make([]rune, 0, len(clean))
+	spacePending := false
+	for _, r := range clean {
+		if unicode.IsSpace(r) {
+			spacePending = len(runes) > 0
+			continue
+		}
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			continue
+		}
+		if spacePending {
+			runes = append(runes, ' ')
+			spacePending = false
+		}
+		runes = append(runes, r)
+	}
+
+	const maxVersionRunes = 240
+	if len(runes) > maxVersionRunes {
+		return string(runes[:maxVersionRunes]) + "..."
+	}
+	return string(runes)
 }

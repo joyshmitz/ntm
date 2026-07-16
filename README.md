@@ -65,7 +65,7 @@ NTM gives you a single local system for:
 NTM is a pure Go project, but the runtime experience is intentionally integration-heavy.
 
 - Required: `tmux`
-- Required for agent spawning: whichever CLIs you want to run, typically Claude Code, Codex, and Antigravity CLI (Gemini CLI is supported as legacy)
+- Required for agent spawning: whichever CLIs you want to run, typically Claude Code, Codex, Antigravity CLI, or Grok Build (Gemini CLI is supported as legacy)
 - Optional but powerful: `br`, `bv`, Agent Mail, `cass`, `dcg`, `pt`
 - Sanity check everything with `ntm deps -v`
 
@@ -123,6 +123,36 @@ ntm view payments
 ntm zoom payments 3
 ntm attach payments
 ```
+
+#### Grok Build (phase one)
+
+NTM recognizes the official xAI Grok Build CLI as the canonical `grok` agent
+type. Install it using [xAI's current instructions](https://docs.x.ai/build/overview),
+then authenticate without putting credentials in NTM configuration:
+
+```bash
+curl -fsSL https://x.ai/cli/install.sh | bash
+grok login                   # browser authentication
+grok login --device-auth     # SSH/headless alternative
+ntm deps -v
+```
+
+A bare spec delegates model selection to Grok Build. Use `grok models` to inspect
+the models available to the authenticated account, then pass an exact model ID
+only when an override is needed:
+
+```bash
+ntm spawn research --grok=1
+ntm spawn research --grok=1:MODEL_ID
+ntm spawn research --grok=1:MODEL_ID:EFFORT
+ntm --robot-spawn=research --spawn-grok=1
+```
+
+NTM launches Grok Build with its official `--always-approve` automation flag.
+Phase one intentionally covers configuration, exact process discovery, launch,
+model/effort arguments, and counts only. Authenticated fullscreen-TUI readiness,
+prompt injection/assignment, and restart behavior are not yet claimed; robot
+`--spawn-wait` and `--spawn-assign-work` therefore fail closed for Grok panes.
 
 Use labels when you want multiple coordinated swarms on the same project while
 keeping a shared project directory:
@@ -478,7 +508,7 @@ not bolt-on scripts.
                             v
               +------------------------------+
               | tmux sessions and panes      |
-              | Claude / Codex / Antigravity |
+              | Claude / Codex / AGY / Grok  |
               | labeled multi-agent work     |
               +------------------------------+
 ```
@@ -527,7 +557,7 @@ ntm deps -v
 NTM can only launch tools that are installed and discoverable in `PATH`.
 Use `ntm deps -v` to check what it sees.
 
-### `claude`, `codex`, `agy`, or `gemini` not detected over SSH / tmux / non-login shells
+### `claude`, `codex`, `agy`, `grok`, or `gemini` not detected over SSH / tmux / non-login shells
 
 NTM discovers agent CLIs via the `PATH` of the **runtime environment it is launched in** —
 not the `PATH` of your interactive login shell. Tools installed under npm-global or
@@ -543,6 +573,7 @@ context where you run NTM:
 command -v claude
 command -v codex
 command -v agy
+command -v grok
 command -v gemini
 ntm deps -v
 ```
@@ -610,6 +641,7 @@ of the normal product model.
 - NTM is intentionally `tmux`-centric.
 - Linux and macOS are the primary environments.
 - Some advanced workflows depend on external tools such as Agent Mail, `br`, `bv`, `cass`, or worktree helpers.
+- Grok Build support is currently phase one: launch/discovery/counting work, while authenticated TUI readiness, automated prompt delivery/assignment, and restart are deliberately unsupported.
 - The system is local-first. It is not a hosted SaaS control plane.
 
 ## Development

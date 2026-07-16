@@ -16,6 +16,7 @@ func TestAgentType_String(t *testing.T) {
 		{AgentTypeClaudeCode, "cc"},
 		{AgentTypeCodex, "cod"},
 		{AgentTypeGemini, "gmi"},
+		{AgentTypeGrok, "grok"},
 		{AgentTypeOllama, "ollama"},
 		{AgentTypeCursor, "cursor"},
 		{AgentTypeWindsurf, "windsurf"},
@@ -41,6 +42,7 @@ func TestAgentType_DisplayName(t *testing.T) {
 		{AgentTypeClaudeCode, "Claude Code"},
 		{AgentTypeCodex, "Codex CLI"},
 		{AgentTypeGemini, "Gemini CLI"},
+		{AgentTypeGrok, "Grok Build"},
 		{AgentTypeOllama, "Ollama"},
 		{AgentTypeCursor, "Cursor"},
 		{AgentTypeWindsurf, "Windsurf"},
@@ -81,6 +83,8 @@ func TestAgentType_Canonical(t *testing.T) {
 		{AgentType("googlegemini"), AgentTypeGemini},
 		{AgentType("gemini_cli"), AgentTypeGemini},
 		{AgentType("google-gemini"), AgentTypeGemini},
+		{AgentType(" Grok-Build "), AgentTypeGrok},
+		{AgentType("xai_grok_build"), AgentTypeGrok},
 		{AgentType("ws"), AgentTypeWindsurf},
 		{AgentType("unknown"), AgentTypeUnknown},
 		{AgentType(" custom "), AgentType("custom")},
@@ -104,6 +108,7 @@ func TestAgentType_IsValid(t *testing.T) {
 		{AgentTypeClaudeCode, true},
 		{AgentTypeCodex, true},
 		{AgentTypeGemini, true},
+		{AgentTypeGrok, true},
 		{AgentTypeOllama, true},
 		{AgentTypeCursor, true},
 		{AgentTypeWindsurf, true},
@@ -137,6 +142,7 @@ func TestAgentType_NeedsDoubleEnter(t *testing.T) {
 		{AgentType(" CodEx "), true},
 		{AgentTypeGemini, true},
 		{AgentType("gemini"), true},
+		{AgentTypeGrok, false},
 		{AgentType("unknown"), false},
 	}
 
@@ -144,6 +150,22 @@ func TestAgentType_NeedsDoubleEnter(t *testing.T) {
 		if got := tt.at.NeedsDoubleEnter(); got != tt.want {
 			t.Errorf("AgentType(%q).NeedsDoubleEnter() = %v, want %v", tt.at, got, tt.want)
 		}
+	}
+}
+
+func TestAgentTypeGrokAliasesAreExact(t *testing.T) {
+	for _, alias := range []string{"grok", "grok-build", "grok_build", "grokbuild", "xai-grok-build", "xai_grok_build", "xaigrokbuild"} {
+		if got := AgentType(alias).Canonical(); got != AgentTypeGrok {
+			t.Errorf("AgentType(%q).Canonical() = %q, want %q", alias, got, AgentTypeGrok)
+		}
+	}
+	for _, unrelated := range []string{"xai", "ngrok", "grok-cli", "grok-exporter"} {
+		if got := AgentType(unrelated).Canonical(); got == AgentTypeGrok {
+			t.Errorf("unrelated AgentType(%q) canonicalized to Grok", unrelated)
+		}
+	}
+	if got := AgentTypeGrok.ProfileName(); got != "Grok" {
+		t.Errorf("AgentTypeGrok.ProfileName() = %q, want Grok", got)
 	}
 }
 

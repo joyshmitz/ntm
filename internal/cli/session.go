@@ -456,6 +456,9 @@ func runList(tags []string, project ...string) error {
 				if s.AgentCounts.Antigravity > 0 {
 					parts = append(parts, fmt.Sprintf("%d AGY", s.AgentCounts.Antigravity))
 				}
+				if s.AgentCounts.Grok > 0 {
+					parts = append(parts, fmt.Sprintf("%d Grok", s.AgentCounts.Grok))
+				}
 				if s.AgentCounts.Ollama > 0 {
 					parts = append(parts, fmt.Sprintf("%d OLL", s.AgentCounts.Ollama))
 				}

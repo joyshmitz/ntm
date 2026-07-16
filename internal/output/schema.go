@@ -102,6 +102,7 @@ type AgentCountsResponse struct {
 	Codex       int `json:"codex"`
 	Gemini      int `json:"gemini"`
 	Antigravity int `json:"antigravity"`
+	Grok        int `json:"grok"`
 	Ollama      int `json:"ollama"`
 	Cursor      int `json:"cursor"`
 	Windsurf    int `json:"windsurf"`
@@ -173,6 +174,7 @@ type AddResponse struct {
 	AddedCodex       int            `json:"added_codex"`
 	AddedGemini      int            `json:"added_gemini"`
 	AddedAntigravity int            `json:"added_antigravity"`
+	AddedGrok        int            `json:"added_grok"`
 	AddedOllama      int            `json:"added_ollama"`
 	AddedCursor      int            `json:"added_cursor"`
 	AddedWindsurf    int            `json:"added_windsurf"`

@@ -16,6 +16,7 @@ const (
 	AgentTypeCodex       AgentType = "cod"      // Codex CLI (OpenAI)
 	AgentTypeGemini      AgentType = "gmi"      // Gemini CLI (Google)
 	AgentTypeAntigravity AgentType = "agy"      // Antigravity CLI (Google) — successor to the Gemini CLI
+	AgentTypeGrok        AgentType = "grok"     // Grok Build CLI (xAI)
 	AgentTypeOllama      AgentType = "ollama"   // Local Ollama CLI
 	AgentTypeCursor      AgentType = "cursor"   // Cursor AI
 	AgentTypeWindsurf    AgentType = "windsurf" // Windsurf IDE
@@ -42,6 +43,8 @@ func (t AgentType) Canonical() AgentType {
 		return AgentTypeGemini
 	case "agy", "antigravity", "antigravity-cli", "antigravity_cli", "antigravitycli", "google-antigravity":
 		return AgentTypeAntigravity
+	case "grok", "grok-build", "grok_build", "grokbuild", "xai-grok-build", "xai_grok_build", "xaigrokbuild":
+		return AgentTypeGrok
 	case "cursor":
 		return AgentTypeCursor
 	case "windsurf", "ws":
@@ -72,6 +75,8 @@ func (t AgentType) DisplayName() string {
 		return "Gemini CLI"
 	case AgentTypeAntigravity:
 		return "Antigravity CLI"
+	case AgentTypeGrok:
+		return "Grok Build"
 	case AgentTypeOllama:
 		return "Ollama"
 	case AgentTypeCursor:
@@ -100,6 +105,8 @@ func (t AgentType) ProfileName() string {
 		return "Gemini"
 	case AgentTypeAntigravity:
 		return "Antigravity"
+	case AgentTypeGrok:
+		return "Grok"
 	case AgentTypeOllama:
 		return "Ollama"
 	case AgentTypeCursor:
@@ -126,7 +133,7 @@ func (t AgentType) ProfileName() string {
 // IsValid returns true if this is a known agent type.
 func (t AgentType) IsValid() bool {
 	switch t.Canonical() {
-	case AgentTypeClaudeCode, AgentTypeCodex, AgentTypeGemini, AgentTypeAntigravity, AgentTypeOllama, AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeOpencode, AgentTypeUser:
+	case AgentTypeClaudeCode, AgentTypeCodex, AgentTypeGemini, AgentTypeAntigravity, AgentTypeGrok, AgentTypeOllama, AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeOpencode, AgentTypeUser:
 		return true
 	default:
 		return false

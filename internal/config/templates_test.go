@@ -310,6 +310,25 @@ func TestDefaultAgentTemplates(t *testing.T) {
 		t.Errorf("Gemini template failed: %v", err)
 	}
 
+	// Grok Build owns its default model. A bare launch must not freeze a model
+	// ID, while an explicit model and effort must be safely quoted.
+	grokBare, err := GenerateAgentCommand(templates.Grok, AgentTemplateVars{})
+	if err != nil {
+		t.Fatalf("Grok template failed: %v", err)
+	}
+	if grokBare != "grok --always-approve" {
+		t.Fatalf("Grok bare render = %q", grokBare)
+	}
+	grokOverride, err := GenerateAgentCommand(templates.Grok, AgentTemplateVars{
+		Model: "account/model", ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatalf("Grok override template failed: %v", err)
+	}
+	if grokOverride != "grok --always-approve --model 'account/model' --reasoning-effort 'high'" {
+		t.Fatalf("Grok override render = %q", grokOverride)
+	}
+
 	// Opencode template (ntm#193): must carry a {{.Model}} placeholder so
 	// `--oc=N:provider/model` is honored instead of rejected, and so Agent
 	// Mail registration receives a non-empty model.
@@ -396,6 +415,7 @@ func TestDefaultAgentTemplates_ShellQuoting(t *testing.T) {
 	check("codex", templates.Codex)
 	// Gemini dropped --system-instruction-file in v0.31.0; only model quoting applies.
 	checkModelOnly("gemini", templates.Gemini)
+	checkModelOnly("grok", templates.Grok)
 }
 
 // TestShellQuote_Branches tests both branches of ShellQuote.

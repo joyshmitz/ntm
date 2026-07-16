@@ -1059,6 +1059,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "spawn-cod", Flag: "--spawn-cod", Type: "int", Required: false, Description: "Number of Codex agents"},
 				{Name: "spawn-gmi", Flag: "--spawn-gmi", Type: "int", Required: false, Description: "Number of Gemini agents (legacy)"},
 				{Name: "spawn-agy", Flag: "--spawn-agy", Type: "int", Required: false, Description: "Number of Antigravity (agy) agents"},
+				{Name: "spawn-grok", Flag: "--spawn-grok", Type: "int", Required: false, Description: "Number of Grok Build agents (phase one: launch only; no wait or assignment)"},
 				{Name: "spawn-preset", Flag: "--spawn-preset", Type: "string", Required: false, Description: "Use recipe preset instead of counts"},
 				{Name: "spawn-no-user", Flag: "--spawn-no-user", Type: "bool", Required: false, Description: "Skip user pane creation"},
 				{Name: "spawn-wait", Flag: "--spawn-wait", Type: "bool", Required: false, Description: "Wait for agents to show ready state before returning"},
@@ -1071,6 +1072,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 			},
 			Examples: []string{
 				"ntm --robot-spawn=myproject --spawn-cc=2 --spawn-cod=1 --spawn-wait --timeout=30s",
+				"ntm --robot-spawn=myproject --spawn-grok=1",
 				"ntm --robot-spawn=myproject --spawn-preset=standard",
 				"ntm --robot-spawn=myproject --spawn-label=frontend --spawn-cc=3",
 				"ntm --robot-spawn=myproject --spawn-assign-work --strategy=dependency-aware",

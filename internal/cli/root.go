@@ -3261,6 +3261,7 @@ var (
 	robotSpawnCod        int    // number of Codex agents
 	robotSpawnGmi        int    // number of Gemini agents
 	robotSpawnAgy        int    // number of Antigravity agents
+	robotSpawnGrok       int    // number of Grok Build agents
 	robotSpawnPreset     string // recipe/preset name
 	robotSpawnNoUser     bool   // don't create user pane
 	robotSpawnWait       bool   // wait for agents to be ready
@@ -3854,6 +3855,7 @@ func init() {
 	rootCmd.Flags().IntVar(&robotSpawnCod, "spawn-cod", 0, "Codex CLI agents to spawn. Use with --robot-spawn. Example: --spawn-cod=1")
 	rootCmd.Flags().IntVar(&robotSpawnGmi, "spawn-gmi", 0, "Gemini CLI agents to spawn. Use with --robot-spawn. Example: --spawn-gmi=1")
 	rootCmd.Flags().IntVar(&robotSpawnAgy, "spawn-agy", 0, "Antigravity CLI agents to spawn. Use with --robot-spawn. Example: --spawn-agy=1")
+	rootCmd.Flags().IntVar(&robotSpawnGrok, "spawn-grok", 0, "Grok Build agents to spawn. Use with --robot-spawn. Example: --spawn-grok=1")
 	rootCmd.Flags().StringVar(&robotSpawnPreset, "spawn-preset", "", "Use recipe preset instead of counts. See --robot-recipes. Example: --spawn-preset=standard")
 	rootCmd.Flags().BoolVar(&robotSpawnNoUser, "spawn-no-user", false, "Skip user pane creation. Optional with --robot-spawn. For headless/automation")
 	rootCmd.Flags().BoolVar(&robotSpawnWait, "spawn-wait", false, "Wait for agents to show ready state before returning. Recommended for automation")
@@ -4732,6 +4734,7 @@ func robotSpawnOptionsFromFlags(cmd *cobra.Command, readyTimeout time.Duration, 
 		CodCount:           robotSpawnCod,
 		GmiCount:           robotSpawnGmi,
 		AgyCount:           robotSpawnAgy,
+		GrokCount:          robotSpawnGrok,
 		Preset:             robotSpawnPreset,
 		NoUserPane:         robotSpawnNoUser,
 		WorkingDir:         robotSpawnDir,
@@ -5132,6 +5135,7 @@ Examples:
 						"codex":       effectiveCfg.Agents.Codex,
 						"antigravity": effectiveCfg.Agents.Antigravity,
 						"gemini":      effectiveCfg.Agents.Gemini,
+						"grok":        effectiveCfg.Agents.Grok,
 						"cursor":      effectiveCfg.Agents.Cursor,
 						"windsurf":    effectiveCfg.Agents.Windsurf,
 						"aider":       effectiveCfg.Agents.Aider,

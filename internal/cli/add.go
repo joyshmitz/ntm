@@ -151,6 +151,8 @@ func resolveAddAgentCommandTemplate(agentType AgentType, pluginMap map[string]pl
 		return cfg.Agents.Gemini, nil, nil
 	case AgentTypeAntigravity:
 		return cfg.Agents.Antigravity, nil, nil
+	case AgentTypeGrok:
+		return cfg.Agents.Grok, nil, nil
 	case AgentTypeOllama:
 		if ollamaHost == "" {
 			return cfg.Agents.Ollama, nil, nil
@@ -173,6 +175,28 @@ func resolveAddAgentCommandTemplate(agentType AgentType, pluginMap map[string]pl
 		}
 		return "", nil, fmt.Errorf("unknown agent type: %s", agentType)
 	}
+}
+
+// validateGrokPhaseOneAdd applies the same launch-only boundary as spawn.
+// Adding a pane and rendering its command are deterministic; prompt delivery,
+// CASS injection, and persona setup depend on an authenticated fullscreen TUI
+// protocol that phase one deliberately does not claim to understand.
+func validateGrokPhaseOneAdd(opts AddOptions) error {
+	for _, spec := range opts.Agents.Flatten() {
+		if spec.Type != AgentTypeGrok {
+			continue
+		}
+		if opts.Prompt != "" {
+			return errors.New("Grok Build phase-one add does not yet support --prompt; add the pane with --grok and send interactively after authenticating")
+		}
+		if !opts.NoCassContext && opts.CassContextQuery != "" {
+			return errors.New("Grok Build phase-one add does not yet support CASS context injection")
+		}
+		if profile, ok := opts.PersonaMap[spec.Model]; ok && profile != nil {
+			return errors.New("Grok Build phase-one add does not yet support persona prompt injection")
+		}
+	}
+	return nil
 }
 
 func newAddCmd() *cobra.Command {
@@ -295,6 +319,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCodex, &agentSpecs), "cod", "Codex agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeGemini, &agentSpecs), "gmi", "Gemini agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeAntigravity, &agentSpecs), "agy", "Antigravity (agy) agents (N; model pinned to Gemini 3.1 Pro (High))")
+	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeGrok, &agentSpecs), "grok", "Grok Build agents (N or N:model[:effort])")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeOllama, &agentSpecs), "ollama", "Ollama agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCursor, &agentSpecs), "cursor", "Cursor agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeWindsurf, &agentSpecs), "windsurf", "Windsurf agents (N or N:model)")
@@ -384,6 +409,9 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 		return outputError(fmt.Errorf("add canceled: %w", err))
 	}
 	totalAgents := opts.Agents.TotalCount()
+	if err := validateGrokPhaseOneAdd(opts); err != nil {
+		return outputError(err)
+	}
 
 	if err := tmux.EnsureInstalled(); err != nil {
 		return outputError(err)
@@ -537,7 +565,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 
 	// Add agents
 	flatAgents := opts.Agents.Flatten()
-	ccCount, codCount, gmiCount, agyCount, ollamaCount, cursorCount, windsurfCount, aiderCount, opencodeCount := 0, 0, 0, 0, 0, 0, 0, 0, 0
+	ccCount, codCount, gmiCount, agyCount, grokCount, ollamaCount, cursorCount, windsurfCount, aiderCount, opencodeCount := 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 	var rateLimitTracker *ratelimit.RateLimitTracker
 	openAICooldownWaited := false
 	ollamaHost := ""
@@ -620,6 +648,8 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			gmiCount++
 		case AgentTypeAntigravity:
 			agyCount++
+		case AgentTypeGrok:
+			grokCount++
 		case AgentTypeOllama:
 			ollamaCount++
 		case AgentTypeCursor:
@@ -923,6 +953,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			AddedCodex:          codCount,
 			AddedGemini:         gmiCount,
 			AddedAntigravity:    agyCount,
+			AddedGrok:           grokCount,
 			AddedOllama:         ollamaCount,
 			AddedCursor:         cursorCount,
 			AddedWindsurf:       windsurfCount,

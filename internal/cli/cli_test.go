@@ -321,6 +321,7 @@ func resetFlags() {
 	robotSpawnCod = 0
 	robotSpawnGmi = 0
 	robotSpawnAgy = 0
+	robotSpawnGrok = 0
 	robotSpawnPreset = ""
 	robotSpawnNoUser = false
 	robotSpawnWait = false
@@ -364,6 +365,7 @@ func TestRobotSpawnOptionsFromFlagsPreservesDurationAndCopiesInputs(t *testing.T
 	robotSpawnCod = 2
 	robotSpawnGmi = 3
 	robotSpawnAgy = 4
+	robotSpawnGrok = 5
 	robotSpawnPreset = "custom"
 	robotSpawnNoUser = true
 	robotSpawnDir = t.TempDir()
@@ -379,7 +381,7 @@ func TestRobotSpawnOptionsFromFlagsPreservesDurationAndCopiesInputs(t *testing.T
 	if opts.ReadyTimeout != 500*time.Millisecond {
 		t.Fatalf("ReadyTimeout=%s, want 500ms", opts.ReadyTimeout)
 	}
-	if opts.Session != robotSpawn || opts.Label != robotSpawnLabel || opts.CCCount != 1 || opts.CodCount != 2 || opts.GmiCount != 3 || opts.AgyCount != 4 {
+	if opts.Session != robotSpawn || opts.Label != robotSpawnLabel || opts.CCCount != 1 || opts.CodCount != 2 || opts.GmiCount != 3 || opts.AgyCount != 4 || opts.GrokCount != 5 {
 		t.Fatalf("spawn identity/count options=%+v", opts)
 	}
 	if !opts.NoUserPane || !opts.WaitReady || !opts.DryRun || !opts.Safety || !opts.AssignWork || !opts.RequireReservation {
@@ -3509,6 +3511,67 @@ func TestCheckDepWithPathReturnsInstalledWithoutVersionWhenCommandIsSilent(t *te
 	}
 	if path != expectedPath {
 		t.Fatalf("path = %q, want %q", path, expectedPath)
+	}
+}
+
+func TestSanitizeDependencyVersion(t *testing.T) {
+	raw := "\x1b]0;spoofed title\a\x1b[31mgrok 0.2.89\x1b[0m\n\tbuild 8b63\u202e\x00"
+	if got, want := sanitizeDependencyVersion(raw), "grok 0.2.89 build 8b63"; got != want {
+		t.Fatalf("sanitizeDependencyVersion() = %q, want %q", got, want)
+	}
+
+	long := strings.Repeat("v", 300)
+	got := sanitizeDependencyVersion(long)
+	if len([]rune(strings.TrimSuffix(got, "..."))) != 240 || !strings.HasSuffix(got, "...") {
+		t.Fatalf("long sanitized version has unexpected bound: %d runes, suffix=%q", len([]rune(got)), got[len(got)-3:])
+	}
+}
+
+func TestGrokDependencyChecksAreOptionalAndSanitized(t *testing.T) {
+	var found bool
+	for _, dep := range defaultDepChecks() {
+		if dep.Command != "grok" {
+			continue
+		}
+		found = true
+		if dep.Required || dep.Category != "AI Agents" || !reflect.DeepEqual(dep.VersionArgs, []string{"--version"}) {
+			t.Fatalf("unexpected Grok dependency contract: %+v", dep)
+		}
+	}
+	if !found {
+		t.Fatal("default dependency checks omit Grok Build")
+	}
+
+	var doctorGrok *DepCheck
+	checks := checkDependencies(t.Context())
+	for i := range checks {
+		if checks[i].Name == "grok" {
+			doctorGrok = &checks[i]
+			break
+		}
+	}
+	if doctorGrok == nil || doctorGrok.Status != "ok" {
+		t.Fatalf("doctor Grok dependency = %+v, want optional ok check", doctorGrok)
+	}
+	if doctorGrok.Version != sanitizeDependencyVersion(doctorGrok.Version) {
+		t.Fatalf("doctor Grok version is not sanitized: %q", doctorGrok.Version)
+	}
+}
+
+func TestCheckDepWithPathSanitizesFakeGrokVersion(t *testing.T) {
+	toolDir := t.TempDir()
+	toolPath := filepath.Join(toolDir, "grok")
+	script := "#!/bin/sh\nprintf '\\033[31mgrok 9.9.9\\033[0m\\nsecond\\tfield\\n'\n"
+	if err := os.WriteFile(toolPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake Grok binary: %v", err)
+	}
+	t.Setenv("PATH", toolDir)
+
+	status, version, path := checkDepWithPath(depCheck{
+		Name: "Grok Build (xAI)", Command: "grok", VersionArgs: []string{"--version"},
+	})
+	if status != "found" || version != "grok 9.9.9 second field" || path != toolPath {
+		t.Fatalf("fake Grok dependency = status:%q version:%q path:%q", status, version, path)
 	}
 }
 

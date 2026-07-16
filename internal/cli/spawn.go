@@ -329,6 +329,8 @@ func canonicalSpawnAgentType(raw string) (AgentType, bool) {
 		return AgentTypeGemini, true
 	case agentpkg.AgentTypeAntigravity:
 		return AgentTypeAntigravity, true
+	case agentpkg.AgentTypeGrok:
+		return AgentTypeGrok, true
 	case agentpkg.AgentTypeCursor:
 		return AgentTypeCursor, true
 	case agentpkg.AgentTypeWindsurf:
@@ -350,6 +352,7 @@ func orderedSpawnAgentTypes() []AgentType {
 		AgentTypeCodex,
 		AgentTypeGemini,
 		AgentTypeAntigravity,
+		AgentTypeGrok,
 		AgentTypeCursor,
 		AgentTypeWindsurf,
 		AgentTypeAider,
@@ -486,6 +489,7 @@ func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 	opts.CodCount = 0
 	opts.GmiCount = 0
 	opts.AgyCount = 0
+	opts.GrokCount = 0
 	opts.CursorCount = 0
 	opts.WindsurfCount = 0
 	opts.AiderCount = 0
@@ -502,6 +506,8 @@ func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 			opts.GmiCount++
 		case AgentTypeAntigravity:
 			opts.AgyCount++
+		case AgentTypeGrok:
+			opts.GrokCount++
 		case AgentTypeCursor:
 			opts.CursorCount++
 		case AgentTypeWindsurf:
@@ -530,6 +536,7 @@ func populateSpawnAgentsFromCounts(opts *SpawnOptions) {
 		{agentType: AgentTypeCodex, count: opts.CodCount},
 		{agentType: AgentTypeGemini, count: opts.GmiCount},
 		{agentType: AgentTypeAntigravity, count: opts.AgyCount},
+		{agentType: AgentTypeGrok, count: opts.GrokCount},
 		{agentType: AgentTypeCursor, count: opts.CursorCount},
 		{agentType: AgentTypeWindsurf, count: opts.WindsurfCount},
 		{agentType: AgentTypeAider, count: opts.AiderCount},
@@ -558,13 +565,46 @@ func normalizeSpawnOptions(opts *SpawnOptions) {
 func validateSpawnAgentTypes(agents []FlatAgent, pluginMap map[string]plugins.AgentPlugin) error {
 	for _, agent := range agents {
 		switch agent.Type {
-		case AgentTypeClaude, AgentTypeCodex, AgentTypeGemini, AgentTypeAntigravity,
+		case AgentTypeClaude, AgentTypeCodex, AgentTypeGemini, AgentTypeAntigravity, AgentTypeGrok,
 			AgentTypeOllama, AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeOpencode:
 			continue
 		default:
 			if _, ok := pluginMap[string(agent.Type)]; !ok {
 				return fmt.Errorf("unknown agent type %q", agent.Type)
 			}
+		}
+	}
+	return nil
+}
+
+// validateGrokPhaseOneSpawn keeps the first-class Grok Build integration on
+// the behavior that has deterministic, fake-binary-testable semantics. Launch,
+// model selection, counting, and exact process discovery are supported in
+// phase one. Prompt injection, assignment, persona setup, and restart require
+// authenticated TUI fixtures and therefore fail closed instead of pretending
+// to work through another provider's protocol.
+func validateGrokPhaseOneSpawn(opts SpawnOptions) error {
+	for agentOrder, spec := range opts.Agents {
+		if spec.Type != AgentTypeGrok {
+			continue
+		}
+		if opts.Prompt != "" || opts.InitPrompt != "" {
+			return errors.New("Grok Build phase-one spawn does not yet support --prompt or --init-prompt; launch with --grok and send interactively after authenticating")
+		}
+		if _, ok := opts.MarchingOrders[agentOrder]; ok {
+			return errors.New("Grok Build phase-one spawn does not yet support marching-order prompt delivery")
+		}
+		if opts.Assign {
+			return errors.New("Grok Build phase-one spawn does not yet support --assign")
+		}
+		if opts.AutoRestart {
+			return errors.New("Grok Build phase-one spawn does not yet support --auto-restart")
+		}
+		if spec.Persona != nil {
+			return errors.New("Grok Build phase-one spawn does not yet support persona prompt injection")
+		}
+		if profile, ok := opts.PersonaMap[spec.Model]; ok && profile != nil {
+			return errors.New("Grok Build phase-one spawn does not yet support persona prompt injection")
 		}
 	}
 	return nil
@@ -680,7 +720,7 @@ func sortPanesForAssignment(panes []tmux.Pane) {
 }
 
 func legacySpawnTotalAgentCount(opts SpawnOptions) int {
-	return opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.CursorCount + opts.WindsurfCount + opts.AiderCount + opts.OpencodeCount + opts.OllamaCount
+	return opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.GrokCount + opts.CursorCount + opts.WindsurfCount + opts.AiderCount + opts.OpencodeCount + opts.OllamaCount
 }
 
 func spawnHookCountEnv(totalAgents int, opts SpawnOptions) map[string]string {
@@ -689,6 +729,7 @@ func spawnHookCountEnv(totalAgents int, opts SpawnOptions) map[string]string {
 		"NTM_AGENT_COUNT_COD":      fmt.Sprintf("%d", opts.CodCount),
 		"NTM_AGENT_COUNT_GMI":      fmt.Sprintf("%d", opts.GmiCount),
 		"NTM_AGENT_COUNT_AGY":      fmt.Sprintf("%d", opts.AgyCount),
+		"NTM_AGENT_COUNT_GROK":     fmt.Sprintf("%d", opts.GrokCount),
 		"NTM_AGENT_COUNT_CURSOR":   fmt.Sprintf("%d", opts.CursorCount),
 		"NTM_AGENT_COUNT_WINDSURF": fmt.Sprintf("%d", opts.WindsurfCount),
 		"NTM_AGENT_COUNT_AIDER":    fmt.Sprintf("%d", opts.AiderCount),
@@ -707,6 +748,7 @@ func spawnSessionCreatedEventFields(opts SpawnOptions, dir string) map[string]st
 		"agent_cod":      fmt.Sprintf("%d", opts.CodCount),
 		"agent_gmi":      fmt.Sprintf("%d", opts.GmiCount),
 		"agent_agy":      fmt.Sprintf("%d", opts.AgyCount),
+		"agent_grok":     fmt.Sprintf("%d", opts.GrokCount),
 		"agent_cursor":   fmt.Sprintf("%d", opts.CursorCount),
 		"agent_windsurf": fmt.Sprintf("%d", opts.WindsurfCount),
 		"agent_aider":    fmt.Sprintf("%d", opts.AiderCount),
@@ -863,6 +905,7 @@ type SpawnOptions struct {
 	CodCount           int
 	GmiCount           int
 	AgyCount           int
+	GrokCount          int
 	CursorCount        int
 	WindsurfCount      int
 	AiderCount         int
@@ -1528,6 +1571,7 @@ Examples:
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCodex, &agentSpecs), "cod", "Codex agents (N or N:model, model charset: a-zA-Z0-9._/@:+-)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeGemini, &agentSpecs), "gmi", "Gemini agents (N or N:model, model charset: a-zA-Z0-9._/@:+-)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeAntigravity, &agentSpecs), "agy", "Antigravity (agy) agents (N; model is pinned to Gemini 3.1 Pro (High))")
+	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeGrok, &agentSpecs), "grok", "Grok Build agents (N or N:model[:effort])")
 	cmd.Flags().IntVar(&localCount, "local", 0, "Local agents via Ollama (alias: --ollama)")
 	cmd.Flags().IntVar(&ollamaCount, "ollama", 0, "Alias for --local (explicit Ollama)")
 	cmd.Flags().StringVar(&localModel, "local-model", "codellama:latest", "Ollama model to run for --local/--ollama agents")
@@ -1699,6 +1743,9 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	if err := validateSpawnAgentTypes(opts.Agents, opts.PluginMap); err != nil {
 		return outputError(err)
 	}
+	if err := validateGrokPhaseOneSpawn(opts); err != nil {
+		return outputError(err)
+	}
 
 	if err := tmux.EnsureInstalled(); err != nil {
 		return outputError(err)
@@ -1745,7 +1792,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	if len(opts.Agents) == 0 {
 		totalAgents = legacySpawnTotalAgentCount(opts)
 		if totalAgents == 0 {
-			return outputError(fmt.Errorf("no agents specified (use --cc, --cod, --gmi, --agy, --cursor, --windsurf, --aider, --ollama or plugin flags)"))
+			return outputError(fmt.Errorf("no agents specified (use --cc, --cod, --gmi, --agy, --grok, --cursor, --windsurf, --aider, --ollama or plugin flags)"))
 		}
 	} else {
 		totalAgents = len(opts.Agents)
@@ -2237,6 +2284,11 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 				// agy-locked (when on PATH) over the frequently-aliased `agy`.
 				agentCmdTemplate = config.DefaultAgentTemplates().Antigravity
 			}
+		case AgentTypeGrok:
+			agentCmdTemplate = cfg.Agents.Grok
+			if agentCmdTemplate == "" {
+				agentCmdTemplate = config.DefaultAgentTemplates().Grok
+			}
 		case AgentTypeOllama:
 			agentCmdTemplate = cfg.Agents.Ollama
 			if ollamaHost != "" {
@@ -2523,6 +2575,11 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 
 		go func(paneID, paneTitle string, idx int, agentType AgentType, agent FlatAgent, panePrompt string, hasPrompt bool) {
 			defer setupWg.Done()
+			if agentType == AgentTypeGrok {
+				// Grok Build's authenticated fullscreen TUI readiness and input
+				// protocol are deliberately not inferred from other providers.
+				return
+			}
 
 			// Gemini post-spawn setup: auto-select Pro model
 			if agentType == AgentTypeGemini && cfg.GeminiSetup.AutoSelectProModel {
@@ -2655,6 +2712,11 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 			AutoRestart: opts.AutoRestart || cfg.Resilience.AutoRestart,
 		}
 		for _, agent := range launchedAgents {
+			if agent.agentType == string(AgentTypeGrok) {
+				// Restart remains unsupported until an authenticated Grok Build
+				// TUI lifecycle fixture proves the necessary semantics.
+				continue
+			}
 			manifest.Agents = append(manifest.Agents, resilience.AgentConfig{
 				PaneID:    agent.paneID,
 				PaneIndex: agent.paneIndex,
@@ -2821,7 +2883,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	}
 
 	// Emit analytics events (JSONL) for session creation and agent spawns.
-	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, opts.AgyCount, opts.CursorCount, opts.WindsurfCount, opts.AiderCount, opts.OpencodeCount, opts.OllamaCount, dir, opts.RecipeName)
+	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, opts.AgyCount, opts.GrokCount, opts.CursorCount, opts.WindsurfCount, opts.AiderCount, opts.OpencodeCount, opts.OllamaCount, dir, opts.RecipeName)
 	for _, agent := range launchedAgents {
 		events.Emit(events.EventAgentSpawn, opts.Session, events.AgentSpawnData{
 			AgentType: agent.agentType,

@@ -1787,6 +1787,7 @@ type StatusSummary struct {
 	CodexCount       int            `json:"codex_count"`
 	GeminiCount      int            `json:"gemini_count"`
 	AntigravityCount int            `json:"antigravity_count"`
+	GrokCount        int            `json:"grok_count"`
 	CursorCount      int            `json:"cursor_count"`
 	WindsurfCount    int            `json:"windsurf_count"`
 	AiderCount       int            `json:"aider_count"`
@@ -2290,6 +2291,7 @@ func cloneSnapshotOutput(base *SnapshotOutput) *SnapshotOutput {
 		CodexCount:       base.Summary.CodexCount,
 		GeminiCount:      base.Summary.GeminiCount,
 		AntigravityCount: base.Summary.AntigravityCount,
+		GrokCount:        base.Summary.GrokCount,
 		CursorCount:      base.Summary.CursorCount,
 		WindsurfCount:    base.Summary.WindsurfCount,
 		AiderCount:       base.Summary.AiderCount,
@@ -2621,6 +2623,8 @@ func statusAccumulateAgentSummary(summary *StatusSummary, agentType, agentState 
 		summary.GeminiCount++
 	case "antigravity":
 		summary.AntigravityCount++
+	case "grok":
+		summary.GrokCount++
 	case "cursor":
 		summary.CursorCount++
 	case "windsurf":
@@ -3745,6 +3749,8 @@ func detectAgentType(title string) string {
 		return "gemini"
 	case containsShortForm(titleLower, "agy"):
 		return "antigravity"
+	case containsShortForm(titleLower, "grok"):
+		return "grok"
 	case containsShortForm(titleLower, "ws"):
 		return "windsurf"
 	case containsShortForm(titleLower, "oc"):
@@ -3784,6 +3790,8 @@ func ResolveAgentType(t string) string {
 		return "gemini"
 	case agent.AgentTypeAntigravity:
 		return "antigravity"
+	case agent.AgentTypeGrok:
+		return "grok"
 	case agent.AgentTypeCursor:
 		return "cursor"
 	case agent.AgentTypeWindsurf:
@@ -5840,6 +5848,8 @@ func agentTypeString(t tmux.AgentType) string {
 		return "gemini"
 	case tmux.AgentAntigravity:
 		return "antigravity"
+	case tmux.AgentGrok:
+		return "grok"
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:

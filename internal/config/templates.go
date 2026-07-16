@@ -20,7 +20,7 @@ type AgentTemplateVars struct {
 	ModelRequested   bool   // True when the user explicitly requested a non-default model
 	SessionName      string // NTM session name
 	PaneIndex        int    // Pane number (1-based)
-	AgentType        string // Agent type: "cc", "cod", "gmi"
+	AgentType        string // Agent type: "cc", "cod", "gmi", "agy", "grok"
 	ProjectDir       string // Project directory path
 	SystemPrompt     string // System prompt content (if any)
 	SystemPromptFile string // Path to system prompt file (if any)
@@ -259,10 +259,15 @@ func DefaultAgentTemplates() AgentConfig {
 		// launch binary (agy-locked when present, else agy) because `agy` is often a
 		// shell alias that will not resolve in NTM's non-interactive launch shell.
 		Antigravity: `{{agyBinary}} --model {{shellQuote .Model}} --dangerously-skip-permissions`,
-		Ollama:      `ollama run {{shellQuote (.Model | default "codellama:latest")}}`,
-		Cursor:      `cursor{{if .Model}} --model {{shellQuote .Model}}{{end}}`,
-		Windsurf:    `windsurf{{if .Model}} --model {{shellQuote .Model}}{{end}}`,
-		Aider:       `aider{{if .Model}} --model {{shellQuote .Model}}{{end}}`,
+		// Grok Build owns its default model selection. NTM only supplies --model
+		// for an explicit/configured override, avoiding stale built-in model IDs.
+		// --always-approve is the official autonomous approval flag exposed by
+		// the current Grok Build CLI.
+		Grok:     `grok --always-approve{{if .Model}} --model {{shellQuote .Model}}{{end}}{{if .ReasoningEffort}} --reasoning-effort {{shellQuote .ReasoningEffort}}{{end}}`,
+		Ollama:   `ollama run {{shellQuote (.Model | default "codellama:latest")}}`,
+		Cursor:   `cursor{{if .Model}} --model {{shellQuote .Model}}{{end}}`,
+		Windsurf: `windsurf{{if .Model}} --model {{shellQuote .Model}}{{end}}`,
+		Aider:    `aider{{if .Model}} --model {{shellQuote .Model}}{{end}}`,
 		// Opencode (oc): the upstream `opencode` binary takes `-m/--model
 		// provider/model`. Without the {{.Model}} placeholder a
 		// `--oc=N:provider/model` spawn is rejected ("agent command has no
