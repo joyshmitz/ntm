@@ -2193,6 +2193,10 @@ func TestObserveAssignSessionBoundsTheWholeFreshnessStage(t *testing.T) {
 	if missingContextErr == nil || !strings.Contains(missingContextErr.Error(), "context is required") {
 		t.Fatalf("nil assignment observation context error = %v", missingContextErr)
 	}
+	_, missingTimeoutContextErr := observeAssignSessionWithTimeout(nil, "missing-timeout-context", time.Second)
+	if missingTimeoutContextErr == nil || !strings.Contains(missingTimeoutContextErr.Error(), "context is required") {
+		t.Fatalf("nil timed assignment observation context error = %v", missingTimeoutContextErr)
+	}
 }
 
 func TestAssignmentObservationFailureCodePreservesTimeouts(t *testing.T) {

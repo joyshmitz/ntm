@@ -139,7 +139,7 @@ func observeAssignSessionWithTimeout(
 	timeout time.Duration,
 ) (statuspkg.SessionObservation, error) {
 	if ctx == nil {
-		return observeAssignSession(nil, session)
+		return statuspkg.SessionObservation{}, errors.New("assignment observation context is required")
 	}
 	observationCtx, cancel := context.WithTimeout(ctx, resolveAssignTimeout(timeout))
 	defer cancel()
