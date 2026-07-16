@@ -89,7 +89,12 @@ var (
 	assignRepoPath string
 )
 
-const assignWatchOverlayKey = "F12"
+const (
+	assignWatchOverlayKey = "F12"
+	// Imperative dispatch gets more tmux scheduling headroom than status polling,
+	// while retaining one second for the evidence to remain dispatch-current.
+	assignObservationStageTimeout = statuspkg.DispatchObservationMaxAge - time.Second
+)
 
 var collectAssignAllocationPressure = collectLiveAssignAllocationPressure
 var (
@@ -104,19 +109,56 @@ type assignSessionObserver interface {
 }
 
 var newAssignSessionObserver = func() assignSessionObserver {
-	return statuspkg.NewSessionObserver(statuspkg.NewDetector())
+	detector := statuspkg.NewDetector()
+	config := statuspkg.DefaultSessionObserverConfig(detector.Config())
+	config.CaptureTimeout = assignObservationStageTimeout
+	return statuspkg.NewSessionObserverWithDependencies(detector, config, statuspkg.SessionObserverDependencies{})
 }
 
 func observeAssignSession(ctx context.Context, session string) (statuspkg.SessionObservation, error) {
+	if ctx == nil {
+		return statuspkg.SessionObservation{}, errors.New("assignment observation context is required")
+	}
+	observationCtx, cancel := context.WithTimeout(ctx, assignObservationStageTimeout)
+	defer cancel()
+
 	observer := newAssignSessionObserver()
 	if observer == nil {
 		return statuspkg.SessionObservation{}, errors.New("assignment session observer is unavailable")
 	}
-	observation, err := observer.Observe(ctx, session)
+	observation, err := observer.Observe(observationCtx, session)
 	if err != nil {
 		return observation, fmt.Errorf("observe assignment session %s: %w", session, err)
 	}
 	return observation, nil
+}
+
+func observeAssignSessionWithTimeout(
+	ctx context.Context,
+	session string,
+	timeout time.Duration,
+) (statuspkg.SessionObservation, error) {
+	if ctx == nil {
+		return observeAssignSession(nil, session)
+	}
+	observationCtx, cancel := context.WithTimeout(ctx, resolveAssignTimeout(timeout))
+	defer cancel()
+
+	observation, observeErr := observeAssignSession(observationCtx, session)
+	if observeErr != nil {
+		return observation, preserveCommandContextError(observationCtx, observeErr)
+	}
+	if contextErr := observationCtx.Err(); contextErr != nil {
+		return observation, contextErr
+	}
+	return observation, nil
+}
+
+func assignmentObservationFailureCode(err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return robot.ErrCodeTimeout
+	}
+	return "OBSERVATION_ERROR"
 }
 
 func currentAssignPaneObservation(observation statuspkg.SessionObservation, paneID string, now time.Time) (statuspkg.PaneObservation, error) {
@@ -257,7 +299,7 @@ Examples:
 	// Common flags
 	cmd.Flags().BoolVarP(&assignVerbose, "verbose", "v", false, "Show detailed scoring/decision logs")
 	cmd.Flags().BoolVarP(&assignQuiet, "quiet", "q", false, "Suppress non-essential output")
-	cmd.Flags().DurationVar(&assignTimeout, "timeout", 30*time.Second, "Timeout for external calls (bv, br, Agent Mail)")
+	cmd.Flags().DurationVar(&assignTimeout, "timeout", 30*time.Second, "Timeout for tmux observation and external calls (bv, br, Agent Mail)")
 	cmd.Flags().BoolVar(&assignDryRun, "dry-run", false, "Preview mode (alias for no --auto)")
 	cmd.Flags().BoolVar(&assignReserveFiles, "reserve-files", true, "Reserve file paths via Agent Mail before assignment")
 
@@ -4545,7 +4587,7 @@ func runReassignment(ctx context.Context, session string) error {
 			"current_status": string(existingAssignment.Status),
 		})
 	}
-	observation, observeErr := observeAssignSession(ctx, session)
+	observation, observeErr := observeAssignSessionWithTimeout(ctx, session, assignTimeout)
 	if observeErr != nil {
 		return emitContextAwareReassignFailure(ctx, session, "OBSERVATION_ERROR", observeErr, nil)
 	}
@@ -5656,11 +5698,13 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 			return err
 		}
 
-		observation, observationErr := observeAssignSession(ctx, opts.Session)
+		observation, observationErr := observeAssignSessionWithTimeout(ctx, opts.Session, opts.Timeout)
 		if observationErr != nil {
 			if IsJSONOutput() {
 				data := &DirectAssignData{Assignment: assignItem}
-				return emitJSONFailureEnvelope(makeDirectAssignEnvelope(opts.Session, false, data, "OBSERVATION_ERROR", observationErr.Error(), nil))
+				return emitTypedAssignmentFailure(observationErr, makeDirectAssignEnvelope(
+					opts.Session, false, data, assignmentObservationFailureCode(observationErr), observationErr.Error(), nil,
+				))
 			}
 			return observationErr
 		}
@@ -5668,7 +5712,9 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 		if observationErr != nil {
 			if IsJSONOutput() {
 				data := &DirectAssignData{Assignment: assignItem}
-				return emitJSONFailureEnvelope(makeDirectAssignEnvelope(opts.Session, false, data, "OBSERVATION_ERROR", observationErr.Error(), nil))
+				return emitTypedAssignmentFailure(observationErr, makeDirectAssignEnvelope(
+					opts.Session, false, data, assignmentObservationFailureCode(observationErr), observationErr.Error(), nil,
+				))
 			}
 			return observationErr
 		}

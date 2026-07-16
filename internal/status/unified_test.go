@@ -1368,6 +1368,68 @@ func TestSessionObserverBoundsCaptureAndOrdersTopology(t *testing.T) {
 	}
 }
 
+func TestSessionObserverCaptureDeadlineUsesEarlierParentOrCaptureBound(t *testing.T) {
+	t.Parallel()
+
+	const captureTimeout = 4 * time.Second
+	tests := []struct {
+		name          string
+		parentTimeout time.Duration
+	}{
+		{name: "capture bound", parentTimeout: 0},
+		{name: "earlier parent", parentTimeout: time.Second},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var ctx context.Context = context.Background()
+			var parentDeadline time.Time
+			if test.parentTimeout > 0 {
+				parentCtx, parentCancel := context.WithTimeout(ctx, test.parentTimeout)
+				defer parentCancel()
+				ctx = parentCtx
+				var hasParentDeadline bool
+				parentDeadline, hasParentDeadline = parentCtx.Deadline()
+				if !hasParentDeadline {
+					t.Fatal("parent capture context has no deadline")
+				}
+			}
+
+			var captureDeadline time.Time
+			var captureDeadlinePresent bool
+			observer := NewSessionObserverWithDependencies(NewDetector(), SessionObserverConfig{
+				CaptureTimeout: captureTimeout,
+			}, SessionObserverDependencies{
+				ListPanes: func(context.Context, string) ([]tmux.PaneActivity, error) {
+					return []tmux.PaneActivity{{Pane: tmux.Pane{ID: "%1", Type: tmux.AgentCodex}}}, nil
+				},
+				CapturePane: func(captureCtx context.Context, _ string, _ int) (string, error) {
+					captureDeadline, captureDeadlinePresent = captureCtx.Deadline()
+					return "task complete\n>", nil
+				},
+			})
+
+			before := time.Now()
+			observation, observeErr := observer.Observe(ctx, "deadline-contract")
+			after := time.Now()
+			if observeErr != nil || !observation.Complete {
+				t.Fatalf("Observe() complete=%t error=%v failures=%v", observation.Complete, observeErr, observation.Failures)
+			}
+			if !captureDeadlinePresent {
+				t.Fatal("capture context has no deadline")
+			}
+			if test.parentTimeout > 0 {
+				if !captureDeadline.Equal(parentDeadline) {
+					t.Fatalf("capture deadline = %s, want parent deadline %s", captureDeadline, parentDeadline)
+				}
+				return
+			}
+			if captureDeadline.Sub(before) < captureTimeout || captureDeadline.Sub(after) > captureTimeout {
+				t.Fatalf("capture deadline = %s, want creation time + %s", captureDeadline, captureTimeout)
+			}
+		})
+	}
+}
+
 func TestSessionObserverDoesNotSerializeIndependentSessions(t *testing.T) {
 	t.Parallel()
 

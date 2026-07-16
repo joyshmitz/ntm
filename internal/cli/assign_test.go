@@ -2100,6 +2100,7 @@ func TestPendingCLIRecoveryIdentityErrorRejectsReusedPaneIdentity(t *testing.T) 
 type fixedAssignSessionObserver struct {
 	observation statuspkg.SessionObservation
 	err         error
+	observe     func(context.Context, string) (statuspkg.SessionObservation, error)
 }
 
 func TestCurrentAssignPaneObservationRequiresFreshCanonicalEvidence(t *testing.T) {
@@ -2142,6 +2143,76 @@ func TestObserveAssignSessionPropagatesObserverError(t *testing.T) {
 
 	if _, err := observeAssignSession(t.Context(), "demo"); err == nil || !strings.Contains(err.Error(), "topology unavailable") {
 		t.Fatalf("observeAssignSession error=%v", err)
+	}
+}
+
+func TestObserveAssignSessionBoundsTheWholeFreshnessStage(t *testing.T) {
+	original := newAssignSessionObserver
+	t.Cleanup(func() { newAssignSessionObserver = original })
+
+	var observedDeadline time.Time
+	newAssignSessionObserver = func() assignSessionObserver {
+		return fixedAssignSessionObserver{observe: func(ctx context.Context, _ string) (statuspkg.SessionObservation, error) {
+			var ok bool
+			observedDeadline, ok = ctx.Deadline()
+			if !ok {
+				t.Fatal("assignment observation context has no deadline")
+			}
+			return statuspkg.SessionObservation{}, nil
+		}}
+	}
+
+	before := time.Now()
+	_, boundedErr := observeAssignSession(context.Background(), "bounded")
+	if boundedErr != nil {
+		t.Fatalf("observe bounded assignment session: %v", boundedErr)
+	}
+	after := time.Now()
+	if observedDeadline.Sub(before) < assignObservationStageTimeout || observedDeadline.Sub(after) > assignObservationStageTimeout {
+		t.Fatalf("assignment observation deadline = %s, want creation time + %s", observedDeadline, assignObservationStageTimeout)
+	}
+	if observedDeadline.Sub(before) >= statuspkg.DispatchObservationMaxAge {
+		t.Fatalf("assignment observation deadline %s does not preserve dispatch freshness margin", observedDeadline)
+	}
+
+	parent, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	parentDeadline, hasParentDeadline := parent.Deadline()
+	if !hasParentDeadline {
+		t.Fatal("parent assignment observation context has no deadline")
+	}
+	_, parentErr := observeAssignSession(parent, "parent-bounded")
+	if parentErr != nil {
+		t.Fatalf("observe parent-bounded assignment session: %v", parentErr)
+	}
+	if !observedDeadline.Equal(parentDeadline) {
+		t.Fatalf("assignment observation deadline = %s, want earlier parent deadline %s", observedDeadline, parentDeadline)
+	}
+
+	_, missingContextErr := observeAssignSession(nil, "missing-context")
+	if missingContextErr == nil || !strings.Contains(missingContextErr.Error(), "context is required") {
+		t.Fatalf("nil assignment observation context error = %v", missingContextErr)
+	}
+}
+
+func TestAssignmentObservationFailureCodePreservesTimeouts(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "observation failure", err: errors.New("capture failed"), want: "OBSERVATION_ERROR"},
+		{name: "deadline", err: errors.Join(errors.New("capture failed"), context.DeadlineExceeded), want: robot.ErrCodeTimeout},
+		{name: "cancellation", err: errors.Join(errors.New("capture failed"), context.Canceled), want: robot.ErrCodeTimeout},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			switch got := assignmentObservationFailureCode(test.err); got {
+			case test.want:
+			default:
+				t.Fatalf("assignmentObservationFailureCode(%v) = %q, want %q", test.err, got, test.want)
+			}
+		})
 	}
 }
 
@@ -2911,7 +2982,10 @@ func TestTriggerCompletionCheckCompletesExactGenerationBeforeReassignment(t *tes
 	}
 }
 
-func (o fixedAssignSessionObserver) Observe(context.Context, string) (statuspkg.SessionObservation, error) {
+func (o fixedAssignSessionObserver) Observe(ctx context.Context, session string) (statuspkg.SessionObservation, error) {
+	if o.observe != nil {
+		return o.observe(ctx, session)
+	}
 	return o.observation, o.err
 }
 

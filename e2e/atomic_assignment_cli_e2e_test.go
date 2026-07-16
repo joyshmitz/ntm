@@ -2745,6 +2745,167 @@ func TestE2EAtomicAssignmentCompletionRejectsSupersededGeneration(t *testing.T) 
 	}
 }
 
+func TestE2EAtomicAssignmentObservationDeadlineContracts(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+	assertNoBRInvocations := func(t *testing.T, tracePath string) {
+		t.Helper()
+		// ubs:ignore -- tracePath is created under the fixture's t.TempDir.
+		trace, readErr := os.ReadFile(tracePath)
+		if os.IsNotExist(readErr) {
+			return
+		}
+		if readErr != nil {
+			t.Fatalf("read br invocation trace: %v", readErr)
+		}
+		if len(bytes.TrimSpace(trace)) != 0 {
+			t.Fatalf("observation timeout reached br: %s", trace)
+		}
+	}
+	assertFixturePathExists := func(t *testing.T, path, description string) {
+		t.Helper()
+		// ubs:ignore -- path is returned by a helper rooted in the fixture's t.TempDir.
+		_, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatalf("%s: %v", description, statErr)
+		}
+	}
+
+	t.Run("capture_outlives_status_poll_budget_and_dispatches_once", func(t *testing.T) {
+		fixture := newAtomicAssignmentCLIFixture(t)
+		beadID := fixture.createBead(t, "Delayed assignment observation")
+		prompt := fmt.Sprintf("NTM_ATOMIC_DELAYED_OBSERVATION_%d", time.Now().UnixNano())
+		tmuxBinary, reached := fixture.armTMUXCaptureDelay(t, 2500*time.Millisecond)
+		result := fixture.runNTM(t, map[string]string{"NTM_TMUX_BINARY": tmuxBinary},
+			"assign", fixture.session,
+			"--repo="+fixture.projectDir,
+			"--pane="+fixture.panes[0].ID,
+			"--beads="+beadID,
+			"--prompt="+prompt,
+			"--force",
+			"--ignore-deps",
+			"--reserve-files=false",
+			"--timeout=8s",
+			"--json",
+		)
+		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+			t.Fatalf("delayed observation assignment exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+		}
+		var envelope atomicAssignmentDirectEnvelope
+		decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+		if !envelope.Success || envelope.Error != nil || envelope.Data == nil || envelope.Data.Receipt == nil ||
+			!envelope.Data.Assignment.PromptSent || !envelope.Data.Receipt.Transport.Sent || len(envelope.Data.Receipt.Transport.DeliveryID) == 0 {
+			t.Fatalf("delayed observation assignment envelope = %+v", envelope)
+		}
+		assertFixturePathExists(t, reached, "delayed observation wrapper was not reached")
+		fixture.waitForEndpointMarkerCount(t, fixture.panes[0], prompt, 1)
+		fixture.assertMarkerCounts(t, prompt, map[int]int{0: 1, 1: 0})
+		record := fixture.readLedgerAssignment(t, beadID)
+		if strings.Compare(record.DispatchState, "sent") != 0 || len(record.DispatchReceiptID) == 0 ||
+			strings.Compare(record.PromptSent, prompt) != 0 {
+			t.Fatalf("delayed observation durable assignment = %+v", record)
+		}
+		fixture.assertBead(t, beadID, "in_progress", record.ClaimActor)
+	})
+
+	t.Run("direct_short_timeout_has_zero_side_effects", func(t *testing.T) {
+		fixture := newAtomicAssignmentCLIFixture(t)
+		mail := newAtomicAssignmentMailStub(fixture.projectDir)
+		defer mail.close()
+		beadID := fixture.createBead(t, "Timed assignment observation internal/cli/observation_timeout.go")
+		prompt := fmt.Sprintf("NTM_ATOMIC_OBSERVATION_TIMEOUT_%d", time.Now().UnixNano())
+		tmuxBinary, reached := fixture.armTMUXCaptureDelay(t, 2500*time.Millisecond)
+		brPath, brTrace := fixture.armBRInvocationTrace(t)
+		ledgerReplicas := []string{fixture.ledgerPath(), fixture.ledgerPath() + ".bak"}
+		assertLedgerReplicasAbsent := func(stage string) {
+			t.Helper()
+			for _, path := range ledgerReplicas {
+				// ubs:ignore -- path is a fixed replica beneath the fixture's isolated HOME.
+				_, statErr := os.Stat(path)
+				if statErr == nil {
+					t.Fatalf("%s assignment ledger replica exists: %s", stage, path)
+				}
+				if !os.IsNotExist(statErr) {
+					t.Fatalf("inspect %s assignment ledger replica %s: %v", stage, path, statErr)
+				}
+			}
+		}
+		assertLedgerReplicasAbsent("before timed observation")
+		env := mail.env()
+		env["NTM_TMUX_BINARY"] = tmuxBinary
+		env["PATH"] = brPath
+		result := fixture.runNTM(t, env,
+			"assign", fixture.session,
+			"--repo="+fixture.projectDir,
+			"--pane="+fixture.panes[0].ID,
+			"--beads="+beadID,
+			"--prompt="+prompt,
+			"--force",
+			"--ignore-deps",
+			"--reserve-files=true",
+			"--timeout=250ms",
+			"--json",
+		)
+		assertAtomicAssignmentSingleTimeoutJSON(t, result)
+		assertFixturePathExists(t, reached, "timed observation wrapper was not reached")
+		assertNoBRInvocations(t, brTrace)
+		assertLedgerReplicasAbsent("after timed observation")
+		fixture.assertLedgerHasNoAssignment(t, beadID)
+		fixture.assertBead(t, beadID, "open", "")
+		fixture.assertMarkerCounts(t, prompt, map[int]int{0: 0, 1: 0})
+		if snapshot := mail.snapshot(); snapshot.EnsureCalls != 0 || snapshot.ReserveCalls != 0 || snapshot.ListCalls != 0 ||
+			snapshot.ReleaseCalls != 0 || snapshot.SendCalls != 0 || len(snapshot.Active) != 0 {
+			t.Fatalf("timed observation touched Agent Mail: %+v", snapshot)
+		}
+	})
+
+	t.Run("reassign_short_timeout_preserves_source_ownership", func(t *testing.T) {
+		fixture := newAtomicAssignmentCLIFixture(t)
+		mail := newAtomicAssignmentMailStub(fixture.projectDir)
+		defer mail.close()
+		beadID, sourcePrompt, before := seedReservedWorkingAssignment(
+			t, fixture, mail, fixture.panes[0], "Timed reassign observation internal/cli/reassign_observation_timeout.go",
+		)
+		_, beforeLedger := readAtomicAssignmentLedgerAt(t, fixture.ledgerPath())
+		_, beforeBackup := readAtomicAssignmentLedgerAt(t, fixture.ledgerPath()+".bak")
+		beforeMail := mail.snapshot()
+		prompt := fmt.Sprintf("NTM_ATOMIC_REASSIGN_OBSERVATION_TIMEOUT_%d", time.Now().UnixNano())
+		tmuxBinary, reached := fixture.armTMUXCaptureDelay(t, 2500*time.Millisecond)
+		brPath, brTrace := fixture.armBRInvocationTrace(t)
+		env := mail.env()
+		env["NTM_TMUX_BINARY"] = tmuxBinary
+		env["PATH"] = brPath
+		result := fixture.runNTM(t, env,
+			"--json", "assign", fixture.session,
+			"--repo="+fixture.projectDir,
+			"--reassign="+beadID,
+			"--to-pane="+fixture.panes[1].ID,
+			"--prompt="+prompt,
+			"--force",
+			"--reserve-files=true",
+			"--timeout=250ms",
+		)
+		assertAtomicAssignmentSingleTimeoutJSON(t, result)
+		assertFixturePathExists(t, reached, "timed reassign observation wrapper was not reached")
+		assertNoBRInvocations(t, brTrace)
+		_, afterLedger := readAtomicAssignmentLedgerAt(t, fixture.ledgerPath())
+		_, afterBackup := readAtomicAssignmentLedgerAt(t, fixture.ledgerPath()+".bak")
+		if !bytes.Equal(afterLedger, beforeLedger) || !bytes.Equal(afterBackup, beforeBackup) {
+			t.Fatalf("timed reassign observation mutated durable source: before=%+v after=%+v", before, fixture.readLedgerAssignment(t, beadID))
+		}
+		afterMail := mail.snapshot()
+		if afterMail.EnsureCalls != beforeMail.EnsureCalls || afterMail.ReserveCalls != beforeMail.ReserveCalls ||
+			afterMail.ListCalls != beforeMail.ListCalls || afterMail.ReleaseCalls != beforeMail.ReleaseCalls ||
+			afterMail.SendCalls != beforeMail.SendCalls || len(afterMail.Active) != len(beforeMail.Active) ||
+			len(afterMail.ReleasedIDs) != len(beforeMail.ReleasedIDs) || !bytes.Equal(afterMail.RawRequests, beforeMail.RawRequests) {
+			t.Fatalf("timed reassign observation touched Agent Mail: before=%+v after=%+v", beforeMail, afterMail)
+		}
+		fixture.assertBead(t, beadID, "in_progress", before.ClaimActor)
+		fixture.assertMarkerCounts(t, sourcePrompt, map[int]int{0: 1, 1: 0})
+		fixture.assertMarkerCounts(t, prompt, map[int]int{0: 0, 1: 0})
+	})
+}
+
 func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 	CommonE2EPrerequisites(t)
 	testutil.RequireTmuxThrottled(t)
@@ -3085,7 +3246,8 @@ func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 	pollingTitle := "Coordinator polling internal/coordinator/e2e_reserved.go"
 	pollingBeadID := fixture.createBead(t, pollingTitle)
 	writeBVPayload(pollingBeadID, pollingTitle)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	const coordinatorTransitionTimeout = 30 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 6*coordinatorTransitionTimeout)
 	defer cancel()
 	longRun := exec.CommandContext(ctx, fixture.ntmPath, "--json", "coordinator", "run", fixture.session)
 	longRun.Dir = fixture.projectDir
@@ -3121,7 +3283,7 @@ func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 			t.Fatalf("read coordinator startup envelope: %v stderr=%s", received.err, longRunStderr.String())
 		}
 		decodeAtomicAssignmentJSON(t, received.line, &startup)
-	case <-time.After(10 * time.Second):
+	case <-time.After(coordinatorTransitionTimeout):
 		t.Fatal("timed out waiting for coordinator startup envelope")
 	}
 	if !startup.Success || startup.Once || !startup.AutoAssign {
@@ -3129,7 +3291,7 @@ func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 	}
 	waitForRecord := func(id string, predicate func(*atomicAssignmentRecord) bool, description string) *atomicAssignmentRecord {
 		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(coordinatorTransitionTimeout)
 		for {
 			ledger, readErr := fixture.readLedger()
 			if readErr == nil {
@@ -7560,6 +7722,58 @@ func waitForAtomicAssignmentSignal(t *testing.T, signal <-chan struct{}, descrip
 	case <-time.After(15 * time.Second):
 		t.Fatalf("timed out waiting for %s", description)
 	}
+}
+
+func (f *atomicAssignmentCLIFixture) armTMUXCaptureDelay(t *testing.T, delay time.Duration) (string, string) {
+	t.Helper()
+	if delay <= 0 {
+		t.Fatalf("tmux capture delay=%s, want positive", delay)
+	}
+	wrapperDir := t.TempDir()
+	reached := filepath.Join(wrapperDir, "capture-reached")
+	wrapper := strings.Join([]string{
+		"#!/bin/sh",
+		"real_tmux=" + tmux.ShellQuote(f.tmuxPath),
+		"reached=" + tmux.ShellQuote(reached),
+		fmt.Sprintf("delay_seconds=%.3f", delay.Seconds()),
+		`for arg in "$@"; do`,
+		`  if [ "$arg" = "capture-pane" ]; then`,
+		`    printf 'reached\n' > "$reached"`,
+		`    sleep "$delay_seconds"`,
+		`    break`,
+		`  fi`,
+		`done`,
+		`exec "$real_tmux" "$@"`,
+		"",
+	}, "\n")
+	wrapperPath := filepath.Join(wrapperDir, "tmux")
+	// ubs:ignore -- wrapperPath is confined to the directory returned by t.TempDir.
+	writeErr := os.WriteFile(wrapperPath, []byte(wrapper), 0o700)
+	if writeErr != nil {
+		t.Fatalf("write tmux delay wrapper: %v", writeErr)
+	}
+	return wrapperPath, reached
+}
+
+func (f *atomicAssignmentCLIFixture) armBRInvocationTrace(t *testing.T) (string, string) {
+	t.Helper()
+	wrapperDir := t.TempDir()
+	tracePath := filepath.Join(wrapperDir, "invocations")
+	wrapper := strings.Join([]string{
+		"#!/bin/sh",
+		"real_br=" + tmux.ShellQuote(f.brPath),
+		"trace=" + tmux.ShellQuote(tracePath),
+		`printf '%s\n' "$*" >> "$trace"`,
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	wrapperPath := filepath.Join(wrapperDir, "br")
+	// ubs:ignore -- wrapperPath is confined to the directory returned by t.TempDir.
+	writeErr := os.WriteFile(wrapperPath, []byte(wrapper), 0o700)
+	if writeErr != nil {
+		t.Fatalf("write br trace wrapper: %v", writeErr)
+	}
+	return wrapperDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(f.env, "PATH"), tracePath
 }
 
 func (f *atomicAssignmentCLIFixture) armTMUXPostActuationFailure(t *testing.T) (string, string) {
