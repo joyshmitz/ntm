@@ -287,8 +287,8 @@ func GetActionableRecommendationsContext(ctx context.Context, dir string, n int)
 		// gates operator-gated beads by label. A synthesized rec with empty
 		// Labels would silently bypass that gate for any operator-gated bead
 		// surfaced below triage's top-10 cut, so restore label fidelity from
-		// `br ready` (#197). Best-effort: an empty map degrades to the prior
-		// permissive behavior, never worse.
+		// `br ready` merged with `br list --status open` (#197, #224 — epics
+		// are excluded from `br ready` but actionable in the plan).
 		labelsByID, labelsErr := readyBeadLabelsContext(ctx, dir)
 		if labelsErr != nil {
 			return nil, labelsErr
@@ -320,21 +320,23 @@ func GetActionableRecommendationsContext(ctx context.Context, dir string, n int)
 	return recs, nil
 }
 
-// readyBeadLabels returns a best-effort map of bead ID -> labels for the ready
-// (open, unblocked) work set, sourced from `br ready --json`.
+// readyBeadLabels returns a map of bead ID -> labels for the actionable work
+// set, sourced from `br ready --json` merged with `br list --json --status open`.
 //
 // It exists to restore label fidelity on plan-sourced recommendations:
 // bv --robot-plan omits labels, yet the assignment classifier
-// (classifyTriageRecForAssignment) gates operator-gated beads by label. A bead
-// is only ever dispatched after it passes the "status is open/ready" check, and
-// every open/unblocked bead appears in `br ready`, so enriching from this set is
-// sufficient to keep the operator gate intact for candidates surfaced below
-// triage's top-10 cut.
+// (classifyTriageRecForAssignment) gates operator-gated beads by label.
 //
-// Failure modes degrade safely (never worse than the prior label-less behavior):
-// a br error or a parse failure yields an empty map. A large explicit --limit
-// keeps the map complete on br builds whose `ready` default limit is finite
-// (older builds treat --limit 0 as zero rows rather than "unlimited").
+// Why two commands (#224): `br ready` excludes epic-type beads, while
+// bv --robot-plan includes epics as actionable. An operator-gated epic below
+// triage's top-10 cut would therefore arrive with empty labels and silently
+// bypass the operator gate if enrichment stopped at `br ready`. Merging
+// `br list --status open` fills that gap — ready entries win, list fills the
+// rest (epics included), so every plan-sourced candidate keeps its labels.
+//
+// A large explicit --limit keeps the map complete on br builds whose default
+// limit is finite (older builds treat --limit 0 as zero rows rather than
+// "unlimited").
 func readyBeadLabels(dir string) map[string][]string {
 	labels, _ := readyBeadLabelsContext(context.Background(), dir)
 	return labels
@@ -342,20 +344,28 @@ func readyBeadLabels(dir string) map[string][]string {
 
 func readyBeadLabelsContext(ctx context.Context, dir string) (map[string][]string, error) {
 	labels := make(map[string][]string)
-	output, err := RunBdContext(ctx, dir, "ready", "--json", "--limit", "100000")
-	if err != nil {
-		return nil, fmt.Errorf("read ready bead labels: %w", err)
-	}
-	items, err := UnmarshalBdList[struct {
-		ID     string   `json:"id"`
-		Labels []string `json:"labels"`
-	}](output)
-	if err != nil {
-		return nil, fmt.Errorf("parse ready bead labels: %w", err)
-	}
-	for _, it := range items {
-		if it.ID != "" && len(it.Labels) > 0 {
-			labels[it.ID] = it.Labels
+	for _, args := range [][]string{
+		{"ready", "--json", "--limit", "100000"},
+		{"list", "--json", "--status", "open", "--limit", "100000"},
+	} {
+		output, err := RunBdContext(ctx, dir, args...)
+		if err != nil {
+			return nil, fmt.Errorf("read bead labels (br %s): %w", args[0], err)
+		}
+		items, err := UnmarshalBdList[struct {
+			ID     string   `json:"id"`
+			Labels []string `json:"labels"`
+		}](output)
+		if err != nil {
+			return nil, fmt.Errorf("parse bead labels (br %s): %w", args[0], err)
+		}
+		for _, it := range items {
+			if it.ID == "" || len(it.Labels) == 0 {
+				continue
+			}
+			if _, seen := labels[it.ID]; !seen {
+				labels[it.ID] = it.Labels
+			}
 		}
 	}
 	return labels, nil

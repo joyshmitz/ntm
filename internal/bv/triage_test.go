@@ -270,3 +270,50 @@ func TestGetTriageNoCache(t *testing.T) {
 	// Note: We don't test the actual GetTriageNoCache behavior here to avoid
 	// making slow bv calls. The caching logic is tested in TestTriageCache.
 }
+
+// Regression for #224: `br ready` excludes epic-type beads while
+// bv --robot-plan includes them as actionable, so label enrichment must also
+// consult `br list --status open` or an operator-gated epic below triage's
+// top-10 cut arrives with empty labels and bypasses the operator gate.
+func TestReadyBeadLabelsMergesOpenListForEpics(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	binDir := t.TempDir()
+	// br sees args like: --lock-timeout 5000 ready --json --limit 100000
+	script := `#!/bin/sh
+case "$*" in
+*" ready "*)
+	echo '[{"id":"bd-task","labels":["human-gated","ready-fresh"]}]'
+	;;
+*" list "*)
+	echo '[{"id":"bd-task","labels":["stale-from-list"]},{"id":"bd-epic","labels":["human-gated"]},{"id":"bd-plain","labels":[]}]'
+	;;
+*)
+	echo '[]'
+	;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	labels, err := readyBeadLabelsContext(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("readyBeadLabelsContext: %v", err)
+	}
+	// Epic missing from `br ready` must still carry its labels via `br list`.
+	if got := labels["bd-epic"]; len(got) != 1 || got[0] != "human-gated" {
+		t.Fatalf("epic labels = %v, want [human-gated]", got)
+	}
+	// Entries present in `br ready` win over `br list` duplicates.
+	if got := labels["bd-task"]; len(got) != 2 || got[0] != "human-gated" || got[1] != "ready-fresh" {
+		t.Fatalf("task labels = %v, want ready-sourced [human-gated ready-fresh]", got)
+	}
+	// Beads with no labels stay absent (empty means nothing to gate on).
+	if _, ok := labels["bd-plain"]; ok {
+		t.Fatalf("bd-plain should not appear in label map")
+	}
+}
