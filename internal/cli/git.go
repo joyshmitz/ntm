@@ -65,7 +65,7 @@ Examples:
 			if len(args) > 0 {
 				session = args[0]
 			}
-			return runGitSync(session, pullOnly, pushOnly, force, dryRun)
+			return runGitSync(cmd.Context(), session, pullOnly, pushOnly, force, dryRun)
 		},
 	}
 
@@ -111,8 +111,8 @@ type PushResult struct {
 	NothingToPush bool   `json:"nothing_to_push"`
 }
 
-func runGitSync(session string, pullOnly, pushOnly, force, dryRun bool) error {
-	session, workDir, err := resolveGitProjectDir(session)
+func runGitSync(ctx context.Context, session string, pullOnly, pushOnly, force, dryRun bool) error {
+	session, workDir, err := resolveGitProjectDir(ctx, session)
 	if err != nil {
 		return err
 	}
@@ -450,7 +450,7 @@ Examples:
 			if len(args) > 0 {
 				session = args[0]
 			}
-			return runGitStatus(session, allAgents)
+			return runGitStatus(cmd.Context(), session, allAgents)
 		},
 	}
 
@@ -493,8 +493,8 @@ type AgentMailStatus struct {
 	ConflictCount   int    `json:"conflict_count"`
 }
 
-func runGitStatus(session string, allAgents bool) error {
-	session, workDir, err := resolveGitProjectDir(session)
+func runGitStatus(ctx context.Context, session string, allAgents bool) error {
+	session, workDir, err := resolveGitProjectDir(ctx, session)
 	if err != nil {
 		return err
 	}
@@ -556,8 +556,8 @@ func resolveGitAgentMailProjectKey(session, workDir string) string {
 	return refineAgentMailProjectKey(session, workDir)
 }
 
-func resolveGitProjectDir(session string) (string, string, error) {
-	session, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+func resolveGitProjectDir(ctx context.Context, session string) (string, string, error) {
+	session, err := normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 	if err != nil {
 		return "", "", err
 	}
@@ -566,7 +566,7 @@ func resolveGitProjectDir(session string) (string, string, error) {
 	if strings.TrimSpace(session) == "" {
 		workDir = resolveProjectDirForSession(session, true)
 	} else {
-		workDir, err = resolveExplicitProjectDirForSession(session)
+		workDir, err = resolveExplicitProjectDirForSessionContext(ctx, session)
 		if err != nil {
 			return "", "", err
 		}

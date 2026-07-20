@@ -4,9 +4,11 @@ package robot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -76,12 +78,66 @@ type DiagnoseOptions struct {
 	Brief   bool   // minimal output
 }
 
+type diagnoseDependencies struct {
+	sessionExists func(context.Context, string) (bool, error)
+	listPanes     func(context.Context, string) ([]tmux.Pane, error)
+	restartPane   diagnoseRestartPaneFunc
+	sendKeys      func(context.Context, string, string, bool) error
+}
+
+func defaultDiagnoseDependencies() diagnoseDependencies {
+	return diagnoseDependencies{
+		sessionExists: tmux.SessionExistsContext,
+		listPanes:     tmux.GetPanesContext,
+		restartPane:   GetRestartPaneContext,
+		sendKeys:      tmux.SendKeysContext,
+	}
+}
+
+func (deps diagnoseDependencies) withDefaults() diagnoseDependencies {
+	defaults := defaultDiagnoseDependencies()
+	if deps.sessionExists == nil {
+		deps.sessionExists = defaults.sessionExists
+	}
+	if deps.listPanes == nil {
+		deps.listPanes = defaults.listPanes
+	}
+	if deps.restartPane == nil {
+		deps.restartPane = defaults.restartPane
+	}
+	if deps.sendKeys == nil {
+		deps.sendKeys = defaults.sendKeys
+	}
+	return deps
+}
+
+func diagnoseCancellationError(ctx context.Context, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
+}
+
+func classifyDiagnoseOperationError(ctx context.Context, err error) (string, string, error) {
+	if cancelErr := diagnoseCancellationError(ctx, err); cancelErr != nil {
+		return ErrCodeTimeout, "Retry after the cancellation or timeout condition clears", cancelErr
+	}
+	return ErrCodeInternalError, "Check tmux session health and retry", err
+}
+
 // GetDiagnose collects comprehensive health diagnosis for a session.
 // This function returns the data struct directly, enabling CLI/REST parity.
 // Note: This does not execute fixes; use PrintDiagnose with opts.Fix=true for that.
 // The context bounds any tmux ListPanes call so a hung tmux daemon doesn't
 // outlive a cancelled caller.
 func GetDiagnose(ctx context.Context, opts DiagnoseOptions) (*DiagnoseOutput, error) {
+	return getDiagnoseWithDependencies(ctx, opts, defaultDiagnoseDependencies())
+}
+
+func getDiagnoseWithDependencies(ctx context.Context, opts DiagnoseOptions, deps diagnoseDependencies) (*DiagnoseOutput, error) {
 	output := &DiagnoseOutput{
 		RobotResponse:   NewRobotResponse(true),
 		Session:         opts.Session,
@@ -97,9 +153,24 @@ func GetDiagnose(ctx context.Context, opts DiagnoseOptions) (*DiagnoseOutput, er
 	output.Panes.Unresponsive = []int{}
 	output.Panes.Crashed = []int{}
 	output.Panes.Unknown = []int{}
+	if ctx == nil {
+		output.RobotResponse = NewErrorResponse(errors.New("diagnose context is required"), ErrCodeInternalError, "Retry the command")
+		return output, nil
+	}
+	if err := ctx.Err(); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry after the cancellation or timeout condition clears")
+		return output, nil
+	}
+	deps = deps.withDefaults()
 
 	// Check if session exists
-	if !tmux.SessionExists(opts.Session) {
+	exists, err := deps.sessionExists(ctx, opts.Session)
+	if err != nil {
+		code, hint, cause := classifyDiagnoseOperationError(ctx, err)
+		output.RobotResponse = NewErrorResponse(fmt.Errorf("failed to check session: %w", cause), code, hint)
+		return output, nil
+	}
+	if !exists {
 		output.Success = false
 		output.Error = fmt.Sprintf("session '%s' not found", opts.Session)
 		output.ErrorCode = ErrCodeSessionNotFound
@@ -108,11 +179,10 @@ func GetDiagnose(ctx context.Context, opts DiagnoseOptions) (*DiagnoseOutput, er
 	}
 
 	// Get all panes in session
-	panes, err := tmux.GetPanesContext(ctx, opts.Session)
+	panes, err := deps.listPanes(ctx, opts.Session)
 	if err != nil {
-		output.Success = false
-		output.Error = fmt.Sprintf("failed to get panes: %v", err)
-		output.ErrorCode = ErrCodeInternalError
+		code, hint, cause := classifyDiagnoseOperationError(ctx, err)
+		output.RobotResponse = NewErrorResponse(fmt.Errorf("failed to get panes: %w", cause), code, hint)
 		return output, nil
 	}
 
@@ -344,6 +414,10 @@ func buildRateLimitRecommendation(paneIndex int, session string, check *HealthCh
 // executeDiagnoseFix attempts to fix auto-fixable issues. The context
 // bounds tmux ListPanes so cancellation propagates into the fix loop.
 func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseOptions) error {
+	return executeDiagnoseFixWithDependencies(ctx, diag, opts, defaultDiagnoseDependencies())
+}
+
+func executeDiagnoseFixWithDependencies(ctx context.Context, diag DiagnoseOutput, opts DiagnoseOptions, deps diagnoseDependencies) error {
 	// Build a fix report
 	type FixAttempt struct {
 		Pane    int    `json:"pane"`
@@ -367,6 +441,26 @@ func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseO
 
 	fixedCount := 0
 	failedCount := 0
+	finishCancellation := func(err error, attempt *FixAttempt) error {
+		if attempt != nil {
+			fixReport.FixAttempts = append(fixReport.FixAttempts, *attempt)
+		}
+		fixReport.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry after the cancellation or timeout condition clears")
+		fixReport.Summary = fmt.Sprintf(
+			"Fix loop cancelled (%v); %d issue(s) attempted before cancellation",
+			err, fixedCount+failedCount,
+		)
+		return encodeTerminalRobotOutput(&fixReport, fixReport.RobotResponse, "robot diagnose fix failed")
+	}
+	if ctx == nil {
+		fixReport.RobotResponse = NewErrorResponse(errors.New("diagnose fix context is required"), ErrCodeInternalError, "Retry the command")
+		fixReport.Summary = "No fixes attempted because the command context is missing"
+		return encodeTerminalRobotOutput(&fixReport, fixReport.RobotResponse, "robot diagnose fix failed")
+	}
+	if err := ctx.Err(); err != nil {
+		return finishCancellation(err, nil)
+	}
+	deps = deps.withDefaults()
 
 	// Pre-fetch panes once so we can look up each recommendation by index
 	// and dispatch tmux ops against the base-index-independent pane ID
@@ -374,27 +468,29 @@ func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseO
 	// interprets as a *window* index and breaks on hosts with
 	// `base-index = 1` (#141). Context-aware so callers can cancel a hung
 	// tmux daemon (matches the HTTP `handlePaneInputV1` shape).
-	fixPanes, fixPanesErr := tmux.GetPanesContext(ctx, opts.Session)
+	fixPanes, fixPanesErr := deps.listPanes(ctx, opts.Session)
+	if fixPanesErr != nil {
+		code, hint, cause := classifyDiagnoseOperationError(ctx, fixPanesErr)
+		fixReport.RobotResponse = NewErrorResponse(fmt.Errorf("failed to list panes: %w", cause), code, hint)
+		fixReport.Summary = "No fixes attempted because pane discovery failed"
+		return encodeTerminalRobotOutput(&fixReport, fixReport.RobotResponse, "robot diagnose fix failed")
+	}
 	paneIDByIndex := map[int]string{}
 	for _, p := range fixPanes {
 		paneIDByIndex[p.Index] = p.ID
 	}
+	if err := validateDiagnoseFixTargets(diag, fixPanes); err != nil {
+		fixReport.RobotResponse = NewErrorResponse(err, ErrCodeNotImplemented, agent.GrokPhaseOneCapabilityHint)
+		fixReport.Summary = "No fixes attempted because the target batch contains an unsupported agent lifecycle"
+		return encodeTerminalRobotOutput(&fixReport, fixReport.RobotResponse, "robot diagnose fix failed")
+	}
 
 	for _, rec := range diag.Recommendations {
-		// Honor cancellation between iterations. `RespawnPane` /
-		// `SendKeys` themselves aren't context-aware (no Context variant
-		// in the tmux package), so cancellation can't preempt a single
-		// in-flight tmux call — but it does stop us from issuing the
-		// next one. That's the right granularity: each tmux call is
-		// short, and a cancelled CLI shouldn't keep restarting panes
-		// after the user pressed Ctrl-C.
+		// Honor cancellation between iterations. Restart and interrupt
+		// operations receive the same context so cancellation also stops
+		// their in-flight tmux subprocesses.
 		if err := ctx.Err(); err != nil {
-			fixReport.Summary = fmt.Sprintf(
-				"Fix loop cancelled (%v); %d issue(s) attempted before cancellation",
-				err, fixedCount+failedCount,
-			)
-			fixReport.Success = false
-			return encodeTerminalRobotOutput(&fixReport, fixReport.RobotResponse, "robot diagnose fix failed")
+			return finishCancellation(err, nil)
 		}
 
 		if !rec.AutoFixable {
@@ -409,11 +505,7 @@ func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseO
 		paneTarget, paneFound := paneIDByIndex[rec.Pane]
 		if !paneFound {
 			attempt.Success = false
-			if fixPanesErr != nil {
-				attempt.Message = fmt.Sprintf("Failed to list panes: %v", fixPanesErr)
-			} else {
-				attempt.Message = fmt.Sprintf("Pane %d not found in session %q", rec.Pane, opts.Session)
-			}
+			attempt.Message = fmt.Sprintf("Pane %d not found in session %q", rec.Pane, opts.Session)
 			failedCount++
 			fixReport.FixAttempts = append(fixReport.FixAttempts, attempt)
 			continue
@@ -421,29 +513,31 @@ func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseO
 
 		switch rec.Action {
 		case "restart":
-			// Attempt to restart the pane via its tmux pane ID.
-			err := tmux.RespawnPane(paneTarget, true)
-			if err != nil {
-				attempt.Success = false
-				attempt.Message = fmt.Sprintf("Failed to restart: %v", err)
-				failedCount++
-			} else {
-				attempt.Success = true
-				attempt.Message = "Pane restarted successfully"
+			var restartErr error
+			attempt.Success, attempt.Message, restartErr = executeDiagnoseRestart(ctx, opts.Session, paneTarget, deps.restartPane)
+			if attempt.Success {
 				fixedCount++
+			} else {
+				failedCount++
+			}
+			if cancelErr := diagnoseCancellationError(ctx, restartErr); cancelErr != nil {
+				return finishCancellation(cancelErr, &attempt)
 			}
 
 		case "interrupt":
 			// Send Ctrl+C to interrupt via the pane ID.
-			err := tmux.SendKeys(paneTarget, "C-c", false)
-			if err != nil {
+			interruptErr := deps.sendKeys(ctx, paneTarget, "C-c", false)
+			if interruptErr != nil {
 				attempt.Success = false
-				attempt.Message = fmt.Sprintf("Failed to interrupt: %v", err)
+				attempt.Message = fmt.Sprintf("Failed to interrupt: %v", interruptErr)
 				failedCount++
 			} else {
 				attempt.Success = true
 				attempt.Message = "Interrupt sent (Ctrl+C)"
 				fixedCount++
+			}
+			if cancelErr := diagnoseCancellationError(ctx, interruptErr); cancelErr != nil {
+				return finishCancellation(cancelErr, &attempt)
 			}
 
 		default:
@@ -471,6 +565,71 @@ func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseO
 	return encodeTerminalRobotOutput(&fixReport, fixReport.RobotResponse, "robot diagnose fix failed")
 }
 
+type diagnoseRestartPaneFunc func(context.Context, RestartPaneOptions) (*RestartPaneOutput, error)
+
+func executeDiagnoseRestart(ctx context.Context, session, paneTarget string, restart diagnoseRestartPaneFunc) (bool, string, error) {
+	if restart == nil {
+		return false, "Failed to restart: restart service is unavailable", nil
+	}
+	result, err := restart(ctx, RestartPaneOptions{Session: session, Panes: []string{paneTarget}})
+	if err != nil {
+		return false, fmt.Sprintf("Failed to restart: %v", err), err
+	}
+	if result == nil {
+		return false, "Failed to restart: empty restart response", nil
+	}
+	if len(result.Restarted) == 0 {
+		message := result.Error
+		if message == "" {
+			message = "no pane was restarted"
+		}
+		if result.ErrorCode == ErrCodeTimeout {
+			cause := error(context.DeadlineExceeded)
+			if ctx != nil && ctx.Err() != nil {
+				cause = ctx.Err()
+			}
+			return false, "Failed to restart: " + message, fmt.Errorf("restart reported timeout: %w", cause)
+		}
+		return false, "Failed to restart: " + message, nil
+	}
+	if !result.Success || len(result.Failed) > 0 {
+		message := result.Error
+		if message == "" && len(result.Failed) > 0 {
+			message = result.Failed[0].Reason
+		}
+		if message == "" {
+			message = "restart did not complete cleanly"
+		}
+		return false, "Failed to restart: " + message, nil
+	}
+	for pane, relaunched := range result.AgentRelaunched {
+		if !relaunched {
+			return false, fmt.Sprintf("Failed to restart: agent in pane %s was not relaunched", pane), nil
+		}
+	}
+	return true, "Pane and agent restarted successfully", nil
+}
+
+func validateDiagnoseFixTargets(diag DiagnoseOutput, panes []tmux.Pane) error {
+	typesByIndex := make(map[int]string, len(panes))
+	for _, pane := range panes {
+		typesByIndex[pane.Index] = detectAgentTypeFromPane(pane)
+	}
+	for _, rec := range diag.Recommendations {
+		if !rec.AutoFixable || (rec.Action != "restart" && rec.Action != "interrupt") {
+			continue
+		}
+		agentType, ok := typesByIndex[rec.Pane]
+		if !ok {
+			continue
+		}
+		if err := agent.AgentType(agentType).ValidateAutomatedRelaunch(); err != nil {
+			return fmt.Errorf("pane %d (%s) diagnose action %q: %w", rec.Pane, agentType, rec.Action, err)
+		}
+	}
+	return nil
+}
+
 // =============================================================================
 // Brief Output Mode
 // =============================================================================
@@ -488,13 +647,32 @@ type DiagnoseBriefOutput struct {
 // GetDiagnoseBrief collects a minimal health summary for a session.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetDiagnoseBrief(ctx context.Context, session string) (*DiagnoseBriefOutput, error) {
+	return getDiagnoseBriefWithDependencies(ctx, session, defaultDiagnoseDependencies())
+}
+
+func getDiagnoseBriefWithDependencies(ctx context.Context, session string, deps diagnoseDependencies) (*DiagnoseBriefOutput, error) {
 	output := &DiagnoseBriefOutput{
 		RobotResponse: NewRobotResponse(true),
 		Session:       session,
 	}
+	if ctx == nil {
+		output.RobotResponse = NewErrorResponse(errors.New("diagnose brief context is required"), ErrCodeInternalError, "Retry the command")
+		return output, nil
+	}
+	if err := ctx.Err(); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry after the cancellation or timeout condition clears")
+		return output, nil
+	}
+	deps = deps.withDefaults()
 
 	// Check if session exists
-	if !tmux.SessionExists(session) {
+	exists, err := deps.sessionExists(ctx, session)
+	if err != nil {
+		code, hint, cause := classifyDiagnoseOperationError(ctx, err)
+		output.RobotResponse = NewErrorResponse(fmt.Errorf("failed to check session: %w", cause), code, hint)
+		return output, nil
+	}
+	if !exists {
 		output.Success = false
 		output.Error = fmt.Sprintf("session '%s' not found", session)
 		output.ErrorCode = ErrCodeSessionNotFound
@@ -503,10 +681,10 @@ func GetDiagnoseBrief(ctx context.Context, session string) (*DiagnoseBriefOutput
 	}
 
 	// Get panes and check health
-	panes, err := tmux.GetPanesContext(ctx, session)
+	panes, err := deps.listPanes(ctx, session)
 	if err != nil {
-		output.Success = false
-		output.Error = fmt.Sprintf("failed to get panes: %v", err)
+		code, hint, cause := classifyDiagnoseOperationError(ctx, err)
+		output.RobotResponse = NewErrorResponse(fmt.Errorf("failed to get panes: %w", cause), code, hint)
 		return output, nil
 	}
 

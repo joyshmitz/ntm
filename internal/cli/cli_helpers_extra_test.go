@@ -65,6 +65,7 @@ func TestDetectAgentTypeFromPane(t *testing.T) {
 		{"claude", tmux.Pane{Type: tmux.AgentClaude}, "claude"},
 		{"codex", tmux.Pane{Type: tmux.AgentCodex}, "codex"},
 		{"gemini", tmux.Pane{Type: tmux.AgentGemini}, "gemini"},
+		{"grok alias canonicalized", tmux.Pane{Type: tmux.AgentType("xai_grok_build")}, "grok"},
 		{"cursor", tmux.Pane{Type: tmux.AgentCursor}, "cursor"},
 		{"windsurf", tmux.Pane{Type: tmux.AgentWindsurf}, "windsurf"},
 		{"aider", tmux.Pane{Type: tmux.AgentAider}, "aider"},
@@ -113,6 +114,7 @@ func TestCollectSummaryAgentOutputsUsesParsedPaneType(t *testing.T) {
 		{ID: "%1", Type: tmux.AgentClaude, Title: "custom-title"},
 		{ID: "%2", Type: tmux.AgentUser, Title: "claude-looking-shell"},
 		{ID: "%3", Type: tmux.AgentType("openai-codex"), Title: "other-title"},
+		{ID: "%4", Type: tmux.AgentType("grok-build"), Title: "custom-grok-title"},
 	}
 
 	outputs := collectSummaryAgentOutputs(panes, func(id string, lines int) (string, error) {
@@ -122,14 +124,17 @@ func TestCollectSummaryAgentOutputsUsesParsedPaneType(t *testing.T) {
 		return "out:" + id, nil
 	}, nil)
 
-	if len(outputs) != 2 {
-		t.Fatalf("collectSummaryAgentOutputs() returned %d outputs, want 2", len(outputs))
+	if len(outputs) != 3 {
+		t.Fatalf("collectSummaryAgentOutputs() returned %d outputs, want 3", len(outputs))
 	}
 	if outputs[0].AgentID != "%1" || outputs[0].AgentType != "claude" {
 		t.Fatalf("first output = %+v, want claude %%1", outputs[0])
 	}
 	if outputs[1].AgentID != "%3" || outputs[1].AgentType != "codex" {
 		t.Fatalf("second output = %+v, want codex %%3", outputs[1])
+	}
+	if outputs[2].AgentID != "%4" || outputs[2].AgentType != "grok" {
+		t.Fatalf("third output = %+v, want grok %%4", outputs[2])
 	}
 }
 
@@ -232,6 +237,7 @@ func TestIncrementAgentCounts(t *testing.T) {
 	counts := output.AgentCountsResponse{}
 	incrementAgentCounts(&counts, tmux.AgentClaude)
 	incrementAgentCounts(&counts, tmux.AgentOllama)
+	incrementAgentCounts(&counts, tmux.AgentGrok)
 	incrementAgentCounts(&counts, tmux.AgentType("openai-codex"))
 	incrementAgentCounts(&counts, tmux.AgentUser)
 	incrementAgentCounts(&counts, tmux.AgentType("mystery"))
@@ -242,6 +248,9 @@ func TestIncrementAgentCounts(t *testing.T) {
 	if counts.Ollama != 1 {
 		t.Fatalf("Ollama = %d, want 1", counts.Ollama)
 	}
+	if counts.Grok != 1 {
+		t.Fatalf("Grok = %d, want 1", counts.Grok)
+	}
 	if counts.Codex != 1 {
 		t.Fatalf("Codex = %d, want 1", counts.Codex)
 	}
@@ -251,28 +260,51 @@ func TestIncrementAgentCounts(t *testing.T) {
 	if counts.Other != 1 {
 		t.Fatalf("Other = %d, want 1", counts.Other)
 	}
-	if counts.Total != 5 {
-		t.Fatalf("Total = %d, want 5", counts.Total)
+	if counts.Total != 6 {
+		t.Fatalf("Total = %d, want 6", counts.Total)
 	}
 }
 
 func TestDashboardPaneTypeSummary(t *testing.T) {
-
-	panes := []tmux.Pane{
-		{Type: tmux.AgentClaude},
-		{Type: tmux.AgentOllama},
-		{Type: tmux.AgentCursor},
-		{Type: tmux.AgentWindsurf},
-		{Type: tmux.AgentAider},
-		{Type: tmux.AgentUser},
-		{Type: tmux.AgentType("openai-codex")},
-		{Type: tmux.AgentUnknown},
+	tests := []struct {
+		name  string
+		panes []tmux.Pane
+		want  string
+	}{
+		{
+			name: "empty",
+			want: "Claude=0 Codex=0 Gemini=0 Grok=0 Cursor=0 Windsurf=0 Aider=0 Opencode=0 Ollama=0 User=0 Other=0",
+		},
+		{
+			name: "grok alias",
+			panes: []tmux.Pane{
+				{Type: tmux.AgentType("grok-build")},
+			},
+			want: "Claude=0 Codex=0 Gemini=0 Grok=1 Cursor=0 Windsurf=0 Aider=0 Opencode=0 Ollama=0 User=0 Other=0",
+		},
+		{
+			name: "mixed",
+			panes: []tmux.Pane{
+				{Type: tmux.AgentClaude},
+				{Type: tmux.AgentGrok},
+				{Type: tmux.AgentOllama},
+				{Type: tmux.AgentCursor},
+				{Type: tmux.AgentWindsurf},
+				{Type: tmux.AgentAider},
+				{Type: tmux.AgentUser},
+				{Type: tmux.AgentType("openai-codex")},
+				{Type: tmux.AgentUnknown},
+			},
+			want: "Claude=1 Codex=1 Gemini=0 Grok=1 Cursor=1 Windsurf=1 Aider=1 Opencode=0 Ollama=1 User=1 Other=1",
+		},
 	}
 
-	got := dashboardPaneTypeSummary(panes)
-	want := "Claude=1 Codex=1 Gemini=0 Cursor=1 Windsurf=1 Aider=1 Opencode=0 Ollama=1 User=1 Other=1"
-	if got != want {
-		t.Fatalf("dashboardPaneTypeSummary() = %q, want %q", got, want)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := dashboardPaneTypeSummary(test.panes); got != test.want {
+				t.Fatalf("dashboardPaneTypeSummary() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -601,6 +633,7 @@ func TestAppendMissingRecipeAgentSpecs_PreservesModelsAndPersonas(t *testing.T) 
 		{Type: "openai-codex", Count: 2, Model: "gpt-5"},
 		{Type: "claude", Count: 1, Persona: "architect", Model: "sonnet"},
 		{Type: "ws", Count: 3},
+		{Type: "xai_grok_build", Count: 1, Model: "grok-4", ReasoningEffort: "high"},
 	})
 	if err != nil {
 		t.Fatalf("appendMissingRecipeAgentSpecs error: %v", err)
@@ -628,6 +661,11 @@ func TestAppendMissingRecipeAgentSpecs_PreservesModelsAndPersonas(t *testing.T) 
 
 	if got := specs.ByType(AgentTypeWindsurf).TotalCount(); got != 3 {
 		t.Fatalf("windsurf count = %d, want 3", got)
+	}
+
+	grok := specs.ByType(AgentTypeGrok)
+	if len(grok) != 1 || grok[0].Count != 1 || grok[0].Model != "grok-4" || grok[0].ReasoningEffort != "high" {
+		t.Fatalf("Grok specs = %+v, want count=1 model=grok-4 effort=high", grok)
 	}
 }
 

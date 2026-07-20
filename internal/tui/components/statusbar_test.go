@@ -35,13 +35,14 @@ func TestRenderStatusBar_ZeroAgentCounts(t *testing.T) {
 		ClaudeCount: 0,
 		CodexCount:  0,
 		GeminiCount: 0,
+		GrokCount:   0,
 		UserCount:   0,
 	})
 	if got == "" {
 		t.Fatal("expected non-empty output")
 	}
 	// Agent badge labels should NOT appear when counts are zero
-	for _, label := range []string{"CC:", "COD:", "GMI:", "USR:"} {
+	for _, label := range []string{"CC:", "COD:", "GMI:", "GRK:", "USR:"} {
 		if strings.Contains(got, label) {
 			t.Errorf("expected no %s badge when count is zero", label)
 		}
@@ -55,9 +56,10 @@ func TestRenderStatusBar_AgentBadgesPresent(t *testing.T) {
 		ClaudeCount: 3,
 		CodexCount:  1,
 		GeminiCount: 2,
+		GrokCount:   4,
 		UserCount:   1,
 	})
-	for _, label := range []string{"CC:3", "COD:1", "GMI:2", "USR:1"} {
+	for _, label := range []string{"CC:3", "COD:1", "GMI:2", "GRK:4", "USR:1"} {
 		if !strings.Contains(got, label) {
 			t.Errorf("expected badge %q in output", label)
 		}

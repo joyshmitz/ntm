@@ -185,15 +185,19 @@ func MigrateLegacyIdentityIfNeeded(projectKey, paneID string) string {
 // error). Errors are not returned because failing to write the legacy file
 // must never abort a spawn.
 func WriteLegacyCompatIdentity(projectKey, paneID, agentName string) string {
+	p := fmt.Sprintf("/tmp/agent-mail-name.%s.%s", projectSha1Short(projectKey), sanitizePaneID(paneID))
+	return writeLegacyCompatIdentityAtPath(p, agentName)
+}
+
+func writeLegacyCompatIdentityAtPath(path, agentName string) string {
 	name := strings.TrimSpace(agentName)
 	if name == "" {
 		return ""
 	}
-	p := fmt.Sprintf("/tmp/agent-mail-name.%s.%s", projectSha1Short(projectKey), sanitizePaneID(paneID))
-	if err := writeIdentityFile(p, name+"\n"); err != nil {
+	if err := writeIdentityFile(path, name+"\n"); err != nil {
 		return ""
 	}
-	return p
+	return path
 }
 
 // ----------------------------------------------------------------------------

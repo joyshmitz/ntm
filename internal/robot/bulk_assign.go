@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
@@ -32,6 +33,8 @@ const (
 // BulkAssignOptions configures --robot-bulk-assign behavior.
 type BulkAssignOptions struct {
 	Session            string
+	ConfigPath         string
+	RequireConfig      bool
 	FromBV             bool
 	Strategy           string
 	AllocationJSON     string
@@ -50,34 +53,40 @@ type BulkAssignOptions struct {
 	// DefaultTemplate is an inline project/user-level configured template
 	// (cfg.Assign.PromptTemplate). It is used when neither PromptTemplatePath
 	// nor DefaultTemplatePath resolves to content, and overrides the built-in const.
-	DefaultTemplate string
-	Deps            *BulkAssignDependencies
-	projectDir      string
+	DefaultTemplate     string
+	Deps                *BulkAssignDependencies
+	projectDir          string
+	operatorGatedLabels []string
 }
 
 // BulkAssignDependencies allows tests to stub external interactions.
 type BulkAssignDependencies struct {
-	FetchTriage       func(context.Context, string) (*bv.TriageResponse, error)
-	FetchInProgress   func(context.Context, string, int) ([]bv.BeadInProgress, error)
-	ListPanes         func(context.Context, string) ([]tmux.Pane, error)
-	ReadFile          func(path string) ([]byte, error)
-	FetchBeadTitle    func(context.Context, string, string) (string, error)
-	FetchBeadDetails  func(context.Context, string, string) (BeadDetails, error)
-	Cwd               func() (string, error)
-	PaneCurrentPath   func(context.Context, string) (string, error)
-	ResolveProject    func(context.Context, string, []tmux.Pane) (string, error)
-	LoadStore         func(session string) (*assignment.AssignmentStore, error)
-	ClaimBead         func(context.Context, string, string, string) (bv.BeadClaimResult, error)
-	ClaimStaleBead    func(context.Context, string, string, string, time.Time) (bv.BeadClaimResult, error)
-	GetBeadStatus     func(context.Context, string, string) (string, error)
-	NewIdempotencyKey func() (string, error)
-	ReservationPort   assignment.ReservationPort
-	ResolveAgentName  func(context.Context, string, string, string, string) (string, error)
-	ObserveSession    func(context.Context, string) (statuspkg.SessionObservation, error)
-	DispatchDeliverer dispatchsvc.Deliverer
-	DispatchPacer     dispatchsvc.Pacer
-	LoadRedaction     func(dir string) (redaction.Config, error)
-	Wait              func(context.Context, time.Duration) error
+	LoadAssignmentPolicy                  func(string, string, bool) (*config.Config, error)
+	FetchActionable                       func(context.Context, string, int) ([]bv.TriageRecommendation, error)
+	FetchTriage                           func(context.Context, string) (*bv.TriageResponse, error)
+	FetchInProgress                       func(context.Context, string, int) ([]bv.BeadInProgress, error)
+	ListPanes                             func(context.Context, string) ([]tmux.Pane, error)
+	ReadFile                              func(path string) ([]byte, error)
+	FetchBeadTitle                        func(context.Context, string, string) (string, error)
+	FetchBeadDetails                      func(context.Context, string, string) (BeadDetails, error)
+	Cwd                                   func() (string, error)
+	PaneCurrentPath                       func(context.Context, string) (string, error)
+	ResolveProject                        func(context.Context, string, []tmux.Pane) (string, error)
+	LoadStore                             func(session string) (*assignment.AssignmentStore, error)
+	ClaimBead                             func(context.Context, string, string, string) (bv.BeadClaimResult, error)
+	ClaimStaleBead                        func(context.Context, string, string, string, time.Time) (bv.BeadClaimResult, error)
+	ClaimBeadWithOperatorGatedLabels      func(context.Context, string, string, string, []string) (bv.BeadClaimResult, error)
+	ClaimStaleBeadWithOperatorGatedLabels func(context.Context, string, string, string, time.Time, []string) (bv.BeadClaimResult, error)
+	GetBeadStatus                         func(context.Context, string, string) (string, error)
+	GetBeadAssignmentDetails              func(context.Context, string, string) (*bv.BeadAssignmentDetails, error)
+	NewIdempotencyKey                     func() (string, error)
+	ReservationPort                       assignment.ReservationPort
+	ResolveAgentName                      func(context.Context, string, string, string, string) (string, error)
+	ObserveSession                        func(context.Context, string) (statuspkg.SessionObservation, error)
+	DispatchDeliverer                     dispatchsvc.Deliverer
+	DispatchPacer                         dispatchsvc.Pacer
+	LoadRedaction                         func(dir string) (redaction.Config, error)
+	Wait                                  func(context.Context, time.Duration) error
 }
 
 // BeadDetails captures metadata used for bulk prompt templating.
@@ -94,8 +103,8 @@ type BulkAssignOutput struct {
 	Strategy         string                 `json:"strategy"`
 	Assignments      []BulkAssignAssignment `json:"assignments"`
 	Summary          BulkAssignSummary      `json:"summary"`
-	UnassignedBeads  []string               `json:"unassigned_beads,omitempty"`
-	UnassignedPanes  []string               `json:"unassigned_panes,omitempty"`
+	UnassignedBeads  []string               `json:"unassigned_beads"`
+	UnassignedPanes  []string               `json:"unassigned_panes"`
 	DryRun           bool                   `json:"dry_run,omitempty"`
 	AllocationSource string                 `json:"allocation_source,omitempty"`
 }
@@ -240,6 +249,28 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 		return output, nil
 	}
 	opts.projectDir = projectDir
+	effectiveConfig, err := deps.LoadAssignmentPolicy(opts.projectDir, opts.ConfigPath, opts.RequireConfig)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("load bulk assignment safety policy: %w", err),
+			ErrCodeInvalidFlag,
+			"Fix the selected global config and the target project's .ntm/config.toml",
+		)
+		return output, nil
+	}
+	if effectiveConfig != nil {
+		opts.DefaultTemplate = effectiveConfig.Assign.PromptTemplate
+		opts.DefaultTemplatePath = effectiveConfig.Assign.PromptTemplateFile
+		opts.operatorGatedLabels = append([]string(nil), effectiveConfig.Assign.OperatorGatedLabels...)
+	}
+	if err := bv.ConfigureProjectOperatorGatedLabels(opts.projectDir, opts.operatorGatedLabels); err != nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("register bulk assignment safety policy: %w", err),
+			ErrCodeInvalidFlag,
+			"Use an authoritative project directory for bulk assignment",
+		)
+		return output, nil
+	}
 
 	if opts.AllocationJSON != "" {
 		allocation, err := parseBulkAssignAllocation(opts.AllocationJSON)
@@ -264,6 +295,35 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 		)
 		return output, nil
 	}
+
+	actionable, err := deps.FetchActionable(ctx, opts.projectDir, 0)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			setBulkAssignCancellation(output, err)
+			return output, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			setBulkAssignCancellation(output, ctxErr)
+			return output, nil
+		}
+		code := ErrCodeInternalError
+		hint := "Ensure bv plan output and live br labels are complete and valid"
+		if bulkAssignDependencyMissing(err) {
+			code = ErrCodeDependencyMissing
+			hint = "Install bv and br and ensure both are available on PATH"
+		}
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("verify actionable bulk assignment work: %w", err),
+			code,
+			hint,
+		)
+		return output, nil
+	}
+	if err := ctx.Err(); err != nil {
+		setBulkAssignCancellation(output, err)
+		return output, nil
+	}
+	actionable = filterAssignableActionableRecommendationsForProject(opts.projectDir, actionable, 0)
 
 	triage, err := deps.FetchTriage(ctx, opts.projectDir)
 	if err != nil {
@@ -292,6 +352,7 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 		setBulkAssignCancellation(output, err)
 		return output, nil
 	}
+	triage = restrictTriageToAssignable(triage, actionable)
 
 	inProgress, err := deps.FetchInProgress(ctx, opts.projectDir, 200)
 	if err != nil {
@@ -386,23 +447,28 @@ func PrintBulkAssign(ctx context.Context, opts BulkAssignOptions) error {
 func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
 	deps := BulkAssignDependencies{
-		FetchTriage:      bv.GetTriageContext,
-		FetchInProgress:  bv.GetInProgressListContext,
-		ListPanes:        tmux.GetPanesContext,
-		ReadFile:         os.ReadFile,
-		FetchBeadTitle:   fetchBeadTitle,
-		FetchBeadDetails: fetchBeadDetails,
-		Cwd:              os.Getwd,
+		LoadAssignmentPolicy: loadAuthoritativeAssignmentPolicy,
+		FetchActionable:      getAssignableActionableRecommendations,
+		FetchTriage:          bv.GetTriageContext,
+		FetchInProgress:      bv.GetInProgressListContext,
+		ListPanes:            tmux.GetPanesContext,
+		ReadFile:             os.ReadFile,
+		FetchBeadTitle:       fetchBeadTitle,
+		FetchBeadDetails:     fetchBeadDetails,
+		Cwd:                  os.Getwd,
 		PaneCurrentPath: func(ctx context.Context, paneID string) (string, error) {
 			return tmux.DefaultClient.RunContext(ctx, "display-message", "-p", "-t", paneID, "#{pane_current_path}")
 		},
-		LoadStore:         assignment.LoadStoreStrict,
-		ClaimBead:         bv.ClaimBeadForAssignment,
-		ClaimStaleBead:    bv.ClaimStaleBeadForAssignment,
-		GetBeadStatus:     bv.GetBeadStatusContext,
-		NewIdempotencyKey: assignment.NewAssignmentIdempotencyKey,
-		ObserveSession:    observer.Observe,
-		DispatchDeliverer: dispatchsvc.TMUXDeliverer{},
+		LoadStore:                             assignment.LoadStoreStrict,
+		ClaimBead:                             bv.ClaimBeadForAssignment,
+		ClaimStaleBead:                        bv.ClaimStaleBeadForAssignment,
+		ClaimBeadWithOperatorGatedLabels:      bv.ClaimBeadForAssignmentWithOperatorGatedLabels,
+		ClaimStaleBeadWithOperatorGatedLabels: bv.ClaimStaleBeadForAssignmentWithOperatorGatedLabels,
+		GetBeadStatus:                         bv.GetBeadStatusContext,
+		GetBeadAssignmentDetails:              bv.GetBeadAssignmentDetailsContext,
+		NewIdempotencyKey:                     assignment.NewAssignmentIdempotencyKey,
+		ObserveSession:                        observer.Observe,
+		DispatchDeliverer:                     dispatchsvc.TMUXDeliverer{},
 		LoadRedaction: func(dir string) (redaction.Config, error) {
 			loaded, err := config.LoadMerged(dir, config.DefaultPath())
 			if err != nil {
@@ -431,8 +497,39 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	if custom == nil {
 		return deps
 	}
+	if custom.LoadAssignmentPolicy != nil {
+		deps.LoadAssignmentPolicy = custom.LoadAssignmentPolicy
+	}
+	if custom.FetchActionable != nil {
+		deps.FetchActionable = custom.FetchActionable
+	}
 	if custom.FetchTriage != nil {
-		deps.FetchTriage = custom.FetchTriage
+		fetchFixture := custom.FetchTriage
+		if custom.FetchActionable == nil {
+			// Existing focused tests inject complete triage fixtures instead of
+			// subprocesses. Production always uses the verified actionable loader.
+			var once sync.Once
+			var cached *bv.TriageResponse
+			var cachedErr error
+			deps.FetchTriage = func(ctx context.Context, dir string) (*bv.TriageResponse, error) {
+				once.Do(func() {
+					cached, cachedErr = fetchFixture(ctx, dir)
+				})
+				return cached, cachedErr
+			}
+			deps.FetchActionable = func(ctx context.Context, dir string, limit int) ([]bv.TriageRecommendation, error) {
+				triage, err := deps.FetchTriage(ctx, dir)
+				if err != nil {
+					return nil, err
+				}
+				if triage == nil {
+					return []bv.TriageRecommendation{}, nil
+				}
+				return filterAssignableActionableRecommendationsForProject(dir, triage.Triage.Recommendations, limit), nil
+			}
+		} else {
+			deps.FetchTriage = fetchFixture
+		}
 	}
 	if custom.FetchInProgress != nil {
 		deps.FetchInProgress = custom.FetchInProgress
@@ -470,12 +567,31 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	}
 	if custom.ClaimBead != nil {
 		deps.ClaimBead = custom.ClaimBead
+		deps.ClaimBeadWithOperatorGatedLabels = func(ctx context.Context, dir, beadID, actor string, _ []string) (bv.BeadClaimResult, error) {
+			return custom.ClaimBead(ctx, dir, beadID, actor)
+		}
 	}
 	if custom.ClaimStaleBead != nil {
 		deps.ClaimStaleBead = custom.ClaimStaleBead
+		deps.ClaimStaleBeadWithOperatorGatedLabels = func(ctx context.Context, dir, beadID, actor string, expectedUpdatedAt time.Time, _ []string) (bv.BeadClaimResult, error) {
+			return custom.ClaimStaleBead(ctx, dir, beadID, actor, expectedUpdatedAt)
+		}
+	}
+	if custom.ClaimBeadWithOperatorGatedLabels != nil {
+		deps.ClaimBeadWithOperatorGatedLabels = custom.ClaimBeadWithOperatorGatedLabels
+	}
+	if custom.ClaimStaleBeadWithOperatorGatedLabels != nil {
+		deps.ClaimStaleBeadWithOperatorGatedLabels = custom.ClaimStaleBeadWithOperatorGatedLabels
 	}
 	if custom.GetBeadStatus != nil {
 		deps.GetBeadStatus = custom.GetBeadStatus
+	}
+	if custom.GetBeadAssignmentDetails != nil {
+		deps.GetBeadAssignmentDetails = custom.GetBeadAssignmentDetails
+	} else if custom.ClaimBead != nil || custom.ClaimStaleBead != nil {
+		// Legacy focused tests that replace the guarded claim have no live br
+		// database. Production and policy-focused tests keep the exact reader.
+		deps.GetBeadAssignmentDetails = nil
 	}
 	if custom.NewIdempotencyKey != nil {
 		deps.NewIdempotencyKey = custom.NewIdempotencyKey
@@ -989,6 +1105,60 @@ type bulkAssignPlan struct {
 	skipped         int
 }
 
+func restrictTriageToAssignable(triage *bv.TriageResponse, actionable []bv.TriageRecommendation) *bv.TriageResponse {
+	if triage == nil {
+		triage = &bv.TriageResponse{}
+	}
+	result := *triage
+	result.Triage = triage.Triage
+	result.Triage.Recommendations = append([]bv.TriageRecommendation(nil), actionable...)
+
+	actionableByID := make(map[string]bv.TriageRecommendation, len(actionable))
+	for _, rec := range actionable {
+		if id := strings.TrimSpace(rec.ID); id != "" {
+			actionableByID[id] = rec
+		}
+	}
+	result.Triage.BlockersToClear = make([]bv.BlockerToClear, 0, len(triage.Triage.BlockersToClear))
+	seenBlockers := make(map[string]struct{}, len(triage.Triage.BlockersToClear))
+	for _, blocker := range triage.Triage.BlockersToClear {
+		id := strings.TrimSpace(blocker.ID)
+		rec, authorized := actionableByID[id]
+		if !authorized {
+			continue
+		}
+		blocker.ID = id
+		blocker.Actionable = true
+		blocker.BlockedBy = nil
+		if strings.TrimSpace(blocker.Title) == "" {
+			blocker.Title = rec.Title
+		}
+		if len(rec.UnblocksIDs) > 0 {
+			blocker.UnblocksIDs = append([]string(nil), rec.UnblocksIDs...)
+			blocker.UnblocksCount = len(rec.UnblocksIDs)
+		}
+		seenBlockers[id] = struct{}{}
+		result.Triage.BlockersToClear = append(result.Triage.BlockersToClear, blocker)
+	}
+	for _, rec := range actionable {
+		id := strings.TrimSpace(rec.ID)
+		if len(rec.UnblocksIDs) == 0 {
+			continue
+		}
+		if _, exists := seenBlockers[id]; exists {
+			continue
+		}
+		result.Triage.BlockersToClear = append(result.Triage.BlockersToClear, bv.BlockerToClear{
+			ID:            id,
+			Title:         rec.Title,
+			UnblocksCount: len(rec.UnblocksIDs),
+			UnblocksIDs:   append([]string(nil), rec.UnblocksIDs...),
+			Actionable:    true,
+		})
+	}
+	return &result
+}
+
 func buildBulkAssignCandidates(triage *bv.TriageResponse, inProgress []bv.BeadInProgress) bulkAssignCandidates {
 	candidates := bulkAssignCandidates{}
 	inProgressIDs := make(map[string]struct{}, len(inProgress))
@@ -1398,8 +1568,17 @@ func applyBulkAssignPlan(ctx context.Context, opts BulkAssignOptions, deps BulkA
 		finishBulkAssignOutput(output, plan)
 		return
 	}
+	if err := validateBulkAssignPromptDelivery(plan.Assignments); err != nil {
+		for i := range plan.Assignments {
+			if plan.Assignments[i].Status == "planned" {
+				failBulkAssignment(&plan.Assignments[i], err, ErrCodeNotImplemented)
+			}
+		}
+		finishBulkAssignOutput(output, plan)
+		return
+	}
 
-	runtime, runtimeErr := newBulkAtomicRuntime(ctx, deps, output.Session, opts.projectDir)
+	runtime, runtimeErr := newBulkAtomicRuntime(ctx, deps, output.Session, opts.projectDir, opts.operatorGatedLabels)
 	if runtimeErr != nil {
 		for i := range plan.Assignments {
 			if plan.Assignments[i].Status != "planned" {
@@ -1523,6 +1702,11 @@ func bulkAssignFailureClass(assignments []BulkAssignAssignment) (string, string)
 	for _, item := range assignments {
 		if item.failureCode == ErrCodePaneNotFound {
 			return ErrCodePaneNotFound, "Inspect canonical pane addresses and retry"
+		}
+	}
+	for _, item := range assignments {
+		if item.failureCode == ErrCodeNotImplemented {
+			return ErrCodeNotImplemented, agent.GrokPhaseOneCapabilityHint
 		}
 	}
 	for _, item := range assignments {
@@ -1825,15 +2009,16 @@ func validateRobotReservationPaths(paths []string) ([]string, error) {
 }
 
 type bulkAtomicRuntime struct {
-	store        *assignment.AssignmentStore
-	claimPort    assignment.ClaimPort
-	dispatchPort *robotAtomicPaneDispatchPort
-	deps         BulkAssignDependencies
-	workDir      string
-	newKey       func() (string, error)
-	observeMu    sync.Mutex
-	observation  statuspkg.SessionObservation
-	observeErr   error
+	store               *assignment.AssignmentStore
+	claimPort           assignment.ClaimPort
+	dispatchPort        *robotAtomicPaneDispatchPort
+	deps                BulkAssignDependencies
+	workDir             string
+	operatorGatedLabels []string
+	newKey              func() (string, error)
+	observeMu           sync.Mutex
+	observation         statuspkg.SessionObservation
+	observeErr          error
 }
 
 func (r *bulkAtomicRuntime) observeSession(ctx context.Context, session string) (statuspkg.SessionObservation, error) {
@@ -1846,7 +2031,7 @@ func (r *bulkAtomicRuntime) observeSession(ctx context.Context, session string) 
 	return r.observation, r.observeErr
 }
 
-func newBulkAtomicRuntime(ctx context.Context, deps BulkAssignDependencies, session, workDir string) (*bulkAtomicRuntime, error) {
+func newBulkAtomicRuntime(ctx context.Context, deps BulkAssignDependencies, session, workDir string, operatorGatedLabels []string) (*bulkAtomicRuntime, error) {
 	if strings.TrimSpace(workDir) == "" {
 		var err error
 		workDir, err = deps.ResolveProject(ctx, session, nil)
@@ -1862,7 +2047,13 @@ func newBulkAtomicRuntime(ctx context.Context, deps BulkAssignDependencies, sess
 	if err != nil {
 		return nil, fmt.Errorf("load bulk assignment redaction policy: %w", err)
 	}
-	claimPort := newRobotAtomicClaimPort(workDir, deps.ClaimBead)
+	if deps.ClaimBeadWithOperatorGatedLabels == nil {
+		return nil, errors.New("bulk assignment guarded claim policy is unavailable")
+	}
+	capturedLabels := append([]string(nil), operatorGatedLabels...)
+	claimPort := newRobotAtomicClaimPort(workDir, func(ctx context.Context, dir, beadID, actor string) (bv.BeadClaimResult, error) {
+		return deps.ClaimBeadWithOperatorGatedLabels(ctx, dir, beadID, actor, capturedLabels)
+	})
 	dispatchPort := newRobotAtomicPaneDispatchPort(
 		session,
 		deps.ListPanes,
@@ -1873,7 +2064,7 @@ func newBulkAtomicRuntime(ctx context.Context, deps BulkAssignDependencies, sess
 	)
 	return &bulkAtomicRuntime{
 		store: store, claimPort: claimPort, dispatchPort: dispatchPort,
-		deps: deps, workDir: workDir, newKey: deps.NewIdempotencyKey,
+		deps: deps, workDir: workDir, operatorGatedLabels: capturedLabels, newKey: deps.NewIdempotencyKey,
 	}, nil
 }
 
@@ -2027,15 +2218,28 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 
 	claimPort := r.claimPort
 	if output.stale {
+		if r.deps.ClaimStaleBeadWithOperatorGatedLabels == nil {
+			failBulkAssignment(output, errors.New("bulk stale assignment guarded claim policy is unavailable"), ErrCodeInternalError)
+			return
+		}
 		expectedUpdatedAt := output.staleUpdatedAt
 		claimPort = newRobotAtomicClaimPort(r.workDir, func(ctx context.Context, dir, beadID, actor string) (bv.BeadClaimResult, error) {
-			return r.deps.ClaimStaleBead(ctx, dir, beadID, actor, expectedUpdatedAt)
+			return r.deps.ClaimStaleBeadWithOperatorGatedLabels(ctx, dir, beadID, actor, expectedUpdatedAt, r.operatorGatedLabels)
 		})
 	}
 	coordinator := assignment.NewAtomicCoordinator(r.store, claimPort, reservationPort, r.dispatchPort, r.dispatchPort).
 		WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(statusCtx context.Context, beadID string) (string, error) {
 			return r.deps.GetBeadStatus(statusCtx, r.workDir, beadID)
 		}))
+	if r.deps.GetBeadAssignmentDetails == nil {
+		failBulkAssignment(output, errors.New("bulk assignment exact eligibility reader is unavailable"), ErrCodeInternalError)
+		return
+	}
+	eligibilityPort := newRobotAtomicEligibilityAuthorizationPort(r.workDir, r.operatorGatedLabels, r.deps.GetBeadAssignmentDetails)
+	if output.stale {
+		eligibilityPort = newRobotAtomicStaleEligibilityAuthorizationPort(r.workDir, r.operatorGatedLabels, r.deps.GetBeadAssignmentDetails)
+	}
+	coordinator = coordinator.WithAssignmentEligibilityAuthorizationPort(eligibilityPort)
 	result, executeErr := coordinator.Execute(ctx, assignment.AtomicRequest{
 		BeadID:                    output.Bead,
 		BeadTitle:                 output.BeadTitle,
@@ -2106,6 +2310,59 @@ func newRobotAtomicClaimPort(workDir string, claim func(context.Context, string,
 		return assignment.ClaimReceipt{
 			BeadID: claimed.ID, Actor: claimed.Actor, Status: claimed.Status, ClaimedAt: claimed.ClaimedAt,
 		}, nil
+	})
+}
+
+func newRobotAtomicEligibilityAuthorizationPort(
+	workDir string,
+	operatorGatedLabels []string,
+	readDetails func(context.Context, string, string) (*bv.BeadAssignmentDetails, error),
+) assignment.AssignmentEligibilityAuthorizationPort {
+	capturedLabels := append([]string(nil), operatorGatedLabels...)
+	return assignment.AssignmentEligibilityAuthorizationFunc(func(ctx context.Context, request assignment.AssignmentEligibilityAuthorizationRequest) error {
+		details, err := readDetails(ctx, workDir, request.BeadID)
+		if err != nil {
+			return err
+		}
+		if details == nil {
+			return errors.New("live work-item details are missing")
+		}
+		err = bv.ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels(details, bv.BeadAssignmentAuthorization{
+			BeadID: request.BeadID, ExpectedAssignee: request.ClaimActor,
+			AllowUnassignedOpen:  request.AllowUnassignedOpen,
+			AllowOwnedOpen:       request.AllowOwnedOpen,
+			AllowOwnedInProgress: request.AllowOwnedInProgress,
+		}, capturedLabels)
+		if errors.Is(err, bv.ErrBeadAssignmentIneligible) {
+			return fmt.Errorf("%w: %v", assignment.ErrClaimIneligible, err)
+		}
+		return err
+	})
+}
+
+func newRobotAtomicStaleEligibilityAuthorizationPort(
+	workDir string,
+	operatorGatedLabels []string,
+	readDetails func(context.Context, string, string) (*bv.BeadAssignmentDetails, error),
+) assignment.AssignmentEligibilityAuthorizationPort {
+	capturedLabels := append([]string(nil), operatorGatedLabels...)
+	return assignment.AssignmentEligibilityAuthorizationFunc(func(ctx context.Context, request assignment.AssignmentEligibilityAuthorizationRequest) error {
+		details, err := readDetails(ctx, workDir, request.BeadID)
+		if err != nil {
+			return err
+		}
+		if details == nil {
+			return errors.New("live stale work-item details are missing")
+		}
+		err = bv.ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels(details, bv.BeadAssignmentAuthorization{
+			BeadID: request.BeadID, ExpectedAssignee: request.ClaimActor,
+			AllowUnassignedInProgress: true,
+			AllowOwnedInProgress:      request.AllowOwnedInProgress,
+		}, capturedLabels)
+		if errors.Is(err, bv.ErrBeadAssignmentIneligible) {
+			return fmt.Errorf("%w: %v", assignment.ErrClaimIneligible, err)
+		}
+		return err
 	})
 }
 
@@ -2310,6 +2567,8 @@ func bulkAssignTMUXAgentType(agentType string) tmux.AgentType {
 		return tmux.AgentGemini
 	case "antigravity":
 		return tmux.AgentAntigravity
+	case "grok":
+		return tmux.AgentGrok
 	case "cursor":
 		return tmux.AgentCursor
 	case "windsurf":
@@ -2325,6 +2584,19 @@ func bulkAssignTMUXAgentType(agentType string) tmux.AgentType {
 	default:
 		return tmux.AgentUnknown
 	}
+}
+
+func validateBulkAssignPromptDelivery(assignments []BulkAssignAssignment) error {
+	for _, planned := range assignments {
+		if planned.Status != "planned" {
+			continue
+		}
+		agentType := bulkAssignTMUXAgentType(planned.AgentType)
+		if err := agentType.ValidateAutomatedPromptDelivery(); err != nil {
+			return fmt.Errorf("pane %s (%s): %w", planned.Pane, agentType.Canonical(), err)
+		}
+	}
+	return nil
 }
 
 func bulkAssignPaneTarget(session string, assignment *BulkAssignAssignment) string {

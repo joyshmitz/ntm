@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strconv"
@@ -46,7 +47,7 @@ Examples:
   ntm history export history.jsonl     # Export to file`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runHistoryList(limit, session, since, until, search, source, regex)
+			return runHistoryList(cmd.Context(), limit, session, since, until, search, source, regex)
 		},
 	}
 
@@ -191,20 +192,20 @@ type HistoryListEntry struct {
 	DurationMs int       `json:"duration_ms,omitempty"`
 }
 
-func resolveHistorySessionFilter(session string) (string, error) {
+func resolveHistorySessionFilter(ctx context.Context, session string) (string, error) {
 	session = strings.TrimSpace(session)
 	if session == "" {
 		return "", nil
 	}
-	return normalizeProjectScopedSessionName(session, !IsJSONOutput())
+	return normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 }
 
-func runHistoryList(limit int, session, since, until, search, source string, searchRegex bool) error {
+func runHistoryList(ctx context.Context, limit int, session, since, until, search, source string, searchRegex bool) error {
 	if limit <= 0 {
 		return fmt.Errorf("--limit must be greater than 0")
 	}
 
-	resolvedSession, err := resolveHistorySessionFilter(session)
+	resolvedSession, err := resolveHistorySessionFilter(ctx, session)
 	if err != nil {
 		return err
 	}
@@ -320,7 +321,7 @@ func newHistorySearchCmd() *cobra.Command {
 		Short: "Search prompt history",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runHistoryList(limit, session, since, until, args[0], source, regex)
+			return runHistoryList(cmd.Context(), limit, session, since, until, args[0], source, regex)
 		},
 	}
 

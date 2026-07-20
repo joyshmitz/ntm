@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -206,11 +207,17 @@ func runReviewQueue(session, filter string, idleThreshold time.Duration, send bo
 
 	// If --send, prompt for confirmation
 	if send && len(suggestions) > 0 {
+		if err := validateReviewPromptDelivery(suggestions); err != nil {
+			return err
+		}
 		fmt.Print("\nSend these prompts? (y/n): ")
 		var confirm string
 		fmt.Scanln(&confirm)
 		if strings.ToLower(confirm) == "y" {
-			sent, skipped := sendReviewPrompts(session, suggestions)
+			sent, skipped, err := sendReviewPrompts(session, suggestions)
+			if err != nil {
+				return err
+			}
 			resp.Sent = sent
 			resp.Skipped = skipped
 			th := theme.Current()
@@ -262,6 +269,9 @@ func detectIdleAgents(store *assignment.AssignmentStore, panes []tmux.Pane, filt
 		}
 
 		agentType := agentTypeForPane(pane)
+		if pane.Type.Canonical() == tmux.AgentGrok {
+			agentType = tmux.AgentGrok.String()
+		}
 		if agentType == "user" || agentType == "unknown" {
 			continue
 		}
@@ -397,7 +407,28 @@ func minInt(a, b int) int {
 	return b
 }
 
-func sendReviewPrompts(session string, suggestions []ReviewSuggestion) (sent, skipped int) {
+type reviewPromptSender func(target, prompt string, enter bool) error
+
+func validateReviewPromptDelivery(suggestions []ReviewSuggestion) error {
+	for _, suggestion := range suggestions {
+		if err := agentpkg.AgentType(suggestion.AgentType).ValidateAutomatedPromptDelivery(); err != nil {
+			return fmt.Errorf("review prompt for pane %d: %w", suggestion.Pane, err)
+		}
+	}
+	return nil
+}
+
+func sendReviewPrompts(session string, suggestions []ReviewSuggestion) (sent, skipped int, err error) {
+	return sendReviewPromptsWithSender(session, suggestions, tmux.SendKeys)
+}
+
+func sendReviewPromptsWithSender(session string, suggestions []ReviewSuggestion, sender reviewPromptSender) (sent, skipped int, err error) {
+	if err := validateReviewPromptDelivery(suggestions); err != nil {
+		return 0, 0, err
+	}
+	if sender == nil {
+		return 0, 0, fmt.Errorf("review prompt sender is required")
+	}
 	for _, s := range suggestions {
 		target := fmt.Sprintf("%s:.%d", session, s.Pane)
 		slog.Info("[E2E-REVIEWQ] send",
@@ -405,7 +436,7 @@ func sendReviewPrompts(session string, suggestions []ReviewSuggestion) (sent, sk
 			"agent", s.Agent,
 			"pane", s.Pane,
 			"source", s.Source)
-		if err := tmux.SendKeys(target, s.Prompt, true); err != nil {
+		if err := sender(target, s.Prompt, true); err != nil {
 			slog.Warn("[E2E-REVIEWQ] send_failed",
 				"session", session,
 				"pane", s.Pane,
@@ -415,7 +446,7 @@ func sendReviewPrompts(session string, suggestions []ReviewSuggestion) (sent, sk
 			sent++
 		}
 	}
-	return
+	return sent, skipped, nil
 }
 
 func printReviewQueueReport(resp ReviewQueueResponse) {

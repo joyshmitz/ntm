@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -54,7 +55,7 @@ func newContextBuildCmd() *cobra.Command {
 			- Claude (cc), Cursor, Windsurf, Aider: XML format
 			- Codex (cod), Gemini (gmi): Markdown format`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, session, err := resolveContextBuildScope(tmux.GetCurrentSession())
+			dir, session, err := resolveContextBuildScope(cmd.Context(), tmux.GetCurrentSession())
 			if err != nil {
 				return err
 			}
@@ -176,15 +177,15 @@ func newContextShowCmd() *cobra.Command {
 	}
 }
 
-func resolveContextBuildScope(session string) (string, string, error) {
+func resolveContextBuildScope(ctx context.Context, session string) (string, string, error) {
 	session = strings.TrimSpace(session)
 	if session != "" {
-		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+		resolved, err := normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 		if err != nil {
 			return "", "", err
 		}
 		session = resolved
-		projectDir, err := resolveExplicitProjectDirForSession(session)
+		projectDir, err := resolveExplicitProjectDirForSessionContext(ctx, session)
 		if err != nil {
 			return "", "", err
 		}
@@ -309,6 +310,43 @@ func selectContextInjectTargetPanes(panes []tmux.Pane, paneIdx int, targetAll bo
 	return targets, nil
 }
 
+type contextInjectSender func(target, content string, enter bool) error
+
+// injectContextIntoPanes preflights the complete batch before the first write.
+// This preserves all-or-nothing admission even though individual tmux delivery
+// failures retain the command's existing best-effort behavior.
+func injectContextIntoPanes(session string, panes []tmux.Pane, content string, dryRun bool, sender contextInjectSender) ([]int, error) {
+	for _, pane := range panes {
+		if err := pane.Type.ValidateAutomatedPromptDelivery(); err != nil {
+			return []int{}, fmt.Errorf("context injection for pane %d: %w", pane.Index, err)
+		}
+	}
+
+	injectedPanes := make([]int, 0, len(panes))
+	if dryRun {
+		for _, pane := range panes {
+			injectedPanes = append(injectedPanes, pane.Index)
+		}
+		return injectedPanes, nil
+	}
+	if sender == nil {
+		return []int{}, fmt.Errorf("context injection sender is required")
+	}
+
+	for _, pane := range panes {
+		if err := sender(pane.ID, content, true); err != nil {
+			slog.Warn("failed to send context to pane",
+				"session", session,
+				"pane", pane.Index,
+				"error", err,
+			)
+			continue
+		}
+		injectedPanes = append(injectedPanes, pane.Index)
+	}
+	return injectedPanes, nil
+}
+
 // formatContextInjectContent reads files and formats them for injection.
 func formatContextInjectContent(projectDir string, files []string, maxBytes int) (string, []string, bool, error) {
 	if maxBytes < 0 {
@@ -408,7 +446,7 @@ Use --files to override the file list.`,
 			session := res.Session
 
 			// Resolve project directory
-			projectDir, err := resolveExplicitProjectDirForSession(session)
+			projectDir, err := resolveExplicitProjectDirForSessionContext(cmd.Context(), session)
 			if err != nil {
 				return err
 			}
@@ -483,27 +521,16 @@ Use --files to override the file list.`,
 				return err
 			}
 
-			// Track injected pane indices
-			var injectedPanes []int
-
-			if !dryRun {
-				// Send content to target panes
-				for _, p := range targetPanes {
-					target := p.ID
-					if err := tmux.SendKeys(target, content, true); err != nil {
-						slog.Warn("failed to send context to pane",
-							"session", session,
-							"pane", p.Index,
-							"error", err,
-						)
-						continue
-					}
-					injectedPanes = append(injectedPanes, p.Index)
+			injectedPanes, err := injectContextIntoPanes(session, targetPanes, content, dryRun, tmux.SendKeys)
+			if err != nil {
+				if IsJSONOutput() {
+					return emitInjectFailure(ContextInjectResult{
+						Success: false,
+						Session: session,
+						Error:   err.Error(),
+					})
 				}
-			} else {
-				for _, p := range targetPanes {
-					injectedPanes = append(injectedPanes, p.Index)
-				}
+				return err
 			}
 
 			result := ContextInjectResult{

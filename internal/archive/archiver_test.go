@@ -3,12 +3,15 @@ package archive
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
@@ -250,21 +253,34 @@ func TestArchiver_RunContextCancellation(t *testing.T) {
 	}
 	defer a.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	// Run should exit when context is cancelled
-	start := time.Now()
-	err = a.Run(ctx)
-	elapsed := time.Since(start)
-
-	if err != context.DeadlineExceeded {
-		t.Errorf("Run() error = %v, want context.DeadlineExceeded", err)
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	a.getPanes = func(ctx context.Context, _ string) ([]tmux.Pane, error) {
+		startedOnce.Do(func() { close(started) })
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
 
-	// Should have exited quickly, but allow up to 2 seconds for slow CI/tmux
-	if elapsed > 2*time.Second {
-		t.Errorf("Run() took %v, expected < 2s", elapsed)
+	ctx, cancel := context.WithCancel(t.Context())
+	result := make(chan error, 1)
+	go func() {
+		result <- a.Run(ctx)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run() did not start pane discovery")
+	}
+	cancel()
+
+	select {
+	case err = <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run() did not exit after context cancellation")
 	}
 }
 

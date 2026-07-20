@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -392,6 +393,77 @@ func TestOrchestrator_ExecuteRestartStrategyPromptFailureStopsRestart(t *testing
 	}
 	if started {
 		t.Fatal("replacement agent started despite prompt failure")
+	}
+}
+
+func TestOrchestrator_GrokRestartRejectsBeforeAnyMutation(t *testing.T) {
+	orch := NewOrchestrator(config.Default())
+	calls := map[string]int{}
+	orch.sendKeys = func(string, string, bool) error {
+		calls["send_keys"]++
+		return nil
+	}
+	orch.sendInterrupt = func(string) error {
+		calls["interrupt"]++
+		return nil
+	}
+	orch.captureOutput = func(string, int) (string, error) {
+		calls["capture"]++
+		return "$ ", nil
+	}
+	orch.promptBrowserAuth = func(string) error {
+		calls["browser_prompt"]++
+		return nil
+	}
+	orch.sanitizePaneCommand = func(command string) (string, error) {
+		calls["sanitize"]++
+		return command, nil
+	}
+	orch.buildPaneCommand = func(_, command string) (string, error) {
+		calls["build"]++
+		return command, nil
+	}
+	orch.sendKeysForAgent = func(string, string, bool, tmux.AgentType) error {
+		calls["send_for_agent"]++
+		return nil
+	}
+	orch.sleep = func(time.Duration) {
+		calls["sleep"]++
+	}
+	ctx := RestartContext{
+		PaneID:      "%9",
+		Provider:    "claude",
+		AgentType:   "grok-build",
+		TargetEmail: "backup@example.com",
+		SessionName: "proj",
+		PaneIndex:   9,
+		ProjectDir:  "/data/projects/ntm",
+	}
+
+	err := orch.ExecuteRestartStrategy(ctx)
+	if !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("ExecuteRestartStrategy() error = %v, want relaunch sentinel", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("ExecuteRestartStrategy() mutated before Grok rejection: %v", calls)
+	}
+
+	err = orch.StartNewAgentSession(ctx)
+	if !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("StartNewAgentSession() error = %v, want relaunch sentinel", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("StartNewAgentSession() mutated before Grok rejection: %v", calls)
+	}
+
+	ctx.AgentType = ""
+	ctx.Provider = "xai-grok-build"
+	err = orch.ExecuteRestartStrategy(ctx)
+	if !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("ExecuteRestartStrategy(provider-only Grok) error = %v, want relaunch sentinel", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("provider-only Grok restart mutated before rejection: %v", calls)
 	}
 }
 

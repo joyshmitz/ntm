@@ -199,7 +199,7 @@ func TestResolveRotationProjectDirRejectsWorkspaceFallbackForExplicitSession(t *
 		t.Fatal(err)
 	}
 
-	_, err := resolveRotationProjectDir(session, false)
+	_, err := resolveRotationProjectDir(t.Context(), session, false)
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -231,7 +231,7 @@ func TestResolveRotationProjectDirAllowsWorkspaceFallbackForInferredSession(t *t
 		t.Fatal(err)
 	}
 
-	got, err := resolveRotationProjectDir("ntm", true)
+	got, err := resolveRotationProjectDir(t.Context(), "ntm", true)
 	if err != nil {
 		t.Fatalf("resolveRotationProjectDir() error = %v", err)
 	}

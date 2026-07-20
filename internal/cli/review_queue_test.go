@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -179,6 +180,19 @@ func TestDetectIdleAgents_UsesParsedPaneType(t *testing.T) {
 	}
 }
 
+func TestDetectIdleAgentsPreservesCanonicalGrokTypeForAdmission(t *testing.T) {
+	store := newReviewQueueTestStore(t)
+	panes := []tmux.Pane{{Index: 2, Type: tmux.AgentType(" XAI_GROK_BUILD "), Title: "custom", Active: true}}
+
+	idle := detectIdleAgents(store, panes, "", 0)
+	if len(idle) != 1 {
+		t.Fatalf("idle agents = %+v, want one Grok agent", idle)
+	}
+	if idle[0].AgentType != tmux.AgentGrok.String() {
+		t.Fatalf("agent type = %q, want %q", idle[0].AgentType, tmux.AgentGrok)
+	}
+}
+
 // =============================================================================
 // assignSuggestionsToAgents
 // =============================================================================
@@ -276,6 +290,26 @@ func TestAgentLabel_WithoutName(t *testing.T) {
 	a := IdleAgent{Pane: 3, AgentType: "codex"}
 	if got := agentLabel(a); got != "codex_3" {
 		t.Errorf("agentLabel() = %q, want %q", got, "codex_3")
+	}
+}
+
+func TestSendReviewPromptsRejectsMixedGrokBatchBeforeSending(t *testing.T) {
+	suggestions := []ReviewSuggestion{
+		{Pane: 1, AgentType: "claude", Prompt: "review one"},
+		{Pane: 2, AgentType: " XAI_GROK_BUILD ", Prompt: "review two"},
+		{Pane: 3, AgentType: "codex", Prompt: "review three"},
+	}
+	calls := 0
+	sent, skipped, err := sendReviewPromptsWithSender("demo", suggestions, func(string, string, bool) error {
+		calls++
+		return nil
+	})
+
+	if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		t.Fatalf("error = %v, want prompt-delivery sentinel", err)
+	}
+	if sent != 0 || skipped != 0 || calls != 0 {
+		t.Fatalf("sent=%d skipped=%d calls=%d, want all zero", sent, skipped, calls)
 	}
 }
 

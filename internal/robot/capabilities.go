@@ -674,11 +674,11 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-activity", Type: "string", Required: true, Description: "Session name"},
 				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors"},
-				{Name: "activity-type", Flag: "--activity-type", Type: "string", Required: false, Description: "Comma-separated agent types to filter: claude, codex, gemini"},
+				{Name: "activity-type", Flag: "--activity-type", Type: "string", Required: false, Description: "Comma-separated agent types to filter: claude, codex, antigravity, grok, gemini"},
 			},
 			Examples: []string{
 				"ntm --robot-activity=myproject --activity-type=claude",
-				"ntm --robot-activity=myproject --panes=0.1,%7 --activity-type=claude,codex",
+				"ntm --robot-activity=myproject --panes=0.1,%7 --activity-type=claude,grok",
 			},
 		},
 		{

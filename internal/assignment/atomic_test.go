@@ -74,6 +74,25 @@ type atomicDispatchRecorder struct {
 	failFirst atomic.Bool
 }
 
+type atomicEligibilityRecorder struct {
+	mu       sync.Mutex
+	err      error
+	requests []AssignmentEligibilityAuthorizationRequest
+}
+
+func (f *atomicEligibilityRecorder) AuthorizeAssignment(_ context.Context, req AssignmentEligibilityAuthorizationRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, req)
+	return f.err
+}
+
+func (f *atomicEligibilityRecorder) snapshot() []AssignmentEligibilityAuthorizationRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]AssignmentEligibilityAuthorizationRequest(nil), f.requests...)
+}
+
 func (f *atomicDispatchRecorder) Dispatch(_ context.Context, _ DispatchRequest) (DispatchReceipt, error) {
 	call := f.calls.Add(1)
 	if call == 1 && f.failFirst.Load() {
@@ -408,6 +427,136 @@ func exactWorkingReleaseReceipt(current *Assignment) WorkingReplacementReleaseRe
 	return WorkingReplacementReleaseReceipt{
 		ReleasedPaths:          paths,
 		ReleasedReservationIDs: append([]int(nil), current.ReservationIDs...),
+	}
+}
+
+func TestAtomicEligibilityAuthorizationPrecedesAllNewIntentMutation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-eligibility-new-intent")
+	claimer := &atomicClaimLedger{}
+	reserver := &atomicReservationRecorder{}
+	dispatcher := &atomicDispatchRecorder{}
+	authorization := &atomicEligibilityRecorder{err: fmt.Errorf("%w: operator gate appeared", ErrClaimIneligible)}
+	request := atomicTestRequest("eligibility-new-intent", "%351")
+	request.RequireReservation = true
+	request.RequestedPaths = []string{"internal/assignment/**"}
+
+	result, err := NewAtomicCoordinator(store, claimer, reserver, dispatcher).
+		WithAssignmentEligibilityAuthorizationPort(authorization).
+		Execute(t.Context(), request)
+	if !errors.Is(err, ErrClaimIneligible) || result.Sent || result.Assignment != nil {
+		t.Fatalf("new-intent authorization result=%+v error=%v", result, err)
+	}
+	if stored := store.Get(request.BeadID); stored != nil {
+		t.Fatalf("authorization rejection persisted an intent: %+v", stored)
+	}
+	if claimer.calls != 0 || reserver.calls.Load() != 0 || dispatcher.calls.Load() != 0 {
+		t.Fatalf("authorization rejection side effects claim=%d reserve=%d dispatch=%d", claimer.calls, reserver.calls.Load(), dispatcher.calls.Load())
+	}
+	requests := authorization.snapshot()
+	if len(requests) != 1 || !requests[0].AllowUnassignedOpen || requests[0].AllowOwnedOpen || requests[0].AllowOwnedInProgress {
+		t.Fatalf("new-intent authorization requests=%+v", requests)
+	}
+}
+
+func TestAtomicEligibilityAuthorizationRejectsSameKeyPendingRecoveryWithoutMutation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-eligibility-pending-recovery")
+	request := atomicTestRequest("eligibility-pending-recovery", "%352")
+	request.IntentSHA256 = PromptSHA256(request.Prompt)
+	request.claimRequiresNonTerminal = true
+	actor := StableClaimActor(request.Actor, request.IdempotencyKey)
+	if _, err := store.RecordAtomicIntent(request, actor, time.Now().UTC()); err != nil {
+		t.Fatalf("seed pending intent: %v", err)
+	}
+	before := store.Get(request.BeadID)
+	claimer := &atomicClaimLedger{}
+	reserver := &atomicReservationRecorder{}
+	dispatcher := &atomicDispatchRecorder{}
+	authorization := &atomicEligibilityRecorder{err: fmt.Errorf("%w: blocker appeared", ErrClaimIneligible)}
+
+	result, err := NewAtomicCoordinator(store, claimer, reserver, dispatcher).
+		WithAssignmentEligibilityAuthorizationPort(authorization).
+		Execute(t.Context(), request)
+	if !errors.Is(err, ErrClaimIneligible) || result.Sent {
+		t.Fatalf("pending-recovery authorization result=%+v error=%v", result, err)
+	}
+	if after := store.Get(request.BeadID); !reflect.DeepEqual(after, before) {
+		t.Fatalf("pending-recovery rejection mutated ledger: before=%+v after=%+v", before, after)
+	}
+	if claimer.calls != 0 || reserver.calls.Load() != 0 || dispatcher.calls.Load() != 0 {
+		t.Fatalf("pending-recovery side effects claim=%d reserve=%d dispatch=%d", claimer.calls, reserver.calls.Load(), dispatcher.calls.Load())
+	}
+	requests := authorization.snapshot()
+	if len(requests) != 1 || !requests[0].AllowUnassignedOpen || requests[0].AllowOwnedOpen || !requests[0].AllowOwnedInProgress {
+		t.Fatalf("pending-recovery authorization requests=%+v", requests)
+	}
+}
+
+func TestAtomicEligibilityAuthorizationPrecedesWorkingReplacementRelease(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, claimer, _, working := seedWorkingAtomicReservation(t, "atomic-eligibility-replacement")
+	before := store.Get(working.BeadID)
+	claimCallsBefore := claimer.calls
+	reserver := &atomicReservationRecorder{}
+	dispatcher := &atomicDispatchRecorder{}
+	authorization := &atomicEligibilityRecorder{err: fmt.Errorf("%w: operator gate appeared", ErrClaimIneligible)}
+	var releaseCalls atomic.Int32
+	releaser := WorkingReplacementReleaseFunc(func(context.Context, *Assignment) (WorkingReplacementReleaseReceipt, error) {
+		releaseCalls.Add(1)
+		return WorkingReplacementReleaseReceipt{}, nil
+	})
+	replacement := atomicTestRequest("eligibility-replacement-new", "%353")
+	replacement.Pane = 2
+	replacement.ReplaceWorkingAssignment = true
+
+	result, err := NewAtomicCoordinator(store, claimer, reserver, dispatcher).
+		WithAssignmentEligibilityAuthorizationPort(authorization).
+		WithWorkingReplacementAuthorizationPort(WorkingReplacementAuthorizationFunc(func(context.Context, string) (WorkingReplacementAuthorization, error) {
+			return WorkingReplacementAuthorization{Status: "in_progress", Assignee: working.ClaimActor}, nil
+		})).
+		WithWorkingReplacementReleasePort(releaser).
+		Execute(t.Context(), replacement)
+	if !errors.Is(err, ErrClaimIneligible) || result.Sent {
+		t.Fatalf("replacement authorization result=%+v error=%v", result, err)
+	}
+	if after := store.Get(replacement.BeadID); !reflect.DeepEqual(after, before) {
+		t.Fatalf("replacement authorization mutated source: before=%+v after=%+v", before, after)
+	}
+	if claimer.calls != claimCallsBefore || releaseCalls.Load() != 0 || reserver.calls.Load() != 0 || dispatcher.calls.Load() != 0 {
+		t.Fatalf("replacement rejection side effects claim=%d/%d release=%d reserve=%d dispatch=%d", claimer.calls, claimCallsBefore, releaseCalls.Load(), reserver.calls.Load(), dispatcher.calls.Load())
+	}
+	requests := authorization.snapshot()
+	if len(requests) != 1 || requests[0].AllowUnassignedOpen || requests[0].AllowOwnedOpen || !requests[0].AllowOwnedInProgress || requests[0].ClaimActor != working.ClaimActor {
+		t.Fatalf("replacement authorization requests=%+v", requests)
+	}
+}
+
+func TestAtomicSentReceiptReplayBypassesEligibilityAuthorization(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-eligibility-sent-replay")
+	request := atomicTestRequest("eligibility-sent-replay", "%354")
+	seedResult, err := NewAtomicCoordinator(store, &atomicClaimLedger{}, nil, &atomicDispatchRecorder{}).Execute(t.Context(), request)
+	if err != nil || !seedResult.Sent {
+		t.Fatalf("seed sent receipt result=%+v error=%v", seedResult, err)
+	}
+	before := store.Get(request.BeadID)
+	claimer := &atomicClaimLedger{}
+	reserver := &atomicReservationRecorder{}
+	dispatcher := &atomicDispatchRecorder{}
+	authorization := &atomicEligibilityRecorder{err: fmt.Errorf("%w: late policy change", ErrClaimIneligible)}
+
+	result, err := NewAtomicCoordinator(store, claimer, reserver, dispatcher).
+		WithAssignmentEligibilityAuthorizationPort(authorization).
+		Execute(t.Context(), request)
+	if err != nil || !result.Sent || !result.Replayed {
+		t.Fatalf("sent replay result=%+v error=%v", result, err)
+	}
+	if len(authorization.snapshot()) != 0 || claimer.calls != 0 || reserver.calls.Load() != 0 || dispatcher.calls.Load() != 0 {
+		t.Fatalf("sent replay consulted or mutated external state authorization=%d claim=%d reserve=%d dispatch=%d", len(authorization.snapshot()), claimer.calls, reserver.calls.Load(), dispatcher.calls.Load())
+	}
+	if after := store.Get(request.BeadID); !reflect.DeepEqual(after, before) {
+		t.Fatalf("sent replay mutated receipt: before=%+v after=%+v", before, after)
 	}
 }
 

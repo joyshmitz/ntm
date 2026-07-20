@@ -16,22 +16,222 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	sessionPkg "github.com/Dicklesworthstone/ntm/internal/session"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
+type recordingDistributeAtomicExecutor struct {
+	calls   int
+	request assignment.AtomicRequest
+	result  assignment.AtomicResult
+	err     error
+}
+
+func (e *recordingDistributeAtomicExecutor) Execute(_ context.Context, request assignment.AtomicRequest) (assignment.AtomicResult, error) {
+	e.calls++
+	e.request = request
+	return e.result, e.err
+}
+
 func TestExecuteDistributeDispatchRejectsCanceledContextBeforeTopologyOrSend(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err := executeDistributeDispatch(ctx, "unused", robot.DistributeRecommendation{BeadID: "bd-cancel", PaneID: "%1"}, "must not send")
+	_, err := executeDistributeDispatch(ctx, t.TempDir(), "unused", robot.DistributeRecommendation{BeadID: "bd-cancel", PaneID: "%1"}, "must not send")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("executeDistributeDispatch error = %v, want context.Canceled", err)
+	}
+}
+
+func TestExecuteDistributeDispatchBuildsOneReplayStableAtomicRequest(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldCfg := cfg
+	oldGetPanes := getDistributePanes
+	oldLoadStore := loadDistributeStore
+	oldNewExecutor := newDistributeAtomicExecutor
+	cfg = config.Default()
+	t.Cleanup(func() {
+		cfg = oldCfg
+		getDistributePanes = oldGetPanes
+		loadDistributeStore = oldLoadStore
+		newDistributeAtomicExecutor = oldNewExecutor
+	})
+
+	panes := []tmux.Pane{
+		{ID: "%41", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude},
+		{ID: "%91", WindowIndex: 1, Index: 1, Type: tmux.AgentClaude},
+	}
+	getDistributePanes = func(context.Context, string) ([]tmux.Pane, error) {
+		return append([]tmux.Pane(nil), panes...), nil
+	}
+	store := assignment.NewStore("proj")
+	store.ClearedGenerations["ntm-work"] = 3
+	loadDistributeStore = func(session string) (*assignment.AssignmentStore, error) {
+		if session != "proj" {
+			t.Fatalf("load store session = %q, want proj", session)
+		}
+		return store, nil
+	}
+	recorder := &recordingDistributeAtomicExecutor{}
+	newDistributeAtomicExecutor = func(gotStore *assignment.AssignmentStore, projectDir string) distributeAtomicExecutor {
+		if gotStore != store || projectDir != "/workspace/project" {
+			t.Fatalf("atomic factory store=%p dir=%q, want %p and target project", gotStore, projectDir, store)
+		}
+		return recorder
+	}
+	prompt := "Please work on ntm-work"
+	wantKey := distributeAssignmentIdempotencyKey("proj", "ntm-work", "%91", prompt, 3)
+	recorder.result = assignment.AtomicResult{
+		Assignment: &assignment.Assignment{BeadID: "ntm-work", ClaimActor: "proj-agent/ntm-key", DispatchReceiptID: assignment.DispatchDeliveryID("%91", "double_enter", wantKey)},
+		Dispatch:   assignment.DispatchReceipt{DeliveryID: assignment.DispatchDeliveryID("%91", "double_enter", wantKey)},
+		Sent:       true,
+	}
+
+	result, err := executeDistributeDispatch(t.Context(), "/workspace/project", "proj", robot.DistributeRecommendation{
+		BeadID: "ntm-work", Title: "Live title", PaneID: "%91", PaneTarget: "1.1", AgentType: "claude",
+	}, prompt)
+	if err != nil {
+		t.Fatalf("executeDistributeDispatch: %v", err)
+	}
+	if recorder.calls != 1 {
+		t.Fatalf("atomic Execute calls = %d, want 1", recorder.calls)
+	}
+	request := recorder.request
+	if request.BeadID != "ntm-work" || request.BeadTitle != "Live title" || request.Target != "%91" || request.OccupancyKey != "%91" ||
+		request.Pane != 1 || request.AgentType != "cc" || request.AgentName != "proj_cc_1_1" || request.Prompt != prompt || request.IdempotencyKey != wantKey {
+		t.Fatalf("atomic request = %+v", request)
+	}
+	if request.Actor != "proj-distribute-proj_cc_1_1" {
+		t.Fatalf("atomic actor = %q", request.Actor)
+	}
+	if result.Target.ID != "%91" || result.IdempotencyKey != wantKey || result.Protocol != dispatchsvc.ProtocolDoubleEnter || !result.Atomic.Sent {
+		t.Fatalf("atomic distribute result = %+v", result)
+	}
+}
+
+func TestDistributeAssignmentIdempotencyAndReceiptContracts(t *testing.T) {
+	base := distributeAssignmentIdempotencyKey("proj", "ntm-work", "%9", "prompt", 0)
+	if base == "" || distributeAssignmentIdempotencyKey("proj", "ntm-work", "%9", "prompt", 0) != base {
+		t.Fatal("same distribute intent did not produce one stable key")
+	}
+	for name, changed := range map[string]string{
+		"session": distributeAssignmentIdempotencyKey("other", "ntm-work", "%9", "prompt", 0),
+		"bead":    distributeAssignmentIdempotencyKey("proj", "ntm-other", "%9", "prompt", 0),
+		"pane":    distributeAssignmentIdempotencyKey("proj", "ntm-work", "%10", "prompt", 0),
+		"prompt":  distributeAssignmentIdempotencyKey("proj", "ntm-work", "%9", "different", 0),
+		"clear":   distributeAssignmentIdempotencyKey("proj", "ntm-work", "%9", "prompt", 1),
+	} {
+		if changed == base {
+			t.Fatalf("%s change reused distribute idempotency key", name)
+		}
+	}
+
+	deliveryID := assignment.DispatchDeliveryID("%9", "double_enter", base)
+	result := distributeAtomicDispatchResult{
+		Atomic: assignment.AtomicResult{
+			Assignment: &assignment.Assignment{ClaimActor: "agent/ntm-key", DispatchReceiptID: deliveryID},
+			Dispatch:   assignment.DispatchReceipt{DeliveryID: deliveryID},
+			Sent:       true,
+			Replayed:   true,
+		},
+		Redaction:      dispatchsvc.RedactionReceipt{Mode: "redact", Findings: 2},
+		IdempotencyKey: base,
+	}
+	receipt := buildDistributeDispatchReceipt(robot.DistributeRecommendation{BeadID: "ntm-work", PaneID: "%9", PaneTarget: "0.1"}, result, nil)
+	if receipt.Status != dispatchsvc.ReceiptDelivered || receipt.Protocol != dispatchsvc.ProtocolDoubleEnter ||
+		receipt.DeliveryID != deliveryID || receipt.IdempotencyKey != base || receipt.ClaimActor != "agent/ntm-key" ||
+		!receipt.Replayed || receipt.Redaction.Findings != 2 || receipt.Error != "" {
+		t.Fatalf("replayed distribute receipt = %+v", receipt)
+	}
+	if got := distributeProtocolFromDeliveryID("malformed"); got != "" {
+		t.Fatalf("malformed delivery protocol = %q, want empty", got)
+	}
+}
+
+func TestValidateDistributeBeadDetailsFailsClosedOnEveryAutomationGate(t *testing.T) {
+	now := time.Now().UTC()
+	recommendation := robot.DistributeRecommendation{BeadID: "ntm-work", Title: "Stale title"}
+	validDetails := func() *bv.BeadAssignmentDetails {
+		return &bv.BeadAssignmentDetails{ID: "ntm-work", Title: "Live title", Status: "open"}
+	}
+	if err := validateDistributeBeadDetails(recommendation, validDetails(), now); err != nil {
+		t.Fatalf("valid live details rejected: %v", err)
+	}
+	past := validDetails()
+	pastDefer := now.Add(-time.Minute)
+	past.DeferUntil = &pastDefer
+	if err := validateDistributeBeadDetails(recommendation, past, now); err != nil {
+		t.Fatalf("expired defer gate rejected: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		rec     robot.DistributeRecommendation
+		details *bv.BeadAssignmentDetails
+		want    string
+	}{
+		{name: "missing recommendation ID", rec: robot.DistributeRecommendation{}, details: validDetails(), want: "no bead ID"},
+		{name: "missing details", rec: recommendation, details: nil, want: "no live assignment details"},
+		{name: "mismatched ID", rec: recommendation, details: &bv.BeadAssignmentDetails{ID: "other", Status: "open"}, want: "does not match"},
+		{name: "blocked", rec: recommendation, details: &bv.BeadAssignmentDetails{ID: "ntm-work", Status: "open", BlockedBy: []string{"ntm-dependency"}}, want: "blocked by dependencies"},
+		{name: "operator gated", rec: recommendation, details: &bv.BeadAssignmentDetails{ID: "ntm-work", Status: "open", Labels: []string{" HUMAN-INPUT "}}, want: "operator-gated"},
+		{name: "not open", rec: recommendation, details: &bv.BeadAssignmentDetails{ID: "ntm-work", Status: "in_progress"}, want: "want open"},
+		{name: "assigned", rec: recommendation, details: &bv.BeadAssignmentDetails{ID: "ntm-work", Status: "open", Assignee: "agent-7"}, want: "already assigned"},
+		{name: "deferred", rec: recommendation, details: func() *bv.BeadAssignmentDetails {
+			details := validDetails()
+			deferUntil := now.Add(time.Hour)
+			details.DeferUntil = &deferUntil
+			return details
+		}(), want: "deferred until"},
+		{name: "pinned", rec: recommendation, details: &bv.BeadAssignmentDetails{ID: "ntm-work", Status: "open", Pinned: true}, want: "pinned"},
+		{name: "ephemeral", rec: recommendation, details: &bv.BeadAssignmentDetails{ID: "ntm-work", Status: "open", Ephemeral: true}, want: "ephemeral"},
+		{name: "template", rec: recommendation, details: &bv.BeadAssignmentDetails{ID: "ntm-work", Status: "open", Template: true}, want: "template"},
+		{name: "wisp", rec: recommendation, details: &bv.BeadAssignmentDetails{ID: "ntm-work", Status: "open", Wisp: true}, want: "wisp"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateDistributeBeadDetails(test.rec, test.details, now)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validation error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestOutputSendCommandErrorClassifiesOwnedJSONFailures(t *testing.T) {
+	previousJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = previousJSON })
+
+	for _, test := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "invalid policy", err: markCLIInvalidInput(errors.New("invalid assignment policy")), code: robot.ErrCodeInvalidFlag},
+		{name: "canceled", err: context.Canceled, code: robot.ErrCodeTimeout},
+		{name: "runtime", err: errors.New("live bead changed"), code: robot.ErrCodeInternalError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stdout, err := captureStdout(t, func() error { return outputSendCommandError("proj", test.err) })
+			if !errors.Is(err, errJSONFailure) {
+				t.Fatalf("outputSendCommandError error = %v, want owned JSON failure", err)
+			}
+			var result SendResult
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("decode send failure JSON: %v output=%q", err, stdout)
+			}
+			if result.Success || result.ErrorCode != test.code || result.Targets == nil || len(result.Targets) != 0 {
+				t.Fatalf("send failure result = %+v, want code %s and empty targets", result, test.code)
+			}
+		})
 	}
 }
 
@@ -206,6 +406,16 @@ func TestShellDispatchRequestUsesStableSelectorsAndFailurePolicy(t *testing.T) {
 	}
 	if want := []string{"%2", "%1"}; !reflect.DeepEqual(req.Selectors, want) {
 		t.Fatalf("selectors = %v, want %v", req.Selectors, want)
+	}
+}
+
+func TestSaveDeliveredPromptSkipsUndeliveredPrompts(t *testing.T) {
+	entry := sessionPkg.PromptEntry{Content: "must not persist"}
+	if err := saveDeliveredPrompt(0, entry); err != nil {
+		t.Fatalf("zero-delivery prompt persistence error = %v, want nil", err)
+	}
+	if err := saveDeliveredPrompt(1, entry); err == nil || !strings.Contains(err.Error(), "session name is required") {
+		t.Fatalf("delivered prompt persistence error = %v, want session validation", err)
 	}
 }
 
@@ -755,7 +965,7 @@ func TestGetSessionWorkingDirRejectsWorkspaceFallbackForExplicitSession(t *testi
 		t.Fatal(err)
 	}
 
-	if got := getSessionWorkingDir(session, false); got != "" {
+	if got := getSessionWorkingDir(t.Context(), session, false); got != "" {
 		t.Fatalf("getSessionWorkingDir explicit = %q, want empty", got)
 	}
 }
@@ -783,7 +993,7 @@ func TestGetSessionWorkingDirAllowsWorkspaceFallbackForInferredSession(t *testin
 		t.Fatal(err)
 	}
 
-	if got := getSessionWorkingDir("ntm", true); got != cwdRepo {
+	if got := getSessionWorkingDir(t.Context(), "ntm", true); got != cwdRepo {
 		t.Fatalf("getSessionWorkingDir inferred = %q, want %q", got, cwdRepo)
 	}
 }

@@ -64,6 +64,50 @@ func TestAutoRestartStuckOptionsPreserveEffectiveConfig(t *testing.T) {
 	}
 }
 
+func TestHealthDryRunFlagWiresPreviewMode(t *testing.T) {
+	old := healthDryRun
+	healthDryRun = false
+	t.Cleanup(func() { healthDryRun = old })
+
+	cmd := newHealthCmd()
+	if err := cmd.ParseFlags([]string{"--dry-run"}); err != nil {
+		t.Fatalf("parse health --dry-run: %v", err)
+	}
+	if !healthDryRun {
+		t.Fatal("health --dry-run did not enable preview mode")
+	}
+	flag := cmd.Flags().Lookup("dry-run")
+	if flag == nil || flag.Usage == "" {
+		t.Fatal("health command does not expose a documented --dry-run flag")
+	}
+}
+
+func TestAutoRestartStuckResultErrorRejectsTerminalFailure(t *testing.T) {
+	if err := autoRestartStuckResultError(nil); err == nil {
+		t.Fatal("nil auto-restart result returned nil error")
+	}
+
+	result := &robot.AutoRestartStuckOutput{
+		RobotResponse: robot.NewErrorResponse(
+			errors.New("Grok Build restart is not implemented"),
+			robot.ErrCodeNotImplemented,
+			"Use an interactive pane",
+		),
+	}
+	err := autoRestartStuckResultError(result)
+	if err == nil {
+		t.Fatal("terminal auto-restart failure returned nil error")
+	}
+	if !strings.Contains(err.Error(), "Grok Build") || !strings.Contains(err.Error(), string(robot.ErrCodeNotImplemented)) {
+		t.Fatalf("terminal auto-restart error = %q", err)
+	}
+
+	success := &robot.AutoRestartStuckOutput{RobotResponse: robot.NewRobotResponse(true)}
+	if err := autoRestartStuckResultError(success); err != nil {
+		t.Fatalf("successful auto-restart result error = %v", err)
+	}
+}
+
 func TestTruncateString(t *testing.T) {
 
 	tests := []struct {

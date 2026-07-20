@@ -205,7 +205,7 @@ func TestResolveWatchProjectDir_ExplicitUsesSavedSessionProject(t *testing.T) {
 	}
 	saveSessionAgentForTest(t, session, actualProject, "GreenCastle")
 
-	got, err := resolveWatchProjectDir(session, false)
+	got, err := resolveWatchProjectDir(t.Context(), session, false)
 	if err != nil {
 		t.Fatalf("resolveWatchProjectDir() error = %v", err)
 	}
@@ -237,7 +237,7 @@ func TestResolveWatchProjectDir_ExplicitRejectsWorkspaceFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := resolveWatchProjectDir(session, false); err == nil {
+	if _, err := resolveWatchProjectDir(t.Context(), session, false); err == nil {
 		t.Fatal("expected missing project root error")
 	}
 }
@@ -316,6 +316,94 @@ func TestWatchLoop_PeriodicScanFiresWithoutCompletionEvents(t *testing.T) {
 	case <-runErr:
 	case <-time.After(2 * time.Second):
 		t.Fatal("watch loop did not shut down after context cancel")
+	}
+}
+
+func TestWatchLoop_StopCancelsAndJoinsBlockedReadyScan(t *testing.T) {
+	isolateSessionAgentStorage(t)
+
+	const session = "fixb-stop"
+	store := assignment.NewStore(session)
+	w := NewWatchLoop(session, store, &AutoReassignOptions{Session: session, Quiet: true})
+	w.scanInterval = time.Millisecond
+
+	scanStarted := make(chan struct{})
+	scanCanceled := make(chan struct{})
+	releaseScan := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseScan)
+		}
+	}()
+	w.scanFn = func(ctx context.Context) error {
+		close(scanStarted)
+		<-ctx.Done()
+		close(scanCanceled)
+		<-releaseScan
+		return ctx.Err()
+	}
+
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- w.Run(t.Context())
+	}()
+	select {
+	case <-scanStarted:
+	case <-time.After(time.Second):
+		t.Fatal("periodic ready-work scan did not start")
+	}
+
+	stopReturned := make(chan struct{})
+	go func() {
+		w.Stop()
+		close(stopReturned)
+	}()
+	select {
+	case <-stopReturned:
+		t.Fatal("WatchLoop.Stop() returned before its blocked scan exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-scanCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("blocked ready-work scan did not observe watch cancellation")
+	}
+	select {
+	case <-stopReturned:
+		t.Fatal("WatchLoop.Stop() returned after cancellation but before the blocked scan exited")
+	default:
+	}
+	select {
+	case err := <-runResult:
+		t.Fatalf("WatchLoop.Run() returned before its blocked scan exited: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseScan)
+	released = true
+	select {
+	case err := <-runResult:
+		if err != nil {
+			t.Fatalf("WatchLoop.Run() error = %v, want nil after Stop", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WatchLoop.Run() did not join the canceled ready-work scan")
+	}
+	select {
+	case <-stopReturned:
+	case <-time.After(time.Second):
+		t.Fatal("WatchLoop.Stop() did not wait for full watch-loop shutdown")
+	}
+	secondStopReturned := make(chan struct{})
+	go func() {
+		w.Stop()
+		close(secondStopReturned)
+	}()
+	select {
+	case <-secondStopReturned:
+	case <-time.After(time.Second):
+		t.Fatal("second WatchLoop.Stop() call was not idempotent")
 	}
 }
 

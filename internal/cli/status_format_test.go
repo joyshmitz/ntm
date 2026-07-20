@@ -89,6 +89,9 @@ func TestModelNameForPane(t *testing.T) {
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentGemini}); got != defaults.DefaultGemini {
 		t.Errorf("default gemini model = %q, want %q", got, defaults.DefaultGemini)
 	}
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentGrok}); got != defaults.DefaultGrok {
+		t.Errorf("default grok model = %q, want %q", got, defaults.DefaultGrok)
+	}
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentOllama}); got != defaults.DefaultOllama {
 		t.Errorf("default ollama model = %q, want %q", got, defaults.DefaultOllama)
 	}
@@ -100,6 +103,7 @@ func TestModelNameForPane(t *testing.T) {
 	cfg.Models.DefaultClaude = "claude-test"
 	cfg.Models.DefaultCodex = "codex-test"
 	cfg.Models.DefaultGemini = "gemini-test"
+	cfg.Models.DefaultGrok = "grok-test"
 	cfg.Models.DefaultOllama = "ollama-test"
 
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentClaude}); got != "claude-test" {
@@ -110,6 +114,9 @@ func TestModelNameForPane(t *testing.T) {
 	}
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentGemini}); got != "gemini-test" {
 		t.Errorf("cfg gemini model = %q", got)
+	}
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("xai-grok-build")}); got != "grok-test" {
+		t.Errorf("cfg grok alias model = %q", got)
 	}
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentOllama}); got != "ollama-test" {
 		t.Errorf("cfg ollama model = %q", got)
@@ -137,6 +144,7 @@ func TestSessionPanePresentationCanonicalizesAliases(t *testing.T) {
 		{name: "claude alias", agentType: tmux.AgentType("claude_code"), wantColor: string(th.Claude), wantIcon: ic.Claude},
 		{name: "codex alias", agentType: tmux.AgentType("openai-codex"), wantColor: string(th.Codex), wantIcon: ic.Codex},
 		{name: "gemini alias", agentType: tmux.AgentType("google-gemini"), wantColor: string(th.Gemini), wantIcon: ic.Gemini},
+		{name: "grok alias", agentType: tmux.AgentType("xai-grok-build"), wantColor: string(th.Pink), wantIcon: ic.Robot},
 		{name: "cursor", agentType: tmux.AgentCursor, wantColor: string(th.Cursor), wantIcon: ic.Cursor},
 		{name: "windsurf alias", agentType: tmux.AgentType("ws"), wantColor: string(th.Windsurf), wantIcon: ic.Windsurf},
 		{name: "aider", agentType: tmux.AgentAider, wantColor: string(th.Aider), wantIcon: ic.Aider},

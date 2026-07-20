@@ -36,6 +36,8 @@ type AgentLauncherResult struct {
 	Errors        []error        `json:"-"`
 }
 
+type agentLauncherProcessWaiter func(context.Context, string, string) (tmux.Pane, error)
+
 // AgentLauncher handles launching agent commands in tmux panes.
 type AgentLauncher struct {
 	// TmuxClient is the tmux client used for sending keys.
@@ -52,6 +54,10 @@ type AgentLauncher struct {
 
 	// Logger for structured logging
 	Logger *slog.Logger
+
+	// waitForPaneProcessStart is injectable for focused launch verification.
+	// A nil hook falls back to tmux.WaitForPaneProcessStartContext.
+	waitForPaneProcessStart agentLauncherProcessWaiter
 }
 
 type agentLauncherTmux interface {
@@ -103,6 +109,80 @@ func (l *AgentLauncher) logger() *slog.Logger {
 		return l.Logger
 	}
 	return slog.Default()
+}
+
+func (l *AgentLauncher) processStartWaiter() agentLauncherProcessWaiter {
+	if l.waitForPaneProcessStart != nil {
+		return l.waitForPaneProcessStart
+	}
+	return tmux.WaitForPaneProcessStartContext
+}
+
+func (l *AgentLauncher) resolvePane(session string, paneIndex int) (tmux.Pane, error) {
+	panes, err := l.tmuxClient().GetPanes(session)
+	if err != nil {
+		return tmux.Pane{}, fmt.Errorf("get panes for session %q: %w", session, err)
+	}
+	for _, pane := range panes {
+		if pane.Index != paneIndex {
+			continue
+		}
+		if strings.TrimSpace(pane.ID) == "" {
+			return tmux.Pane{}, fmt.Errorf("pane %d in session %q has no stable pane ID", paneIndex, session)
+		}
+		return pane, nil
+	}
+	return tmux.Pane{}, fmt.Errorf("pane %d not found in session %q", paneIndex, session)
+}
+
+func (l *AgentLauncher) launchAgentCommand(session string, pane int, agentType, launchCommand string) error {
+	isGrok := agent.AgentType(agentType).Canonical() == agent.AgentTypeGrok
+	target := ""
+	if isGrok {
+		resolvedPane, err := l.resolvePane(session, pane)
+		if err != nil {
+			return fmt.Errorf("resolve Grok Build pane before launch: %w", err)
+		}
+		if err := tmux.ValidatePaneLaunchBaseline(resolvedPane); err != nil {
+			return fmt.Errorf("validate Grok Build pane before launch: %w", err)
+		}
+		target = resolvedPane.ID
+	} else {
+		target = formatPaneTarget(session, pane)
+	}
+
+	l.logger().Debug("launching agent",
+		"session", session,
+		"pane", pane,
+		"target", target,
+		"agent_type", agentType,
+		"launch_command", launchCommand)
+
+	client := l.tmuxClient()
+	if err := client.SendKeys(target, launchCommand, false); err != nil {
+		return fmt.Errorf("send agent command to %s: %w", target, err)
+	}
+
+	if l.PostLaunchDelay > 0 {
+		time.Sleep(l.PostLaunchDelay)
+	}
+
+	if err := client.SendKeys(target, "", true); err != nil {
+		return fmt.Errorf("send enter to %s: %w", target, err)
+	}
+
+	if isGrok {
+		if _, err := l.processStartWaiter()(context.Background(), session, target); err != nil {
+			return fmt.Errorf("phase-one Grok Build in pane %s did not start a stable process: %w", target, err)
+		}
+	}
+
+	l.logger().Info("agent launched",
+		"target", target,
+		"agent_type", agentType,
+		"launch_command", launchCommand)
+
+	return nil
 }
 
 // formatPaneTarget formats a target string for tmux send-keys.
@@ -246,38 +326,10 @@ func swarmPaneTargetFromPlanIndex(session string, targeting swarmSessionTargetin
 
 // LaunchAgent starts an agent in a specific pane.
 // session is the tmux session name, pane is the 1-based pane index,
-// and agentType is the agent command (cc, cod, or gmi).
+// and agentType is the agent command (cc, cod, gmi, or grok).
 func (l *AgentLauncher) LaunchAgent(session string, pane int, agentType string) error {
-	target := formatPaneTarget(session, pane)
-
-	l.logger().Debug("launching agent",
-		"session", session,
-		"pane", pane,
-		"target", target,
-		"agent_type", agentType)
-
-	client := l.tmuxClient()
-
-	// Send agent command (the alias like "cc", "cod", or "gmi")
-	if err := client.SendKeys(target, agentType, false); err != nil {
-		return fmt.Errorf("send agent command to %s: %w", target, err)
-	}
-
-	// Small delay for terminal to process before sending Enter
-	if l.PostLaunchDelay > 0 {
-		time.Sleep(l.PostLaunchDelay)
-	}
-
-	// Send Enter to execute the command
-	if err := client.SendKeys(target, "", true); err != nil {
-		return fmt.Errorf("send enter to %s: %w", target, err)
-	}
-
-	l.logger().Info("agent launched",
-		"target", target,
-		"agent_type", agentType)
-
-	return nil
+	launchCommand := interactiveSwarmLaunchCommand(agentType)
+	return l.launchAgentCommand(session, pane, agentType, launchCommand)
 }
 
 // LaunchAllInSession launches the same agent type in all panes of a session.
@@ -296,6 +348,22 @@ func (l *AgentLauncher) LaunchAllInSession(session string, agentType string) err
 
 	if len(panes) == 0 {
 		return fmt.Errorf("session %q has no panes", session)
+	}
+
+	if agent.AgentType(agentType).Canonical() == agent.AgentTypeGrok {
+		for _, pane := range panes {
+			if pane.Index == 0 {
+				continue
+			}
+			if err := tmux.ValidatePaneLaunchBaseline(pane); err != nil {
+				return fmt.Errorf(
+					"preflight Grok Build pane %d in session %q: %w",
+					pane.Index,
+					session,
+					err,
+				)
+			}
+		}
 	}
 
 	l.logger().Info("launching agents in session",
@@ -342,6 +410,56 @@ func (l *AgentLauncher) LaunchSwarm(plan *SwarmPlan) (*AgentLauncherResult, erro
 		LaunchResults: make([]LaunchResult, 0),
 	}
 
+	for _, sessionSpec := range plan.Sessions {
+		hasGrok := false
+		for _, paneSpec := range sessionSpec.Panes {
+			if agent.AgentType(paneSpec.AgentType).Canonical() == agent.AgentTypeGrok {
+				hasGrok = true
+				break
+			}
+		}
+		if !hasGrok {
+			continue
+		}
+
+		panes, err := l.tmuxClient().GetPanes(sessionSpec.Name)
+		if err != nil {
+			return result, fmt.Errorf("preflight Grok Build panes in session %q: %w", sessionSpec.Name, err)
+		}
+		panesByIndex := make(map[int]tmux.Pane, len(panes))
+		for _, pane := range panes {
+			panesByIndex[pane.Index] = pane
+		}
+		for _, paneSpec := range sessionSpec.Panes {
+			if agent.AgentType(paneSpec.AgentType).Canonical() != agent.AgentTypeGrok {
+				continue
+			}
+			pane, ok := panesByIndex[paneSpec.Index]
+			if !ok {
+				return result, fmt.Errorf(
+					"preflight Grok Build pane %d in session %q: pane not found",
+					paneSpec.Index,
+					sessionSpec.Name,
+				)
+			}
+			if strings.TrimSpace(pane.ID) == "" {
+				return result, fmt.Errorf(
+					"preflight Grok Build pane %d in session %q: pane has no stable pane ID",
+					paneSpec.Index,
+					sessionSpec.Name,
+				)
+			}
+			if err := tmux.ValidatePaneLaunchBaseline(pane); err != nil {
+				return result, fmt.Errorf(
+					"preflight Grok Build pane %d in session %q: %w",
+					paneSpec.Index,
+					sessionSpec.Name,
+					err,
+				)
+			}
+		}
+	}
+
 	l.logger().Info("launching swarm agents",
 		"total_sessions", len(plan.Sessions),
 		"total_agents", plan.TotalAgents)
@@ -368,10 +486,10 @@ func (l *AgentLauncher) LaunchSwarm(plan *SwarmPlan) (*AgentLauncherResult, erro
 			// Determine the launch command
 			launchCmd := paneSpec.LaunchCmd
 			if launchCmd == "" {
-				launchCmd = defaultSwarmLaunchCommand(paneSpec.AgentType)
+				launchCmd = interactiveSwarmLaunchCommand(paneSpec.AgentType)
 			}
 
-			if err := l.LaunchAgent(sessionSpec.Name, paneSpec.Index, launchCmd); err != nil {
+			if err := l.launchAgentCommand(sessionSpec.Name, paneSpec.Index, paneSpec.AgentType, launchCmd); err != nil {
 				launchResult.Success = false
 				launchResult.Error = err.Error()
 				result.TotalFailed++
@@ -411,10 +529,10 @@ func (l *AgentLauncher) LaunchAgentWithContext(session string, pane int, agentTy
 // ValidateAgentType checks if the given agent type is valid.
 func ValidateAgentType(agentType string) error {
 	switch normalizedSwarmLaunchableAgentType(agentType) {
-	case AgentCC, AgentCOD, AgentGMI, "cursor", "windsurf", "aider", "ollama":
+	case AgentCC, AgentCOD, AgentGMI, "grok", "cursor", "windsurf", "aider", "ollama":
 		return nil
 	default:
-		return fmt.Errorf("invalid agent type %q: must resolve to one of %s, %s, %s, cursor, windsurf, aider, ollama",
+		return fmt.Errorf("invalid agent type %q: must resolve to one of %s, %s, %s, grok, cursor, windsurf, aider, ollama",
 			agentType, AgentCC, AgentCOD, AgentGMI)
 	}
 }
@@ -424,6 +542,7 @@ var DefaultAgentCommands = map[string]string{
 	"cc":       "claude",   // Claude Code CLI
 	"cod":      "codex",    // OpenAI Codex CLI
 	"gmi":      "gemini",   // Google Gemini CLI
+	"grok":     "grok",     // xAI Grok Build CLI
 	"cursor":   "cursor",   // Cursor CLI
 	"windsurf": "windsurf", // Windsurf CLI
 	"aider":    "aider",    // Aider CLI
@@ -440,6 +559,7 @@ var DefaultAgentArgs = map[string][]string{
 	"cc":       {},
 	"cod":      {},
 	"gmi":      {},
+	"grok":     {"--always-approve"},
 	"cursor":   {},
 	"windsurf": {},
 	"aider":    {},
@@ -660,38 +780,8 @@ func (b *LaunchCommandBuilder) BuildSwarmCommands(plan *SwarmPlan) []LaunchComma
 
 // LaunchAgentWithCommand launches an agent using a pre-built LaunchCommand.
 func (l *AgentLauncher) LaunchAgentWithCommand(session string, pane int, cmd LaunchCommand) error {
-	target := formatPaneTarget(session, pane)
-
-	l.logger().Debug("launching agent with command",
-		"session", session,
-		"pane", pane,
-		"target", target,
-		"command", cmd.ToShellCommand())
-
-	client := l.tmuxClient()
-
-	// Send the shell command
 	shellCmd := cmd.ToShellCommand()
-	if err := client.SendKeys(target, shellCmd, false); err != nil {
-		return fmt.Errorf("send agent command to %s: %w", target, err)
-	}
-
-	// Small delay for terminal to process before sending Enter
-	if l.PostLaunchDelay > 0 {
-		time.Sleep(l.PostLaunchDelay)
-	}
-
-	// Send Enter to execute the command
-	if err := client.SendKeys(target, "", true); err != nil {
-		return fmt.Errorf("send enter to %s: %w", target, err)
-	}
-
-	l.logger().Info("agent launched with command",
-		"target", target,
-		"agent_type", cmd.AgentType,
-		"command", shellCmd)
-
-	return nil
+	return l.launchAgentCommand(session, pane, cmd.AgentType, shellCmd)
 }
 
 func normalizedSwarmLaunchableAgentType(agentType string) string {
@@ -699,6 +789,7 @@ func normalizedSwarmLaunchableAgentType(agentType string) string {
 	case agent.AgentTypeClaudeCode,
 		agent.AgentTypeCodex,
 		agent.AgentTypeGemini,
+		agent.AgentTypeGrok,
 		agent.AgentTypeCursor,
 		agent.AgentTypeWindsurf,
 		agent.AgentTypeAider,
@@ -707,6 +798,13 @@ func normalizedSwarmLaunchableAgentType(agentType string) string {
 	default:
 		return ""
 	}
+}
+
+func interactiveSwarmLaunchCommand(agentType string) string {
+	if agent.AgentType(agentType).Canonical() == agent.AgentTypeGrok {
+		return "grok --always-approve"
+	}
+	return defaultSwarmLaunchCommand(agentType)
 }
 
 func defaultSwarmLaunchCommand(agentType string) string {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
@@ -87,6 +88,92 @@ func testSpawnConfig() *config.Config {
 	return cfg
 }
 
+func TestGetSpawnSafetyRejectsSessionCreatedBetweenExistenceChecks(t *testing.T) {
+	const session = "safety-toctou"
+	var sessionExistsCalls int
+	var createCalls, getPanesCalls, splitCalls, layoutCalls, launchCalls int
+	deps := &SpawnLifecycleDependencies{
+		IsTMUXInstalled: func() bool { return true },
+		GetAllPanes: func(context.Context) (map[string][]tmux.Pane, error) {
+			return map[string][]tmux.Pane{}, nil
+		},
+		SessionExists: func(context.Context, string) (bool, error) {
+			sessionExistsCalls++
+			switch sessionExistsCalls {
+			case 1:
+				return false, nil
+			case 2:
+				return true, nil
+			default:
+				t.Fatalf("SessionExists called %d times, want exactly two", sessionExistsCalls)
+				return false, nil
+			}
+		},
+		CreateSession: func(context.Context, string, string, int) error {
+			createCalls++
+			return nil
+		},
+		GetPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			getPanesCalls++
+			return nil, nil
+		},
+		SplitWindow: func(context.Context, string, string) (string, error) {
+			splitCalls++
+			return "", nil
+		},
+		ApplyTiledLayout: func(context.Context, string) error {
+			layoutCalls++
+			return nil
+		},
+		LaunchAgent: func(context.Context, tmux.Pane, string, string, int, string, string) (SpawnedAgent, error) {
+			launchCalls++
+			return SpawnedAgent{}, nil
+		},
+	}
+
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: session, CCCount: 1, NoUserPane: true, Safety: true,
+		WorkingDir: t.TempDir(), LifecycleDeps: deps,
+	}, testSpawnConfig())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
+	}
+	if sessionExistsCalls != 2 {
+		t.Fatalf("SessionExists calls=%d, want first false and second true", sessionExistsCalls)
+	}
+	if createCalls != 0 || getPanesCalls != 0 || splitCalls != 0 || layoutCalls != 0 || launchCalls != 0 {
+		t.Fatalf("safety race crossed lifecycle boundary: create=%d get-panes=%d split=%d layout=%d launch=%d",
+			createCalls, getPanesCalls, splitCalls, layoutCalls, launchCalls)
+	}
+
+	wantError := "session 'safety-toctou' already exists (--spawn-safety mode prevents reuse; use 'ntm kill safety-toctou' first)"
+	wantHint := "Choose a new session name or disable --spawn-safety"
+	if out.Success || out.Error != wantError || out.RobotResponse.Error != wantError || out.ErrorCode != ErrCodeInvalidFlag || out.Hint != wantHint {
+		t.Fatalf("safety race output=%+v, want exact INVALID_FLAG conflict contract", out)
+	}
+	if out.Agents == nil || len(out.Agents) != 0 {
+		t.Fatalf("agents=%+v, want initialized empty array", out.Agents)
+	}
+
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal safety race output: %v", err)
+	}
+	var envelope struct {
+		Success   bool           `json:"success"`
+		Error     string         `json:"error"`
+		ErrorCode string         `json:"error_code"`
+		Hint      string         `json:"hint"`
+		Agents    []SpawnedAgent `json:"agents"`
+	}
+	if err := json.Unmarshal(encoded, &envelope); err != nil {
+		t.Fatalf("unmarshal safety race output: %v", err)
+	}
+	if envelope.Success || envelope.Error != wantError || envelope.ErrorCode != ErrCodeInvalidFlag || envelope.Hint != wantHint || envelope.Agents == nil || len(envelope.Agents) != 0 {
+		t.Fatalf("safety race JSON=%s, want exact conflict envelope with agents=[]", encoded)
+	}
+}
+
 func TestValidateSpawnRequestRejectsInvalidCountsAndEmptySpawn(t *testing.T) {
 	tests := []struct {
 		name string
@@ -140,6 +227,117 @@ func TestGetSpawnGrokUsesExactCommandWithFakeLifecycle(t *testing.T) {
 	}
 }
 
+func TestGetSpawnGrokUsesConfiguredDefaultModelWithFakeLifecycle(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}}
+	deps := testSpawnLifecycleDependencies(panes)
+	var gotCommand string
+	deps.LaunchAgent = func(_ context.Context, _ tmux.Pane, session, agentType string, number int, _, command string) (SpawnedAgent, error) {
+		gotCommand = command
+		return SpawnedAgent{Pane: "0.0", Type: agentType, Title: fmt.Sprintf("%s__grok_%d", session, number)}, nil
+	}
+	cfg := testSpawnConfig()
+	cfg.Models.DefaultGrok = "account/model"
+
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "grok-configured", GrokCount: 1, NoUserPane: true, WorkingDir: t.TempDir(), LifecycleDeps: deps,
+	}, cfg)
+	if err != nil || !out.Success {
+		t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+	}
+	if gotCommand != "grok --always-approve --model 'account/model'" {
+		t.Fatalf("configured Grok command=%q", gotCommand)
+	}
+}
+
+func TestLaunchAgentGrokRejectsBusyPaneBeforeMutation(t *testing.T) {
+	agent, err := launchAgent(
+		t.Context(),
+		tmux.Pane{ID: "%9", WindowIndex: 0, Index: 2, Command: "claude"},
+		"busy-session",
+		"grok",
+		1,
+		t.TempDir(),
+		"grok --always-approve",
+	)
+	if err == nil || !strings.Contains(err.Error(), "pre-launch current command") {
+		t.Fatalf("launchAgent error=%v, want pre-launch baseline rejection", err)
+	}
+	if !strings.Contains(agent.Error, "pre-launch current command") {
+		t.Fatalf("spawned agent error=%q, want baseline rejection", agent.Error)
+	}
+}
+
+func TestGetSpawnGrokRejectsBusyExistingPaneBeforeTopologyOrLaunch(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0, Command: "claude"}}
+	deps := testSpawnLifecycleDependencies(panes)
+	splitCalls := 0
+	layoutCalls := 0
+	launchCalls := 0
+	deps.SplitWindow = func(context.Context, string, string) (string, error) {
+		splitCalls++
+		return "%new", nil
+	}
+	deps.ApplyTiledLayout = func(context.Context, string) error {
+		layoutCalls++
+		return nil
+	}
+	deps.LaunchAgent = func(context.Context, tmux.Pane, string, string, int, string, string) (SpawnedAgent, error) {
+		launchCalls++
+		return SpawnedAgent{}, nil
+	}
+
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "grok-busy", GrokCount: 2, NoUserPane: true, WorkingDir: t.TempDir(), LifecycleDeps: deps,
+	}, testSpawnConfig())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
+	}
+	if out.Success || !strings.Contains(out.Error, "pre-launch current command") {
+		t.Fatalf("GetSpawn output=%+v, want occupied-pane rejection", out)
+	}
+	if splitCalls != 0 || layoutCalls != 0 || launchCalls != 0 {
+		t.Fatalf("occupied Grok lifecycle calls: split=%d layout=%d launch=%d, want zero", splitCalls, layoutCalls, launchCalls)
+	}
+}
+
+func TestGetSpawnGrokAllowsIdleExistingPaneBeforeAddingMissingPane(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0, Command: "zsh"}}
+	deps := testSpawnLifecycleDependencies(nil)
+	splitCalls := 0
+	layoutCalls := 0
+	launchCalls := 0
+	deps.GetPanes = func(context.Context, string) ([]tmux.Pane, error) {
+		return append([]tmux.Pane(nil), panes...), nil
+	}
+	deps.SplitWindow = func(context.Context, string, string) (string, error) {
+		splitCalls++
+		panes = append(panes, tmux.Pane{ID: "%2", WindowIndex: 0, Index: 1, Command: "zsh"})
+		return "%2", nil
+	}
+	deps.ApplyTiledLayout = func(context.Context, string) error {
+		layoutCalls++
+		return nil
+	}
+	deps.LaunchAgent = func(_ context.Context, pane tmux.Pane, session, agentType string, number int, _, _ string) (SpawnedAgent, error) {
+		launchCalls++
+		return SpawnedAgent{
+			Pane:  fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index),
+			Type:  agentType,
+			Title: fmt.Sprintf("%s__grok_%d", session, number),
+		}, nil
+	}
+
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "grok-idle", GrokCount: 2, NoUserPane: true, WorkingDir: t.TempDir(), LifecycleDeps: deps,
+	}, testSpawnConfig())
+	if err != nil || !out.Success {
+		t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+	}
+	if splitCalls != 1 || layoutCalls != 1 || launchCalls != 2 {
+		t.Fatalf("idle Grok lifecycle calls: split=%d layout=%d launch=%d, want 1, 1, 2", splitCalls, layoutCalls, launchCalls)
+	}
+}
+
 func TestGetSpawnGrokRejectsUnverifiedTUISemantics(t *testing.T) {
 	for _, opts := range []SpawnOptions{
 		{Session: "grok-wait", GrokCount: 1, WaitReady: true},
@@ -149,8 +347,11 @@ func TestGetSpawnGrokRejectsUnverifiedTUISemantics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetSpawn returned transport error: %v", err)
 		}
-		if out.Success || out.ErrorCode != ErrCodeInvalidFlag || !strings.Contains(strings.ToLower(out.Error), "grok") {
-			t.Fatalf("output=%+v, want Grok INVALID_FLAG", out)
+		if out.Success || out.ErrorCode != ErrCodeNotImplemented || !strings.Contains(strings.ToLower(out.Error), "grok") {
+			t.Fatalf("output=%+v, want Grok NOT_IMPLEMENTED", out)
+		}
+		if ExitCodeForResponse(out.RobotResponse) != 2 || out.Hint != agent.GrokPhaseOneCapabilityHint {
+			t.Fatalf("output=%+v, want unavailable exit 2 and Grok capability hint", out)
 		}
 	}
 }
@@ -1430,49 +1631,436 @@ func TestGenerateWorkPrompt(t *testing.T) {
 	t.Logf("Generated prompt:\n%s", prompt)
 }
 
-// TestSpawnOptions_AssignWorkDryRun validates assign-work in dry-run mode
-func TestSpawnOptions_AssignWorkDryRun(t *testing.T) {
+func TestGetSpawnAssignmentPreflightFailurePreventsEveryActuation(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		dryRun              bool
+		policyErr           error
+		actionableErr       error
+		wantCode            string
+		wantPolicyCalls     int
+		wantActionableCalls int
+	}{
+		{
+			name: "invalid policy", policyErr: errors.New("invalid target policy"),
+			wantCode: ErrCodeInvalidFlag, wantPolicyCalls: 1,
+		},
+		{
+			name: "missing selected policy in dry run", dryRun: true, policyErr: errors.New("selected config is missing"),
+			wantCode: ErrCodeInvalidFlag, wantPolicyCalls: 1,
+		},
+		{
+			name: "unverified actionable plan", actionableErr: errors.New("plan output is incomplete"),
+			wantCode: ErrCodeInternalError, wantPolicyCalls: 1, wantActionableCalls: 1,
+		},
+		{
+			name: "unverified live labels in dry run", dryRun: true, actionableErr: errors.New("live labels are incomplete"),
+			wantCode: ErrCodeInternalError, wantPolicyCalls: 1, wantActionableCalls: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			projectDir := t.TempDir()
+			const selectedConfig = "/explicit/config.toml"
+			var policyCalls, actionableCalls atomic.Int32
+			var lifecycleCalls, claimCalls, reservationCalls, dispatchCalls atomic.Int32
 
-	opts := SpawnOptions{
-		Session:        "test_assign_dryrun",
-		CCCount:        2,
-		NoUserPane:     true,
-		DryRun:         true,
-		AssignWork:     true,
-		AssignStrategy: "top-n",
-		AssignmentDeps: &SpawnAssignmentDependencies{
-			FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
-				t.Fatal("dry run called assignment triage")
-				return nil, nil
-			},
-			LoadStore: func(string) (*assignment.AssignmentStore, error) {
-				t.Fatal("dry run loaded assignment store")
-				return nil, nil
-			},
+			lifecycle := &SpawnLifecycleDependencies{
+				IsTMUXInstalled: func() bool { return true },
+				GetAllPanes: func(context.Context) (map[string][]tmux.Pane, error) {
+					lifecycleCalls.Add(1)
+					return nil, errors.New("topology read must not run before assignment preflight succeeds")
+				},
+				SessionExists: func(context.Context, string) (bool, error) {
+					lifecycleCalls.Add(1)
+					return false, nil
+				},
+				CreateSession: func(context.Context, string, string, int) error {
+					lifecycleCalls.Add(1)
+					return nil
+				},
+				GetPanes: func(context.Context, string) ([]tmux.Pane, error) {
+					lifecycleCalls.Add(1)
+					return nil, nil
+				},
+				SplitWindow: func(context.Context, string, string) (string, error) {
+					lifecycleCalls.Add(1)
+					return "", nil
+				},
+				ApplyTiledLayout: func(context.Context, string) error {
+					lifecycleCalls.Add(1)
+					return nil
+				},
+				LaunchAgent: func(context.Context, tmux.Pane, string, string, int, string, string) (SpawnedAgent, error) {
+					lifecycleCalls.Add(1)
+					return SpawnedAgent{}, nil
+				},
+				WaitForReady: func(context.Context, *SpawnOutput, time.Duration) error {
+					lifecycleCalls.Add(1)
+					return nil
+				},
+			}
+			assignmentDeps := &SpawnAssignmentDependencies{
+				LoadAssignmentPolicy: func(gotProject, gotConfig string, require bool) (*config.Config, error) {
+					policyCalls.Add(1)
+					if gotProject != projectDir || gotConfig != selectedConfig || !require {
+						t.Fatalf("policy loader args project=%q config=%q require=%t", gotProject, gotConfig, require)
+					}
+					if test.policyErr != nil {
+						return nil, test.policyErr
+					}
+					return testSpawnConfig(), nil
+				},
+				FetchActionable: func(_ context.Context, gotProject string, limit int) ([]bv.TriageRecommendation, error) {
+					actionableCalls.Add(1)
+					if gotProject != projectDir || limit != 0 {
+						t.Fatalf("actionable loader args project=%q limit=%d", gotProject, limit)
+					}
+					return nil, test.actionableErr
+				},
+				FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
+					lifecycleCalls.Add(1)
+					return nil, nil
+				},
+				ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+					lifecycleCalls.Add(1)
+					return nil, nil
+				},
+				LoadStore: func(string) (*assignment.AssignmentStore, error) {
+					lifecycleCalls.Add(1)
+					return nil, nil
+				},
+				ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+					claimCalls.Add(1)
+					return bv.BeadClaimResult{}, nil
+				},
+				ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+					reservationCalls.Add(1)
+					return assignment.LeaseReceipt{}, nil
+				}),
+				DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+					dispatchCalls.Add(1)
+					return nil
+				}),
+			}
+
+			out, err := GetSpawn(t.Context(), SpawnOptions{
+				Session: "preflight-failure", CCCount: 1, NoUserPane: true,
+				WorkingDir: projectDir, ConfigPath: selectedConfig, RequireConfig: true,
+				DryRun: test.dryRun, AssignWork: true, AssignStrategy: "top-n",
+				LifecycleDeps: lifecycle, AssignmentDeps: assignmentDeps,
+			}, testSpawnConfig())
+			if err != nil {
+				t.Fatalf("GetSpawn returned transport error: %v", err)
+			}
+			if out.Success || out.ErrorCode != test.wantCode || out.Error == "" || out.Agents == nil {
+				t.Fatalf("preflight failure output=%+v, want code %s and initialized agents", out, test.wantCode)
+			}
+			if int(policyCalls.Load()) != test.wantPolicyCalls || int(actionableCalls.Load()) != test.wantActionableCalls {
+				t.Fatalf("preflight calls policy=%d actionable=%d, want %d/%d",
+					policyCalls.Load(), actionableCalls.Load(), test.wantPolicyCalls, test.wantActionableCalls)
+			}
+			if lifecycleCalls.Load() != 0 || claimCalls.Load() != 0 || reservationCalls.Load() != 0 || dispatchCalls.Load() != 0 {
+				t.Fatalf("preflight failure crossed actuation boundary: lifecycle=%d claim=%d reservation=%d dispatch=%d",
+					lifecycleCalls.Load(), claimCalls.Load(), reservationCalls.Load(), dispatchCalls.Load())
+			}
+		})
+	}
+}
+
+func TestSpawnOptions_AssignWorkDryRunPreflightsPolicyAndActionablePlan(t *testing.T) {
+	projectDir := t.TempDir()
+	var order []string
+	mutations := 0
+	lifecycle := &SpawnLifecycleDependencies{
+		IsTMUXInstalled: func() bool { return true },
+		GetAllPanes: func(context.Context) (map[string][]tmux.Pane, error) {
+			order = append(order, "topology-read")
+			return map[string][]tmux.Pane{}, nil
+		},
+		SessionExists: func(context.Context, string) (bool, error) {
+			mutations++
+			return false, nil
+		},
+		CreateSession:    func(context.Context, string, string, int) error { mutations++; return nil },
+		GetPanes:         func(context.Context, string) ([]tmux.Pane, error) { mutations++; return nil, nil },
+		SplitWindow:      func(context.Context, string, string) (string, error) { mutations++; return "", nil },
+		ApplyTiledLayout: func(context.Context, string) error { mutations++; return nil },
+		LaunchAgent: func(context.Context, tmux.Pane, string, string, int, string, string) (SpawnedAgent, error) {
+			mutations++
+			return SpawnedAgent{}, nil
 		},
 	}
+	assignmentDeps := &SpawnAssignmentDependencies{
+		LoadAssignmentPolicy: func(gotProject, gotConfig string, require bool) (*config.Config, error) {
+			order = append(order, "policy")
+			if gotProject != projectDir || gotConfig != "/selected/config.toml" || !require {
+				t.Fatalf("policy loader args project=%q config=%q require=%t", gotProject, gotConfig, require)
+			}
+			return testSpawnConfig(), nil
+		},
+		FetchActionable: func(_ context.Context, gotProject string, limit int) ([]bv.TriageRecommendation, error) {
+			order = append(order, "actionable")
+			if gotProject != projectDir || limit != 0 {
+				t.Fatalf("actionable loader args project=%q limit=%d", gotProject, limit)
+			}
+			return []bv.TriageRecommendation{{ID: "gated-work", Status: "open"}}, nil
+		},
+		LoadStore: func(string) (*assignment.AssignmentStore, error) {
+			mutations++
+			return nil, nil
+		},
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			mutations++
+			return bv.BeadClaimResult{}, nil
+		},
+		ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			mutations++
+			return assignment.LeaseReceipt{}, nil
+		}),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			mutations++
+			return nil
+		}),
+	}
 
-	cfg := config.Default()
-
-	output, err := captureStdout(t, func() error { return PrintSpawn(t.Context(), opts, cfg) })
+	resp, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "test-assign-dryrun", CCCount: 2, NoUserPane: true, DryRun: true,
+		WorkingDir: projectDir, ConfigPath: "/selected/config.toml", RequireConfig: true,
+		AssignWork: true, AssignStrategy: "top-n", LifecycleDeps: lifecycle, AssignmentDeps: assignmentDeps,
+	}, testSpawnConfig())
 	if err != nil {
-		t.Fatalf("PrintSpawn failed: %v", err)
+		t.Fatalf("GetSpawn failed: %v", err)
+	}
+	if !resp.Success || !resp.DryRun || len(resp.WouldCreate) != 2 || resp.Mode != "" || len(resp.Assignments) != 0 {
+		t.Fatalf("dry-run output=%+v", resp)
+	}
+	if !reflect.DeepEqual(order, []string{"policy", "actionable", "topology-read"}) {
+		t.Fatalf("dry-run preflight order=%v", order)
+	}
+	if mutations != 0 {
+		t.Fatalf("dry-run assignment caused %d lifecycle or assignment mutations", mutations)
+	}
+}
+
+func TestGetSpawnEmptyVerifiedAssignmentSetPrecedesTopologyAndLaunch(t *testing.T) {
+	projectDir := t.TempDir()
+	var order []string
+	panes := []tmux.Pane{}
+	assignmentSideEffects := 0
+	lifecycle := &SpawnLifecycleDependencies{
+		IsTMUXInstalled: func() bool { return true },
+		GetAllPanes: func(context.Context) (map[string][]tmux.Pane, error) {
+			order = append(order, "topology-read")
+			return map[string][]tmux.Pane{}, nil
+		},
+		SessionExists: func(context.Context, string) (bool, error) {
+			order = append(order, "session-exists")
+			return false, nil
+		},
+		CreateSession: func(context.Context, string, string, int) error {
+			order = append(order, "create-session")
+			panes = append(panes, tmux.Pane{ID: "%1", WindowIndex: 0, Index: 0})
+			return nil
+		},
+		GetPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			order = append(order, "get-panes")
+			return append([]tmux.Pane(nil), panes...), nil
+		},
+		SplitWindow: func(context.Context, string, string) (string, error) {
+			order = append(order, "split-window")
+			panes = append(panes, tmux.Pane{ID: "%2", WindowIndex: 0, Index: 1})
+			return "%2", nil
+		},
+		ApplyTiledLayout: func(context.Context, string) error {
+			order = append(order, "layout")
+			return nil
+		},
+		LaunchAgent: func(_ context.Context, pane tmux.Pane, session, agentType string, number int, _, _ string) (SpawnedAgent, error) {
+			order = append(order, "launch")
+			return SpawnedAgent{Pane: pane.Ref().Physical(), Type: agentType, Title: fmt.Sprintf("%s__cc_%d", session, number)}, nil
+		},
+	}
+	assignmentDeps := &SpawnAssignmentDependencies{
+		LoadAssignmentPolicy: func(gotProject, _ string, _ bool) (*config.Config, error) {
+			order = append(order, "policy")
+			if gotProject != projectDir {
+				t.Fatalf("policy project=%q, want %q", gotProject, projectDir)
+			}
+			return testSpawnConfig(), nil
+		},
+		FetchActionable: func(_ context.Context, gotProject string, limit int) ([]bv.TriageRecommendation, error) {
+			order = append(order, "actionable")
+			if gotProject != projectDir || limit != 0 {
+				t.Fatalf("actionable args project=%q limit=%d", gotProject, limit)
+			}
+			return []bv.TriageRecommendation{}, nil
+		},
+		AssignmentLedgerExists: func(gotSession string) (bool, error) {
+			order = append(order, "ledger-probe")
+			if gotSession != "filtered-gate" {
+				t.Fatalf("ledger probe session=%q", gotSession)
+			}
+			return false, nil
+		},
+		LoadStore: func(string) (*assignment.AssignmentStore, error) {
+			assignmentSideEffects++
+			return nil, nil
+		},
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			assignmentSideEffects++
+			return bv.BeadClaimResult{}, nil
+		},
+		ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			assignmentSideEffects++
+			return assignment.LeaseReceipt{}, nil
+		}),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			assignmentSideEffects++
+			return nil
+		}),
 	}
 
-	var resp SpawnOutput
-	if err := json.Unmarshal([]byte(output), &resp); err != nil {
-		t.Fatalf("Failed to parse JSON: %v", err)
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "filtered-gate", CCCount: 2, NoUserPane: true, WorkingDir: projectDir,
+		AssignWork: true, AssignStrategy: "top-n", LifecycleDeps: lifecycle, AssignmentDeps: assignmentDeps,
+	}, testSpawnConfig())
+	if err != nil {
+		t.Fatalf("GetSpawn returned transport error: %v", err)
 	}
-
-	// Dry-run should still work with assign flags
-	if !resp.DryRun {
-		t.Error("DryRun field should be true")
+	if out.Success || out.ErrorCode != "ASSIGNMENT_FAILED" || len(out.Agents) != 2 || len(out.Assignments) != 2 {
+		t.Fatalf("filtered assignment output=%+v", out)
 	}
+	wantOrder := []string{
+		"policy", "actionable", "topology-read", "session-exists", "create-session",
+		"get-panes", "split-window", "get-panes", "layout", "launch", "launch", "ledger-probe",
+	}
+	if !reflect.DeepEqual(order, wantOrder) {
+		t.Fatalf("spawn ordering=%v, want %v", order, wantOrder)
+	}
+	if assignmentSideEffects != 0 {
+		t.Fatalf("empty verified assignment set caused %d claim/reservation/dispatch side effects", assignmentSideEffects)
+	}
+}
 
-	// Mode and strategy should not be set in dry-run (no actual assignment happens)
-	// since dry-run returns early before assignment logic
+func TestAssignWorkEmptyVerifiedPlanReplaysOnlyExactDurableSentIntent(t *testing.T) {
+	const (
+		session = "spawn-empty-plan-replay"
+		beadID  = "bd-replay"
+		actor   = "ExactRecipient/ntm-0123456789ab"
+		prompt  = "durable redacted prompt"
+	)
+	pane := tmux.Pane{ID: "%9", WindowIndex: 0, Index: 1, Title: session + "__cc_1", Type: tmux.AgentClaude}
+	reservationPaths := []string{"internal/robot/**"}
+	promptChecksum := assignment.PromptSHA256(prompt)
 
-	t.Logf("DryRun with AssignWork: Session=%s, WouldCreate=%d", resp.Session, len(resp.WouldCreate))
+	for _, test := range []struct {
+		name         string
+		liveAssignee string
+		wantReplay   bool
+	}{
+		{name: "exact active owner", liveAssignee: actor, wantReplay: true},
+		{name: "live owner drift", liveAssignee: "DifferentOwner", wantReplay: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &assignment.AssignmentStore{Assignments: map[string]*assignment.Assignment{
+				beadID: {
+					BeadID: beadID, BeadTitle: "Durable replay", Pane: pane.Index,
+					AgentType: "claude", AgentName: "ExactRecipient", Status: assignment.StatusAssigned,
+					IdempotencyKey: "0123456789abcdef", ClaimActor: actor, ClaimState: assignment.ClaimClaimed,
+					ClaimStatus: "in_progress", ReservationRequired: true,
+					ReservationInputPaths: append([]string(nil), reservationPaths...),
+					ReservationState:      assignment.ReservationReserved, ReservationCompleted: true,
+					ReservationIDs: []int{701}, DispatchState: assignment.DispatchSent,
+					DispatchTarget: pane.ID, OccupancyKey: pane.ID, PromptSent: prompt,
+					PromptSHA256: promptChecksum, IntentSHA256: promptChecksum,
+					DispatchReceiptID: "tmux:" + pane.ID + ":receipt",
+				},
+			}}
+			var ledgerProbes, storeLoads, topologyReads, detailReads atomic.Int32
+			var mutations atomic.Int32
+			deps := &SpawnAssignmentDependencies{
+				AssignmentLedgerExists: func(gotSession string) (bool, error) {
+					ledgerProbes.Add(1)
+					if gotSession != session {
+						t.Fatalf("ledger probe session=%q", gotSession)
+					}
+					return true, nil
+				},
+				LoadStore: func(gotSession string) (*assignment.AssignmentStore, error) {
+					storeLoads.Add(1)
+					if gotSession != session {
+						t.Fatalf("store session=%q", gotSession)
+					}
+					return store, nil
+				},
+				ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+					topologyReads.Add(1)
+					return []tmux.Pane{pane}, nil
+				},
+				GetBeadDetails: func(_ context.Context, project, gotBeadID string) (*bv.BeadAssignmentDetails, error) {
+					detailReads.Add(1)
+					if project == "" || gotBeadID != beadID {
+						t.Fatalf("details args project=%q bead=%q", project, gotBeadID)
+					}
+					return &bv.BeadAssignmentDetails{
+						ID: beadID, Title: "Durable replay", Status: "in_progress", Priority: 1,
+						Assignee: test.liveAssignee,
+					}, nil
+				},
+				ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+					mutations.Add(1)
+					return bv.BeadClaimResult{}, errors.New("replay must not claim")
+				},
+				NewIdempotencyKey: func() (string, error) {
+					mutations.Add(1)
+					return "", errors.New("replay must not generate a key")
+				},
+				ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+					mutations.Add(1)
+					return assignment.LeaseReceipt{}, errors.New("replay must not reserve")
+				}),
+				ObserveSession: func(context.Context, string) (statuspkg.SessionObservation, error) {
+					mutations.Add(1)
+					return statuspkg.SessionObservation{}, errors.New("replay must not observe for dispatch")
+				},
+				DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+					mutations.Add(1)
+					return errors.New("replay must not dispatch")
+				}),
+			}
+			output := &SpawnOutput{Session: session, Agents: []SpawnedAgent{{Pane: "0.1", Type: "claude"}}}
+			emptyPlan := mockTriage([]bv.TriageRecommendation{}, nil)
+
+			got, err := assignWorkToAgentsWithError(
+				t.Context(), output, t.TempDir(), session, "top-n", config.Default(),
+				true, reservationPaths, deps, emptyPlan,
+			)
+			if err != nil {
+				t.Fatalf("assignWorkToAgentsWithError: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("replay assignments=%+v", got)
+			}
+			if test.wantReplay {
+				if got[0].Pane != "1" || got[0].BeadID != beadID || got[0].Priority != "P1" ||
+					!got[0].Claimed || !got[0].PromptSent || got[0].ClaimActor != actor ||
+					got[0].IdempotencyKey != "0123456789abcdef" ||
+					got[0].DispatchReceiptID != "tmux:%9:receipt" ||
+					!reflect.DeepEqual(got[0].ReservationIDs, []int{701}) || got[0].ClaimError != "" {
+					t.Fatalf("durable replay=%+v", got[0])
+				}
+			} else if got[0].Claimed || got[0].PromptSent || !strings.Contains(got[0].ClaimError, "not owned in_progress") {
+				t.Fatalf("owner-drift replay=%+v", got[0])
+			}
+			if ledgerProbes.Load() != 1 || storeLoads.Load() != 1 || topologyReads.Load() != 1 || detailReads.Load() != 1 {
+				t.Fatalf("replay reads ledger=%d store=%d topology=%d details=%d",
+					ledgerProbes.Load(), storeLoads.Load(), topologyReads.Load(), detailReads.Load())
+			}
+			if mutations.Load() != 0 {
+				t.Fatalf("durable replay crossed an external mutation boundary %d times", mutations.Load())
+			}
+		})
+	}
 }
 
 func TestAssignWorkUsesAtomicClaimReservationAndDispatchWithDurableReplay(t *testing.T) {
@@ -1485,6 +2073,7 @@ func TestAssignWorkUsesAtomicClaimReservationAndDispatchWithDurableReplay(t *tes
 	deliverCalls := 0
 	keyCalls := 0
 	observeCalls := 0
+	policyLabels := []string{"spawn-release-gate"}
 
 	panes := []tmux.Pane{
 		{ID: "%1", WindowIndex: 0, Index: 0, Type: tmux.AgentUser},
@@ -1497,11 +2086,20 @@ func TestAssignWorkUsesAtomicClaimReservationAndDispatchWithDurableReplay(t *tes
 		},
 		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
-		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+		GetBeadDetails: func(_ context.Context, _ string, beadID string) (*bv.BeadAssignmentDetails, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, "authorize")
+			return &bv.BeadAssignmentDetails{ID: beadID, Status: "open"}, nil
+		},
+		ClaimBeadWithOperatorGatedLabels: func(_ context.Context, _ string, beadID, actor string, labels []string) (bv.BeadClaimResult, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			claimCalls++
 			order = append(order, "claim")
+			if !reflect.DeepEqual(labels, policyLabels) {
+				t.Fatalf("guarded claim labels=%v, want captured %v", labels, policyLabels)
+			}
 			if !strings.HasPrefix(actor, "BlueLake/ntm-") {
 				t.Fatalf("claim actor=%q, want resolved Agent Mail identity", actor)
 			}
@@ -1547,22 +2145,28 @@ func TestAssignWorkUsesAtomicClaimReservationAndDispatchWithDurableReplay(t *tes
 		},
 	}
 	output := &SpawnOutput{Session: "spawn-atomic", Agents: []SpawnedAgent{{Pane: "1.0", Name: "GeneratedName", Type: "codex"}}}
+	cfg := config.Default()
+	cfg.Assign.OperatorGatedLabels = append([]string(nil), policyLabels...)
 
 	reservationPaths := []string{"internal/robot/**"}
-	first := assignWorkToAgents(t.Context(), output, workDir, output.Session, "top-n", config.Default(), true, reservationPaths, deps)
-	second := assignWorkToAgents(t.Context(), output, workDir, output.Session, "top-n", config.Default(), true, reservationPaths, deps)
+	first := assignWorkToAgents(t.Context(), output, workDir, output.Session, "top-n", cfg, true, reservationPaths, deps)
+	second := assignWorkToAgents(t.Context(), output, workDir, output.Session, "top-n", cfg, true, reservationPaths, deps)
 	if len(first) != 1 || !first[0].Claimed || !first[0].PromptSent || first[0].DispatchReceiptID == "" {
 		t.Fatalf("first assignment=%+v", first)
 	}
 	if len(second) != 1 || !second[0].PromptSent || second[0].IdempotencyKey != first[0].IdempotencyKey {
 		t.Fatalf("replayed assignment=%+v", second)
 	}
-	if !reflect.DeepEqual(order, []string{"claim", "reserve", "dispatch"}) {
+	if !reflect.DeepEqual(order, []string{"authorize", "claim", "reserve", "dispatch"}) {
 		t.Fatalf("side-effect order=%v", order)
 	}
 	if claimCalls != 1 || reserveCalls != 1 || deliverCalls != 1 || keyCalls != 1 || observeCalls != 2 {
 		t.Fatalf("calls claim=%d reserve=%d dispatch=%d key=%d observe=%d", claimCalls, reserveCalls, deliverCalls, keyCalls, observeCalls)
 	}
+}
+
+func spawnOpenAssignmentDetails(_ context.Context, _ string, beadID string) (*bv.BeadAssignmentDetails, error) {
+	return &bv.BeadAssignmentDetails{ID: beadID, Status: "open"}, nil
 }
 
 func TestAssignWorkRequiredReservationWithoutIdentityFailsBeforeClaimAndDispatch(t *testing.T) {
@@ -1769,6 +2373,7 @@ func TestAssignWorkRequiredReservationRejectsIdentityAndTargetReceiptMismatch(t 
 				LoadStore: func(string) (*assignment.AssignmentStore, error) {
 					return assignment.NewStore("spawn-mismatch-" + test.name), nil
 				},
+				GetBeadDetails: spawnOpenAssignmentDetails,
 				ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 					claimCalls++
 					if !strings.HasPrefix(actor, "MailAgent/ntm-") {
@@ -1869,8 +2474,9 @@ func TestAssignWorkCanonicalMultiWindowDuplicateLocalIndices(t *testing.T) {
 				{ID: "bd-window-1", Title: "Window one", Status: "ready", Priority: 2},
 			}, nil), nil
 		},
-		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
-		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		ListPanes:      func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore:      func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		GetBeadDetails: spawnOpenAssignmentDetails,
 		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
 		},
@@ -1930,8 +2536,9 @@ func TestFinalizeSpawnAssignmentOutputReturnsStructuredTerminalFailure(t *testin
 				{ID: "bd-failed", Title: "Unsafe target", Status: "ready"},
 			}, nil), nil
 		},
-		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
-		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		ListPanes:      func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore:      func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		GetBeadDetails: spawnOpenAssignmentDetails,
 		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 			claimCalls++
 			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
@@ -2083,9 +2690,22 @@ func TestGetSpawnReportsZeroAssignmentCoverageAsFailure(t *testing.T) {
 	}
 }
 
-func TestGetSpawnPreservesTypedAssignmentTimeout(t *testing.T) {
+func TestGetSpawnPreservesTypedAssignmentPreflightTimeoutWithoutLifecycleMutation(t *testing.T) {
 	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}}
 	deps := testSpawnLifecycleDependencies(panes)
+	lifecycleCalls := 0
+	deps.GetAllPanes = func(context.Context) (map[string][]tmux.Pane, error) {
+		lifecycleCalls++
+		return nil, errors.New("spawn lifecycle must not run after assignment preflight timeout")
+	}
+	deps.CreateSession = func(context.Context, string, string, int) error {
+		lifecycleCalls++
+		return errors.New("spawn lifecycle must not run after assignment preflight timeout")
+	}
+	deps.LaunchAgent = func(context.Context, tmux.Pane, string, string, int, string, string) (SpawnedAgent, error) {
+		lifecycleCalls++
+		return SpawnedAgent{}, errors.New("spawn lifecycle must not run after assignment preflight timeout")
+	}
 	out, err := GetSpawn(t.Context(), SpawnOptions{
 		Session: "assignment-timeout", CCCount: 1, NoUserPane: true,
 		WorkingDir: t.TempDir(), AssignWork: true, AssignStrategy: "top-n", LifecycleDeps: deps,
@@ -2098,11 +2718,14 @@ func TestGetSpawnPreservesTypedAssignmentTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSpawn returned transport error: %v", err)
 	}
-	if out.Success || out.ErrorCode != ErrCodeTimeout || len(out.Assignments) != 1 {
-		t.Fatalf("output=%+v, want assignment TIMEOUT with diagnostics", out)
+	if out.Success || out.ErrorCode != ErrCodeTimeout || len(out.Assignments) != 0 || len(out.Agents) != 0 {
+		t.Fatalf("output=%+v, want mutation-free assignment preflight TIMEOUT", out)
 	}
-	if !strings.Contains(out.Assignments[0].ClaimError, "deadline exceeded") {
-		t.Fatalf("assignment diagnostics=%+v", out.Assignments)
+	if !strings.Contains(out.Error, "deadline exceeded") {
+		t.Fatalf("timeout diagnostic=%q", out.Error)
+	}
+	if lifecycleCalls != 0 {
+		t.Fatalf("assignment preflight timeout reached %d spawn lifecycle call(s)", lifecycleCalls)
 	}
 }
 

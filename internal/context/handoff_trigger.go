@@ -402,7 +402,7 @@ func (t *HandoffTrigger) TriggerForAgent(agentID string) (string, error) {
 
 	// If transcript path available, try to enrich from it
 	if state.TranscriptPath != "" {
-		transcriptH, err := t.generator.GenerateFromTranscript(state.SessionName, state.TranscriptPath)
+		transcriptH, err := t.generator.GenerateFromTranscript(ctx, state.SessionName, state.TranscriptPath)
 		if err == nil && transcriptH != nil {
 			// Merge transcript findings into main handoff
 			if h.Goal == "" && transcriptH.Goal != "" {

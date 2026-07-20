@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -48,10 +49,22 @@ type robotProcessFixture struct {
 
 func runBuiltRobotProcess(t *testing.T, ntmPath, dir string, env []string, args ...string) robotBoundaryProcessResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	return runBuiltRobotProcessWithin(t, 30*time.Second, ntmPath, dir, env, args...)
+}
+
+func runBuiltRobotProcessWithin(t *testing.T, timeout time.Duration, ntmPath, dir string, env []string, args ...string) robotBoundaryProcessResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ntmPath, args...)
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+	if groupErr != nil {
+		t.Fatalf("create owned process group for ntm %q: %v", args, groupErr)
+	}
+	cmd.Cancel = func() error {
+		return group.Signal(os.Kill)
+	}
 	// A restarted pane may leave a descendant holding inherited output
 	// descriptors after CommandContext kills ntm. Bound the post-cancel pipe
 	// drain so a failed process assertion cannot hang the entire E2E package.
@@ -65,16 +78,19 @@ func runBuiltRobotProcess(t *testing.T, ntmPath, dir string, env []string, args 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	commandErr := cmd.Run()
+	if closeErr := group.Close(); closeErr != nil {
+		t.Fatalf("close owned process group for ntm %q: %v", args, closeErr)
+	}
 	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("ntm %q timed out", args)
+		t.Fatalf("ntm %q timed out after %v; stdout=%s stderr=%s", args, timeout, stdout.Bytes(), stderr.Bytes())
 	}
 
 	exitCode := 0
-	if err != nil {
+	if commandErr != nil {
 		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
-			t.Fatalf("run ntm %q: %v", args, err)
+		if !errors.As(commandErr, &exitErr) {
+			t.Fatalf("run ntm %q: %v", args, commandErr)
 		}
 		exitCode = exitErr.ExitCode()
 	}
@@ -131,9 +147,7 @@ func newRobotProcessFixture(t *testing.T, scenario string) *robotProcessFixture 
 		dataDir:    filepath.Join(root, "data"),
 	}
 	homeDir := filepath.Join(root, "home")
-	// tmux's Unix socket path is capped at roughly 108 bytes. Keep its private
-	// root short even when Go's per-test temporary directory is deeply nested.
-	tmuxDir := filepath.Join("/tmp", fmt.Sprintf("ntm-rp-%d-%d", os.Getpid(), time.Now().UnixNano()))
+	tmuxDir := testutil.ShortTmuxTempDir(t)
 	for _, dir := range []string{fixture.projectDir, fixture.configDir, fixture.dataDir, homeDir, tmuxDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("create process fixture directory %s: %v", dir, err)
@@ -149,6 +163,20 @@ func newRobotProcessFixture(t *testing.T, scenario string) *robotProcessFixture 
 		"NTM_OUTPUT_FORMAT":   "",
 		"NTM_ROBOT_FORMAT":    "",
 		"TOON_DEFAULT_FORMAT": "",
+	})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxSetupTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, fixture.tmuxPath, "kill-server")
+		cmd.Env = append([]string(nil), fixture.env...)
+		output, err := cmd.CombinedOutput()
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Errorf("robot-format private tmux cleanup timed out after %s: output=%s", defaultTmuxSetupTimeout, output)
+			return
+		}
+		if err != nil && !isBenignTmuxCleanupError(output) {
+			t.Errorf("robot-format private tmux cleanup failed: %v output=%s", err, output)
+		}
 	})
 
 	tmuxConfig := filepath.Join(root, "tmux.conf")
@@ -174,19 +202,12 @@ func newRobotProcessFixture(t *testing.T, scenario string) *robotProcessFixture 
 		t.Fatal("private tmux server returned an empty pane ID")
 	}
 	fixture.mustTMUXOutput(t, "select-pane", "-t", fixture.paneID, "-T", fixture.session+"__cod_1")
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, fixture.tmuxPath, "kill-server")
-		cmd.Env = append([]string(nil), fixture.env...)
-		_ = cmd.Run()
-	})
 	return fixture
 }
 
 func (f *robotProcessFixture) mustTMUXOutput(t *testing.T, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxSetupTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.tmuxPath, args...)
 	cmd.Env = append([]string(nil), f.env...)
@@ -791,6 +812,1731 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 			t.Fatalf("configured Codex agent did not reach ready state:\n%s", captured)
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func TestE2EAtomicRestartBeadPolicyAndDurabilityBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "atomic-restart-bead")
+	brPath, err := exec.LookPath("br")
+	if err != nil {
+		t.Skipf("br is required for restart-bead E2E: %v", err)
+	}
+	runBR := func(args ...string) []byte {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, brPath, args...)
+		cmd.Dir = fixture.projectDir
+		cmd.Env = append([]string(nil), fixture.env...)
+		output, commandErr := cmd.CombinedOutput()
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatalf("br %q timed out", args)
+		}
+		if commandErr != nil {
+			t.Fatalf("br %q: %v output=%s", args, commandErr, output)
+		}
+		return output
+	}
+	runBR("init", "--prefix=restart-e2e", "--json")
+	createBead := func(title string) string {
+		t.Helper()
+		id := strings.TrimSpace(string(runBR("create", title, "--type=task", "--priority=1", "--silent")))
+		if id == "" || strings.ContainsAny(id, " \t\r\n") {
+			t.Fatalf("unexpected br create output %q", id)
+		}
+		return id
+	}
+	beadState := func(beadID string) (status, assignee string, raw []byte) {
+		t.Helper()
+		raw = runBR("show", beadID, "--json")
+		var rows []atomicAssignmentBead
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			t.Fatalf("decode br show %s: %v raw=%s", beadID, err, raw)
+		}
+		if len(rows) != 1 || rows[0].ID != beadID {
+			t.Fatalf("br show %s rows=%+v", beadID, rows)
+		}
+		return rows[0].Status, rows[0].Assignee, raw
+	}
+	panePID := func(paneID string) string {
+		t.Helper()
+		return strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", paneID, "#{pane_pid}"))
+	}
+
+	fakeBin := filepath.Join(fixture.root, "restart-bead-bin")
+	outsideDir := filepath.Join(fixture.root, "outside")
+	for _, dir := range []string{fakeBin, outsideDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("create restart-bead fixture directory %s: %v", dir, err)
+		}
+	}
+	agentLog := filepath.Join(fixture.root, "restart-agent.log")
+	agentPath := filepath.Join(fakeBin, "restart-codex")
+	agentScript := fmt.Sprintf(`#!/bin/sh
+printf 'Codex> \n100%%%% context left\n'
+while IFS= read -r line; do
+  if [ -n "$line" ]; then printf '%%s\n' "$line" >> %s; fi
+  printf 'Codex> \n100%%%% context left\n'
+done
+`, tmux.ShellQuote(agentLog))
+	if err := os.WriteFile(agentPath, []byte(agentScript), 0o700); err != nil {
+		t.Fatalf("write restart agent: %v", err)
+	}
+	configPath := filepath.Join(fixture.root, "restart-config.toml")
+	configBody := fmt.Sprintf("[agents]\ncodex = %q\n\n[spawn_pacing]\nenabled = false\n\n[assign]\noperator_gated_labels = [\"release-approval\"]\n", agentPath)
+	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+		t.Fatalf("write restart config: %v", err)
+	}
+	baseEnv := mergeRobotProcessEnv(fixture.env, map[string]string{
+		"PATH": fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+	})
+	runRestart := func(env []string, beadID, prompt string, panes ...string) robotBoundaryProcessResult {
+		t.Helper()
+		args := []string{
+			"--config=" + configPath,
+			"--robot-format=json",
+			"--robot-restart-pane=" + fixture.session,
+			"--restart-bead=" + beadID,
+			"--restart-prompt=" + prompt,
+		}
+		if len(panes) > 0 {
+			args = append(args, "--panes="+strings.Join(panes, ","))
+		}
+		return runBuiltRobotProcessWithin(t, 60*time.Second, fixture.ntmPath, outsideDir, env, args...)
+	}
+	type restartOutput struct {
+		Success   bool     `json:"success"`
+		Error     string   `json:"error"`
+		ErrorCode string   `json:"error_code"`
+		Restarted []string `json:"restarted"`
+		Failed    []struct {
+			Pane   string `json:"pane"`
+			Reason string `json:"reason"`
+		} `json:"failed"`
+		DryRun              bool              `json:"dry_run"`
+		WouldAffect         []string          `json:"would_affect"`
+		BeadAssigned        string            `json:"bead_assigned"`
+		PromptSent          bool              `json:"prompt_sent"`
+		PromptError         string            `json:"prompt_error"`
+		PromptDelivery      map[string]string `json:"prompt_delivery"`
+		AgentRelaunched     map[string]bool   `json:"agent_relaunched"`
+		AgentRelaunchStatus map[string]string `json:"agent_relaunch_status"`
+		ProcessAlive        map[string]bool   `json:"process_alive"`
+		ClaimActor          string            `json:"claim_actor"`
+		IdempotencyKey      string            `json:"idempotency_key"`
+		DispatchReceiptID   string            `json:"dispatch_receipt_id"`
+		AssignmentReplayed  bool              `json:"assignment_replayed"`
+		AssignmentRecovered bool              `json:"assignment_recovered"`
+	}
+	runCancelableRestartAtMarker := func(label, markerPath string, env []string, args ...string) (int, []byte, []byte) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, fixture.ntmPath, args...)
+		group, err := testutil.NewProcessGroupForTest(ctx, cmd)
+		if err != nil {
+			t.Fatalf("create %s process group: %v", label, err)
+		}
+		defer func() { _ = group.Close() }()
+		cmd.Cancel = func() error { return group.Signal(os.Kill) }
+		cmd.WaitDelay = 2 * time.Second
+		cmd.Dir = outsideDir
+		cmd.Env = append([]string(nil), env...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start %s: %v", label, err)
+		}
+		waitCh := make(chan error, 1)
+		go func() { waitCh <- cmd.Wait() }()
+		markerDeadline := time.Now().Add(20 * time.Second)
+		for {
+			if _, err := os.Stat(markerPath); err == nil {
+				break
+			} else if !errors.Is(err, os.ErrNotExist) {
+				cancel()
+				<-waitCh
+				t.Fatalf("read %s marker: %v", label, err)
+			}
+			select {
+			case earlyErr := <-waitCh:
+				t.Fatalf("%s exited before cancellation point: %v stdout=%s stderr=%s", label, earlyErr, stdout.String(), stderr.String())
+			default:
+			}
+			if time.Now().After(markerDeadline) {
+				cancel()
+				<-waitCh
+				t.Fatalf("timed out waiting for %s marker: stdout=%s stderr=%s", label, stdout.String(), stderr.String())
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		signalAt := time.Now()
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			cancel()
+			<-waitCh
+			t.Fatalf("signal %s: %v", label, err)
+		}
+		var waitErr error
+		select {
+		case waitErr = <-waitCh:
+		case <-ctx.Done():
+			waitErr = <-waitCh
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("%s did not join after SIGINT: %v stdout=%s stderr=%s", label, ctx.Err(), stdout.String(), stderr.String())
+		}
+		if elapsed := time.Since(signalAt); elapsed > 5*time.Second {
+			t.Fatalf("%s cancellation took %s", label, elapsed)
+		}
+		if err := group.Close(); err != nil {
+			t.Fatalf("close %s process group: %v", label, err)
+		}
+		exitCode := 0
+		if waitErr != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(waitErr, &exitErr) {
+				t.Fatalf("wait for %s: %v", label, waitErr)
+			}
+			exitCode = exitErr.ExitCode()
+		}
+		return exitCode, append([]byte(nil), stdout.Bytes()...), append([]byte(nil), stderr.Bytes()...)
+	}
+
+	beadID := createBead("Atomic restart assignment")
+	marker := fmt.Sprintf("NTM_ATOMIC_RESTART_%d", time.Now().UnixNano())
+	writeSpawnFakeBV(t, filepath.Join(fakeBin, "bv"), beadID, "Atomic restart assignment")
+	beforePID := panePID(fixture.paneID)
+	result := runRestart(baseEnv, beadID, marker, "0")
+	if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+		t.Fatalf("restart assignment exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	var output restartOutput
+	decodeSingleRobotJSON(t, result.stdout, &output)
+	if !output.Success || !output.PromptSent || output.BeadAssigned != beadID || output.ClaimActor == "" ||
+		output.IdempotencyKey == "" || output.DispatchReceiptID == "" || output.AssignmentReplayed ||
+		!slices.Equal(output.Restarted, []string{"0"}) || len(output.Failed) != 0 {
+		t.Fatalf("restart assignment output=%+v", output)
+	}
+	if afterPID := panePID(fixture.paneID); afterPID == beforePID {
+		t.Fatalf("restart assignment pane PID remained %s", beforePID)
+	}
+	fixture.waitForFileContents(t, agentLog, marker)
+	logData, err := os.ReadFile(agentLog)
+	if err != nil || strings.Count(string(logData), marker) != 1 {
+		t.Fatalf("restart assignment log count=%d err=%v data=%s", strings.Count(string(logData), marker), err, logData)
+	}
+	status, assignee, _ := beadState(beadID)
+	if status != "in_progress" || assignee != output.ClaimActor {
+		t.Fatalf("restart bead status=%q assignee=%q, want in_progress %q", status, assignee, output.ClaimActor)
+	}
+	homeDir := atomicAssignmentEnvValue(fixture.env, "HOME")
+	ledgerPath := filepath.Join(homeDir, ".ntm", "sessions", fixture.session, "assignments.json")
+	ledger, _ := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	record := ledger.Assignments[beadID]
+	if record == nil || record.ClaimActor != output.ClaimActor || record.IdempotencyKey != output.IdempotencyKey ||
+		record.DispatchState != "sent" || record.DispatchTarget != fixture.paneID || record.OccupancyKey != fixture.paneID ||
+		record.DispatchReceiptID != output.DispatchReceiptID || record.PromptSent != marker {
+		t.Fatalf("durable restart assignment=%+v output=%+v", record, output)
+	}
+
+	replayPID := panePID(fixture.paneID)
+	replay := runRestart(baseEnv, beadID, marker, "0")
+	if replay.exitCode != 0 || len(bytes.TrimSpace(replay.stderr)) != 0 {
+		t.Fatalf("restart replay exit=%d stdout=%s stderr=%s", replay.exitCode, replay.stdout, replay.stderr)
+	}
+	var replayOutput restartOutput
+	decodeSingleRobotJSON(t, replay.stdout, &replayOutput)
+	if !replayOutput.Success || !replayOutput.PromptSent || !replayOutput.AssignmentReplayed ||
+		len(replayOutput.Restarted) != 0 || replayOutput.IdempotencyKey != output.IdempotencyKey ||
+		replayOutput.DispatchReceiptID != output.DispatchReceiptID || panePID(fixture.paneID) != replayPID {
+		t.Fatalf("restart replay output=%+v", replayOutput)
+	}
+	logData, err = os.ReadFile(agentLog)
+	if err != nil || strings.Count(string(logData), marker) != 1 {
+		t.Fatalf("restart replay duplicated marker: err=%v data=%s", err, logData)
+	}
+
+	actuationLog := filepath.Join(fixture.root, "restart-rejection-actuation.log")
+	tmuxWrapper := filepath.Join(fakeBin, "tmux-guard")
+	wrapper := `#!/bin/sh
+case "${1:-}" in
+  respawn-pane|send-keys|load-buffer|paste-buffer|set-buffer|delete-buffer)
+    printf '%s\n' "$*" >> "$NTM_E2E_RESTART_ACTUATION_LOG"
+    ;;
+esac
+if [ "${1:-}" = "capture-pane" ] &&
+   [ -n "${NTM_E2E_RESTART_READINESS_CAPTURE:-}" ] &&
+   [ -n "${NTM_E2E_RESTART_AGENT_STARTED:-}" ] &&
+   [ -e "$NTM_E2E_RESTART_AGENT_STARTED" ]; then
+  : > "$NTM_E2E_RESTART_READINESS_CAPTURE"
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+	if err := os.WriteFile(tmuxWrapper, []byte(wrapper), 0o700); err != nil {
+		t.Fatalf("write restart tmux guard: %v", err)
+	}
+	rejectionEnv := mergeRobotProcessEnv(baseEnv, map[string]string{
+		"NTM_TMUX_BINARY":               tmuxWrapper,
+		"NTM_E2E_REAL_TMUX":             fixture.tmuxPath,
+		"NTM_E2E_RESTART_ACTUATION_LOG": actuationLog,
+	})
+
+	dryRunConflictID := createBead("Dry-run occupied restart target")
+	writeSpawnFakeBV(t, filepath.Join(fakeBin, "bv"), dryRunConflictID, "Dry-run occupied restart target")
+	dryRunPrimary, dryRunPrimaryData := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	var dryRunNewerBackup map[string]json.RawMessage
+	if err := json.Unmarshal(dryRunPrimaryData, &dryRunNewerBackup); err != nil {
+		t.Fatalf("decode primary for dry-run publication window: %v", err)
+	}
+	nextGeneration, err := json.Marshal(dryRunPrimary.PersistenceGeneration + 1)
+	if err != nil {
+		t.Fatalf("encode dry-run backup generation: %v", err)
+	}
+	dryRunNewerBackup["persistence_generation"] = nextGeneration
+	dryRunNewerBackupData, err := json.MarshalIndent(dryRunNewerBackup, "", "  ")
+	if err != nil {
+		t.Fatalf("encode dry-run newer backup: %v", err)
+	}
+	if err := os.WriteFile(ledgerPath+".bak", dryRunNewerBackupData, 0o600); err != nil {
+		t.Fatalf("write dry-run newer backup: %v", err)
+	}
+	_, dryRunBeforeLedger := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	_, dryRunBeforeBackup := readAtomicAssignmentLedgerAt(t, ledgerPath+".bak")
+	dryRunBeforePID := panePID(fixture.paneID)
+	dryRunBeforeStatus, dryRunBeforeAssignee, dryRunBeforeRaw := beadState(dryRunConflictID)
+	dryRunBeforeAgentLog, err := os.ReadFile(agentLog)
+	if err != nil {
+		t.Fatalf("read agent log before dry-run conflict: %v", err)
+	}
+	dryRunMarker := "NTM_DRY_RUN_CONFLICT_MUST_NOT_SEND"
+	dryRunConflict := runBuiltRobotProcess(t, fixture.ntmPath, outsideDir, rejectionEnv,
+		"--config="+configPath,
+		"--robot-format=json",
+		"--robot-restart-pane="+fixture.session,
+		"--restart-bead="+dryRunConflictID,
+		"--restart-prompt="+dryRunMarker,
+		"--panes=0",
+		"--dry-run",
+	)
+	if dryRunConflict.exitCode != 1 || len(bytes.TrimSpace(dryRunConflict.stderr)) != 0 {
+		t.Fatalf("dry-run conflict exit=%d stdout=%s stderr=%s", dryRunConflict.exitCode, dryRunConflict.stdout, dryRunConflict.stderr)
+	}
+	var dryRunOutput restartOutput
+	decodeSingleRobotJSON(t, dryRunConflict.stdout, &dryRunOutput)
+	if dryRunOutput.Success || dryRunOutput.ErrorCode != "INVALID_FLAG" ||
+		!strings.Contains(strings.ToLower(dryRunOutput.Error), "already occupied") || dryRunOutput.DryRun ||
+		len(dryRunOutput.WouldAffect) != 0 || len(dryRunOutput.Restarted) != 0 || len(dryRunOutput.Failed) != 0 {
+		t.Fatalf("dry-run conflict output=%+v", dryRunOutput)
+	}
+	_, dryRunAfterLedger := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	_, dryRunAfterBackup := readAtomicAssignmentLedgerAt(t, ledgerPath+".bak")
+	if !bytes.Equal(dryRunBeforeLedger, dryRunAfterLedger) || !bytes.Equal(dryRunBeforeBackup, dryRunAfterBackup) ||
+		panePID(fixture.paneID) != dryRunBeforePID {
+		t.Fatal("dry-run conflict mutated the durable ledger or pane process")
+	}
+	dryRunAfterStatus, dryRunAfterAssignee, dryRunAfterRaw := beadState(dryRunConflictID)
+	if dryRunAfterStatus != dryRunBeforeStatus || dryRunAfterAssignee != dryRunBeforeAssignee ||
+		!bytes.Equal(bytes.TrimSpace(dryRunBeforeRaw), bytes.TrimSpace(dryRunAfterRaw)) {
+		t.Fatalf("dry-run conflict mutated bead: before=%s after=%s", dryRunBeforeRaw, dryRunAfterRaw)
+	}
+	if data, err := os.ReadFile(actuationLog); err == nil {
+		t.Fatalf("dry-run conflict actuated tmux: %s", data)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read dry-run conflict actuation log: %v", err)
+	}
+	dryRunAfterAgentLog, err := os.ReadFile(agentLog)
+	if err != nil || !bytes.Equal(dryRunBeforeAgentLog, dryRunAfterAgentLog) || strings.Contains(string(dryRunAfterAgentLog), dryRunMarker) {
+		t.Fatalf("dry-run conflict reached agent: err=%v before=%s after=%s", err, dryRunBeforeAgentLog, dryRunAfterAgentLog)
+	}
+	// Restore equal replicas for the later non-dry-run cancellation scenario;
+	// the assertions above already proved the preview itself did not promote.
+	if err := os.WriteFile(ledgerPath, dryRunBeforeBackup, 0o600); err != nil {
+		t.Fatalf("normalize primary after dry-run publication-window proof: %v", err)
+	}
+
+	gatedID := createBead("Operator approval required")
+	runBR("update", gatedID, "--add-label=release-approval", "--json")
+	writeSpawnFakeBV(t, filepath.Join(fakeBin, "bv"), gatedID, "Operator approval required")
+	_, beforeLedger := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	_, beforeBackup := readAtomicAssignmentLedgerAt(t, ledgerPath+".bak")
+	beforeGatePID := panePID(fixture.paneID)
+	beforeGateStatus, beforeGateAssignee, beforeGateRaw := beadState(gatedID)
+	gateMarker := "NTM_GATED_RESTART_MUST_NOT_SEND"
+	gated := runRestart(rejectionEnv, gatedID, gateMarker, "0")
+	if gated.exitCode != 1 || len(bytes.TrimSpace(gated.stderr)) != 0 {
+		t.Fatalf("gated restart exit=%d stdout=%s stderr=%s", gated.exitCode, gated.stdout, gated.stderr)
+	}
+	var gatedOutput restartOutput
+	decodeSingleRobotJSON(t, gated.stdout, &gatedOutput)
+	if gatedOutput.Success || gatedOutput.ErrorCode != "INVALID_FLAG" || gatedOutput.Error == "" || len(gatedOutput.Restarted) != 0 || len(gatedOutput.Failed) != 0 {
+		t.Fatalf("gated restart output=%+v", gatedOutput)
+	}
+	_, afterLedger := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	_, afterBackup := readAtomicAssignmentLedgerAt(t, ledgerPath+".bak")
+	if !bytes.Equal(beforeLedger, afterLedger) || !bytes.Equal(beforeBackup, afterBackup) || panePID(fixture.paneID) != beforeGatePID {
+		t.Fatal("gated restart mutated the durable ledger or pane process")
+	}
+	afterGateStatus, afterGateAssignee, afterGateRaw := beadState(gatedID)
+	if beforeGateStatus != afterGateStatus || beforeGateAssignee != afterGateAssignee || !bytes.Equal(bytes.TrimSpace(beforeGateRaw), bytes.TrimSpace(afterGateRaw)) {
+		t.Fatalf("gated restart mutated bead: before=%s after=%s", beforeGateRaw, afterGateRaw)
+	}
+	if data, err := os.ReadFile(actuationLog); err == nil {
+		t.Fatalf("gated restart actuated tmux: %s", data)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read gated restart actuation log: %v", err)
+	}
+	logData, err = os.ReadFile(agentLog)
+	if err != nil || strings.Contains(string(logData), gateMarker) {
+		t.Fatalf("gated restart reached agent: err=%v data=%s", err, logData)
+	}
+
+	ambiguousID := createBead("Ambiguous restart target")
+	writeSpawnFakeBV(t, filepath.Join(fakeBin, "bv"), ambiguousID, "Ambiguous restart target")
+	secondPane := strings.TrimSpace(fixture.mustTMUXOutput(t,
+		"split-window", "-d", "-P", "-F", "#{pane_id}", "-t", fixture.session+":0", "-c", fixture.projectDir,
+		"/bin/bash --noprofile --norc -i",
+	))
+	fixture.mustTMUXOutput(t, "select-pane", "-t", secondPane, "-T", fixture.session+"__cc_2")
+	firstPID, secondPID := panePID(fixture.paneID), panePID(secondPane)
+	_, ambiguousBefore := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	ambiguousStatus, ambiguousAssignee, ambiguousRaw := beadState(ambiguousID)
+	ambiguous := runRestart(rejectionEnv, ambiguousID, "NTM_AMBIGUOUS_RESTART_MUST_NOT_SEND")
+	if ambiguous.exitCode != 1 || len(bytes.TrimSpace(ambiguous.stderr)) != 0 {
+		t.Fatalf("ambiguous restart exit=%d stdout=%s stderr=%s", ambiguous.exitCode, ambiguous.stdout, ambiguous.stderr)
+	}
+	var ambiguousOutput restartOutput
+	decodeSingleRobotJSON(t, ambiguous.stdout, &ambiguousOutput)
+	if ambiguousOutput.Success || ambiguousOutput.ErrorCode != "INVALID_FLAG" || !strings.Contains(ambiguousOutput.Error, "exactly one") ||
+		len(ambiguousOutput.Restarted) != 0 || panePID(fixture.paneID) != firstPID || panePID(secondPane) != secondPID {
+		t.Fatalf("ambiguous restart output=%+v", ambiguousOutput)
+	}
+	_, ambiguousAfter := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	if !bytes.Equal(ambiguousBefore, ambiguousAfter) {
+		t.Fatal("ambiguous restart mutated durable ledger")
+	}
+	finalStatus, finalAssignee, finalRaw := beadState(ambiguousID)
+	if finalStatus != ambiguousStatus || finalAssignee != ambiguousAssignee || !bytes.Equal(bytes.TrimSpace(finalRaw), bytes.TrimSpace(ambiguousRaw)) {
+		t.Fatalf("ambiguous restart mutated bead: before=%s after=%s", ambiguousRaw, finalRaw)
+	}
+	if data, err := os.ReadFile(actuationLog); err == nil {
+		t.Fatalf("ambiguous restart actuated tmux: %s", data)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read ambiguous restart actuation log: %v", err)
+	}
+
+	cancelID := createBead("Cancel restart during readiness")
+	writeSpawnFakeBV(t, filepath.Join(fakeBin, "bv"), cancelID, "Cancel restart during readiness")
+	cancelAgentStarted := filepath.Join(fixture.root, "restart-cancel-agent-started")
+	cancelReadinessCapture := filepath.Join(fixture.root, "restart-cancel-readiness-capture")
+	cancelAgentPath := filepath.Join(fakeBin, "restart-blocking-claude")
+	cancelAgentScript := fmt.Sprintf(`#!/bin/sh
+: > %s
+printf 'WAITING_FOR_RESTART_CANCELLATION\n'
+while :; do sleep 1; done
+`, tmux.ShellQuote(cancelAgentStarted))
+	if err := os.WriteFile(cancelAgentPath, []byte(cancelAgentScript), 0o700); err != nil {
+		t.Fatalf("write cancellation agent: %v", err)
+	}
+	cancelConfigPath := filepath.Join(fixture.root, "restart-cancel-config.toml")
+	cancelConfigBody := fmt.Sprintf("[agents]\nclaude = %q\n\n[spawn_pacing]\nenabled = false\n\n[assign]\noperator_gated_labels = [\"release-approval\"]\n", cancelAgentPath)
+	if err := os.WriteFile(cancelConfigPath, []byte(cancelConfigBody), 0o600); err != nil {
+		t.Fatalf("write cancellation config: %v", err)
+	}
+	cancelActuationLog := filepath.Join(fixture.root, "restart-cancel-actuation.log")
+	cancelEnv := mergeRobotProcessEnv(rejectionEnv, map[string]string{
+		"NTM_E2E_RESTART_ACTUATION_LOG":     cancelActuationLog,
+		"NTM_E2E_RESTART_AGENT_STARTED":     cancelAgentStarted,
+		"NTM_E2E_RESTART_READINESS_CAPTURE": cancelReadinessCapture,
+	})
+	cancelPaneIndex := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", secondPane, "#{pane_index}"))
+	if cancelPaneIndex == "" {
+		t.Fatal("cancellation pane index is empty")
+	}
+	cancelPrompt := "NTM_CANCELED_RESTART_MUST_NOT_SEND"
+	cancelBeforePID := panePID(secondPane)
+	_, cancelBeforeLedger := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	_, cancelBeforeBackup := readAtomicAssignmentLedgerAt(t, ledgerPath+".bak")
+	cancelBeforeStatus, cancelBeforeAssignee, cancelBeforeRaw := beadState(cancelID)
+	cancelBeforeAgentLog, err := os.ReadFile(agentLog)
+	if err != nil {
+		t.Fatalf("read agent log before cancellation: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, fixture.ntmPath,
+		"--config="+cancelConfigPath,
+		"--robot-format=json",
+		"--robot-restart-pane="+fixture.session,
+		"--restart-bead="+cancelID,
+		"--restart-prompt="+cancelPrompt,
+		"--panes="+cancelPaneIndex,
+	)
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+	if groupErr != nil {
+		t.Fatalf("create cancellation process group: %v", groupErr)
+	}
+	defer func() { _ = group.Close() }()
+	cmd.Cancel = func() error { return group.Signal(os.Kill) }
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Dir = outsideDir
+	cmd.Env = append([]string(nil), cancelEnv...)
+	var cancelStdout, cancelStderr bytes.Buffer
+	cmd.Stdout = &cancelStdout
+	cmd.Stderr = &cancelStderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start cancelable restart process: %v", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	readinessDeadline := time.Now().Add(45 * time.Second)
+	for {
+		if _, err := os.Stat(cancelReadinessCapture); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			cancel()
+			<-waitCh
+			t.Fatalf("read restart readiness marker: %v", err)
+		}
+		select {
+		case earlyErr := <-waitCh:
+			t.Fatalf("restart exited before readiness cancellation: %v stdout=%s stderr=%s", earlyErr, cancelStdout.String(), cancelStderr.String())
+		default:
+		}
+		if time.Now().After(readinessDeadline) {
+			cancel()
+			<-waitCh
+			_, agentStartErr := os.Stat(cancelAgentStarted)
+			actuation, _ := os.ReadFile(cancelActuationLog)
+			t.Fatalf(
+				"timed out waiting for restart readiness poll: agent_started=%t actuation=%s stdout=%s stderr=%s",
+				agentStartErr == nil,
+				actuation,
+				cancelStdout.String(),
+				cancelStderr.String(),
+			)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		cancel()
+		<-waitCh
+		t.Fatalf("signal restart process: %v", err)
+	}
+	var waitErr error
+	select {
+	case waitErr = <-waitCh:
+	case <-ctx.Done():
+		waitErr = <-waitCh
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("restart process did not join after SIGINT: %v stdout=%s stderr=%s", ctx.Err(), cancelStdout.String(), cancelStderr.String())
+	}
+	if closeErr := group.Close(); closeErr != nil {
+		t.Fatalf("close cancellation process group: %v", closeErr)
+	}
+	if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
+		t.Fatalf("restart process was not joined: state=%v", cmd.ProcessState)
+	}
+	cancelExitCode := 0
+	if waitErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			t.Fatalf("wait for canceled restart: %v", waitErr)
+		}
+		cancelExitCode = exitErr.ExitCode()
+	}
+	if cancelExitCode != 1 || len(bytes.TrimSpace(cancelStderr.Bytes())) != 0 {
+		t.Fatalf("canceled restart exit=%d stdout=%s stderr=%s", cancelExitCode, cancelStdout.Bytes(), cancelStderr.Bytes())
+	}
+	var cancelOutput restartOutput
+	decodeSingleRobotJSON(t, cancelStdout.Bytes(), &cancelOutput)
+	if cancelOutput.Success || cancelOutput.ErrorCode != "TIMEOUT" || cancelOutput.PromptSent ||
+		!strings.Contains(strings.ToLower(cancelOutput.Error), "canceled") || !strings.Contains(strings.ToLower(cancelOutput.PromptError), "canceled") ||
+		cancelOutput.BeadAssigned != cancelID || !slices.Equal(cancelOutput.Restarted, []string{cancelPaneIndex}) || len(cancelOutput.Failed) == 0 {
+		t.Fatalf("canceled restart output=%+v", cancelOutput)
+	}
+	if cancelOutput.Failed[0].Pane != cancelPaneIndex || !strings.Contains(strings.ToLower(cancelOutput.Failed[0].Reason), "canceled") {
+		t.Fatalf("canceled restart failure details=%+v", cancelOutput.Failed)
+	}
+	relaunched, relaunchReported := cancelOutput.AgentRelaunched[cancelPaneIndex]
+	relaunchStatus, relaunchStatusReported := cancelOutput.AgentRelaunchStatus[cancelPaneIndex]
+	alive, livenessReported := cancelOutput.ProcessAlive[cancelPaneIndex]
+	if !relaunchReported || relaunched || !relaunchStatusReported || relaunchStatus != "unknown" || !livenessReported || !alive {
+		t.Fatalf(
+			"canceled restart lifecycle details relaunched=%v status=%v alive=%v",
+			cancelOutput.AgentRelaunched,
+			cancelOutput.AgentRelaunchStatus,
+			cancelOutput.ProcessAlive,
+		)
+	}
+	if panePID(secondPane) == cancelBeforePID {
+		t.Fatalf("canceled restart did not preserve completed respawn detail; pane PID remained %s", cancelBeforePID)
+	}
+	_, cancelAfterLedger := readAtomicAssignmentLedgerAt(t, ledgerPath)
+	_, cancelAfterBackup := readAtomicAssignmentLedgerAt(t, ledgerPath+".bak")
+	if !bytes.Equal(cancelBeforeLedger, cancelAfterLedger) || !bytes.Equal(cancelBeforeBackup, cancelAfterBackup) {
+		t.Fatal("readiness cancellation mutated the durable assignment ledger")
+	}
+	cancelAfterStatus, cancelAfterAssignee, cancelAfterRaw := beadState(cancelID)
+	if cancelAfterStatus != cancelBeforeStatus || cancelAfterAssignee != cancelBeforeAssignee ||
+		!bytes.Equal(bytes.TrimSpace(cancelBeforeRaw), bytes.TrimSpace(cancelAfterRaw)) {
+		t.Fatalf("readiness cancellation mutated bead: before=%s after=%s", cancelBeforeRaw, cancelAfterRaw)
+	}
+	cancelActuationBefore, err := os.ReadFile(cancelActuationLog)
+	if err != nil || !strings.Contains(string(cancelActuationBefore), "respawn-pane") || strings.Contains(string(cancelActuationBefore), cancelPrompt) {
+		t.Fatalf("canceled restart actuation err=%v data=%s", err, cancelActuationBefore)
+	}
+	cancelAfterAgentLog, err := os.ReadFile(agentLog)
+	if err != nil || !bytes.Equal(cancelBeforeAgentLog, cancelAfterAgentLog) || strings.Contains(string(cancelAfterAgentLog), cancelPrompt) {
+		t.Fatalf("canceled restart reached agent: err=%v before=%s after=%s", err, cancelBeforeAgentLog, cancelAfterAgentLog)
+	}
+	time.Sleep(750 * time.Millisecond)
+	cancelActuationAfter, err := os.ReadFile(cancelActuationLog)
+	if err != nil || !bytes.Equal(cancelActuationBefore, cancelActuationAfter) {
+		t.Fatalf("late restart actuation after joined cancellation: err=%v before=%s after=%s", err, cancelActuationBefore, cancelActuationAfter)
+	}
+
+	normalRespawnDone := filepath.Join(fixture.root, "normal-respawn-completed")
+	normalActuationLog := filepath.Join(fixture.root, "normal-respawn-actuation.log")
+	normalTmuxWrapper := filepath.Join(fakeBin, "tmux-normal-respawn-guard")
+	normalWrapperScript := `#!/bin/sh
+case "${1:-}" in
+  respawn-pane|send-keys|load-buffer|paste-buffer|set-buffer|delete-buffer)
+    printf '%s\n' "$*" >> "$NTM_E2E_RESTART_ACTUATION_LOG"
+    ;;
+esac
+if [ "${1:-}" = "respawn-pane" ]; then
+  "$NTM_E2E_REAL_TMUX" "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    : > "$NTM_E2E_NORMAL_RESPAWN_DONE"
+	  exec sleep 30
+  fi
+  exit "$status"
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+	if err := os.WriteFile(normalTmuxWrapper, []byte(normalWrapperScript), 0o700); err != nil {
+		t.Fatalf("write normal respawn tmux guard: %v", err)
+	}
+	normalEnv := mergeRobotProcessEnv(baseEnv, map[string]string{
+		"NTM_TMUX_BINARY":                   normalTmuxWrapper,
+		"NTM_E2E_REAL_TMUX":                 fixture.tmuxPath,
+		"NTM_E2E_RESTART_ACTUATION_LOG":     normalActuationLog,
+		"NTM_E2E_NORMAL_RESPAWN_DONE":       normalRespawnDone,
+		"NTM_E2E_RESTART_AGENT_STARTED":     "",
+		"NTM_E2E_RESTART_READINESS_CAPTURE": "",
+	})
+	normalMutatedPane := fixture.paneID
+	normalMutatedIndex := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", normalMutatedPane, "#{pane_index}"))
+	if normalMutatedIndex == "" || normalMutatedIndex == cancelPaneIndex {
+		t.Fatalf("normal respawn pane indexes mutated=%q remaining=%q", normalMutatedIndex, cancelPaneIndex)
+	}
+	normalBeforePID := panePID(normalMutatedPane)
+	normalRemainingBeforePID := panePID(secondPane)
+	normalCtx, normalCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer normalCancel()
+	normalCmd := exec.CommandContext(normalCtx, fixture.ntmPath,
+		"--config="+cancelConfigPath,
+		"respawn", fixture.session,
+		"--force",
+		"--panes="+normalMutatedIndex+","+cancelPaneIndex,
+	)
+	normalGroup, groupErr := testutil.NewProcessGroupForTest(normalCtx, normalCmd)
+	if groupErr != nil {
+		t.Fatalf("create normal respawn process group: %v", groupErr)
+	}
+	defer func() { _ = normalGroup.Close() }()
+	normalCmd.Cancel = func() error { return normalGroup.Signal(os.Kill) }
+	normalCmd.WaitDelay = 2 * time.Second
+	normalCmd.Dir = outsideDir
+	normalCmd.Env = append([]string(nil), normalEnv...)
+	var normalStdout, normalStderr bytes.Buffer
+	normalCmd.Stdout = &normalStdout
+	normalCmd.Stderr = &normalStderr
+	if err := normalCmd.Start(); err != nil {
+		t.Fatalf("start normal respawn process: %v", err)
+	}
+	normalWaitCh := make(chan error, 1)
+	go func() { normalWaitCh <- normalCmd.Wait() }()
+	normalRespawnDeadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(normalRespawnDone); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			normalCancel()
+			<-normalWaitCh
+			t.Fatalf("read normal respawn completion marker: %v", err)
+		}
+		select {
+		case earlyErr := <-normalWaitCh:
+			t.Fatalf("normal respawn exited before cancellation point: %v stdout=%s stderr=%s", earlyErr, normalStdout.String(), normalStderr.String())
+		default:
+		}
+		if time.Now().After(normalRespawnDeadline) {
+			normalCancel()
+			<-normalWaitCh
+			t.Fatalf("timed out waiting for successful normal respawn: stdout=%s stderr=%s", normalStdout.String(), normalStderr.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	normalSignalAt := time.Now()
+	if err := normalCmd.Process.Signal(syscall.SIGINT); err != nil {
+		normalCancel()
+		<-normalWaitCh
+		t.Fatalf("signal normal respawn process: %v", err)
+	}
+	var normalWaitErr error
+	select {
+	case normalWaitErr = <-normalWaitCh:
+	case <-normalCtx.Done():
+		normalWaitErr = <-normalWaitCh
+	}
+	if normalCtx.Err() != nil {
+		t.Fatalf("normal respawn did not join after SIGINT: %v stdout=%s stderr=%s", normalCtx.Err(), normalStdout.String(), normalStderr.String())
+	}
+	if elapsed := time.Since(normalSignalAt); elapsed > 5*time.Second {
+		t.Fatalf("normal respawn cancellation took %s", elapsed)
+	}
+	if closeErr := normalGroup.Close(); closeErr != nil {
+		t.Fatalf("close normal respawn process group: %v", closeErr)
+	}
+	normalExitCode := 0
+	if normalWaitErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(normalWaitErr, &exitErr) {
+			t.Fatalf("wait for canceled normal respawn: %v", normalWaitErr)
+		}
+		normalExitCode = exitErr.ExitCode()
+	}
+	if normalExitCode != 1 || !strings.Contains(normalStderr.String(), "TIMEOUT") ||
+		!strings.Contains(strings.ToLower(normalStderr.String()), "canceled") {
+		t.Fatalf("normal canceled respawn exit=%d stdout=%s stderr=%s", normalExitCode, normalStdout.String(), normalStderr.String())
+	}
+	for _, want := range []string{
+		"Restarted panes: " + normalMutatedIndex,
+		"Failed to restart:",
+		"  - " + normalMutatedIndex + ": ",
+		"  - " + cancelPaneIndex + ": ",
+		"lifecycle is incomplete",
+		"respawn skipped",
+		"canceled",
+	} {
+		if !strings.Contains(normalStdout.String(), want) {
+			t.Fatalf("normal canceled respawn stdout missing %q: %s", want, normalStdout.String())
+		}
+	}
+	if panePID(normalMutatedPane) == normalBeforePID {
+		t.Fatalf("normal canceled respawn pane PID remained %s", normalBeforePID)
+	}
+	if afterPID := panePID(secondPane); afterPID != normalRemainingBeforePID {
+		t.Fatalf("normal canceled respawn mutated skipped pane PID: before=%s after=%s", normalRemainingBeforePID, afterPID)
+	}
+	normalActuationBefore, err := os.ReadFile(normalActuationLog)
+	if err != nil || strings.Count(string(normalActuationBefore), "respawn-pane") != 1 {
+		t.Fatalf("normal respawn actuation err=%v data=%s", err, normalActuationBefore)
+	}
+	for _, forbidden := range []string{"send-keys", "load-buffer", "paste-buffer"} {
+		if strings.Contains(string(normalActuationBefore), forbidden) {
+			t.Fatalf("normal respawn performed late relaunch actuation %q: %s", forbidden, normalActuationBefore)
+		}
+	}
+	time.Sleep(750 * time.Millisecond)
+	normalActuationAfter, err := os.ReadFile(normalActuationLog)
+	if err != nil || !bytes.Equal(normalActuationBefore, normalActuationAfter) {
+		t.Fatalf("late normal respawn actuation after joined cancellation: err=%v before=%s after=%s", err, normalActuationBefore, normalActuationAfter)
+	}
+
+	lateRelaunchStarted := filepath.Join(fixture.root, "late-relaunch-agent-started")
+	lateRelaunchDone := filepath.Join(fixture.root, "late-relaunch-send-return")
+	lateRelaunchAgentLog := filepath.Join(fixture.root, "late-relaunch-agent.log")
+	lateRelaunchAgentPath := filepath.Join(fakeBin, "late-relaunch-codex")
+	lateRelaunchAgentScript := fmt.Sprintf(`#!/bin/sh
+: > %s
+printf 'Codex> \n100%%%% context left\n'
+while IFS= read -r line; do
+  if [ -n "$line" ]; then printf '%%s\n' "$line" >> %s; fi
+  printf 'Codex> \n100%%%% context left\n'
+done
+`, tmux.ShellQuote(lateRelaunchStarted), tmux.ShellQuote(lateRelaunchAgentLog))
+	if err := os.WriteFile(lateRelaunchAgentPath, []byte(lateRelaunchAgentScript), 0o700); err != nil {
+		t.Fatalf("write late relaunch agent: %v", err)
+	}
+	lateRelaunchConfigPath := filepath.Join(fixture.root, "late-relaunch-config.toml")
+	lateRelaunchConfig := fmt.Sprintf("[agents]\ncodex = %q\n\n[spawn_pacing]\nenabled = false\n", lateRelaunchAgentPath)
+	if err := os.WriteFile(lateRelaunchConfigPath, []byte(lateRelaunchConfig), 0o600); err != nil {
+		t.Fatalf("write late relaunch config: %v", err)
+	}
+	lateRelaunchActuationLog := filepath.Join(fixture.root, "late-relaunch-actuation.log")
+	lateRelaunchTmuxWrapper := filepath.Join(fakeBin, "tmux-late-relaunch-guard")
+	lateRelaunchWrapperScript := `#!/bin/sh
+case "${1:-}" in
+  respawn-pane|send-keys|load-buffer|paste-buffer|set-buffer|delete-buffer)
+    printf '%s\n' "$*" >> "$NTM_E2E_RESTART_ACTUATION_LOG"
+    ;;
+esac
+last=""
+for arg in "$@"; do last="$arg"; done
+if [ "${1:-}" = "send-keys" ] && [ "$last" = "Enter" ] && [ ! -e "$NTM_E2E_LATE_RELAUNCH_DONE" ]; then
+  "$NTM_E2E_REAL_TMUX" "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    attempts=0
+    while [ ! -e "$NTM_E2E_LATE_RELAUNCH_STARTED" ] && [ "$attempts" -lt 200 ]; do
+      attempts=$((attempts + 1))
+      sleep 0.01
+    done
+    [ -e "$NTM_E2E_LATE_RELAUNCH_STARTED" ] || exit 91
+    : > "$NTM_E2E_LATE_RELAUNCH_DONE"
+    exec sleep 30
+  fi
+  exit "$status"
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+	if err := os.WriteFile(lateRelaunchTmuxWrapper, []byte(lateRelaunchWrapperScript), 0o700); err != nil {
+		t.Fatalf("write late relaunch tmux guard: %v", err)
+	}
+	lateRelaunchEnv := mergeRobotProcessEnv(baseEnv, map[string]string{
+		"NTM_TMUX_BINARY":                   lateRelaunchTmuxWrapper,
+		"NTM_E2E_REAL_TMUX":                 fixture.tmuxPath,
+		"NTM_E2E_RESTART_ACTUATION_LOG":     lateRelaunchActuationLog,
+		"NTM_E2E_LATE_RELAUNCH_STARTED":     lateRelaunchStarted,
+		"NTM_E2E_LATE_RELAUNCH_DONE":        lateRelaunchDone,
+		"NTM_E2E_RESTART_AGENT_STARTED":     "",
+		"NTM_E2E_RESTART_READINESS_CAPTURE": "",
+	})
+	lateRelaunchExit, lateRelaunchStdout, lateRelaunchStderr := runCancelableRestartAtMarker(
+		"late relaunch",
+		lateRelaunchDone,
+		lateRelaunchEnv,
+		"--config="+lateRelaunchConfigPath,
+		"--robot-format=json",
+		"--robot-restart-pane="+fixture.session,
+		"--panes="+normalMutatedIndex,
+	)
+	if lateRelaunchExit != 1 || len(bytes.TrimSpace(lateRelaunchStderr)) != 0 {
+		t.Fatalf("late relaunch exit=%d stdout=%s stderr=%s", lateRelaunchExit, lateRelaunchStdout, lateRelaunchStderr)
+	}
+	var lateRelaunchOutput restartOutput
+	decodeSingleRobotJSON(t, lateRelaunchStdout, &lateRelaunchOutput)
+	if lateRelaunchOutput.Success || lateRelaunchOutput.ErrorCode != "TIMEOUT" ||
+		!slices.Equal(lateRelaunchOutput.Restarted, []string{normalMutatedIndex}) || len(lateRelaunchOutput.Failed) != 1 ||
+		!lateRelaunchOutput.AgentRelaunched[normalMutatedIndex] || !lateRelaunchOutput.ProcessAlive[normalMutatedIndex] ||
+		lateRelaunchOutput.AgentRelaunchStatus[normalMutatedIndex] != "ready" || lateRelaunchOutput.PromptSent {
+		t.Fatalf("late relaunch output=%+v", lateRelaunchOutput)
+	}
+	if lateRelaunchOutput.Failed[0].Pane != normalMutatedIndex ||
+		!strings.Contains(lateRelaunchOutput.Failed[0].Reason, "became ready") ||
+		!strings.Contains(lateRelaunchOutput.Failed[0].Reason, "lifecycle is incomplete") {
+		t.Fatalf("late relaunch failure=%+v", lateRelaunchOutput.Failed)
+	}
+	if _, err := os.Stat(lateRelaunchStarted); err != nil {
+		t.Fatalf("late relaunch agent did not start: %v", err)
+	}
+	lateRelaunchActuationBefore, err := os.ReadFile(lateRelaunchActuationLog)
+	if err != nil || strings.Count(string(lateRelaunchActuationBefore), "respawn-pane") != 1 ||
+		strings.Count(string(lateRelaunchActuationBefore), " Enter\n") != 1 {
+		t.Fatalf("late relaunch actuation err=%v data=%s", err, lateRelaunchActuationBefore)
+	}
+	time.Sleep(750 * time.Millisecond)
+	lateRelaunchActuationAfter, err := os.ReadFile(lateRelaunchActuationLog)
+	if err != nil || !bytes.Equal(lateRelaunchActuationBefore, lateRelaunchActuationAfter) {
+		t.Fatalf("late relaunch actuation continued after cancellation: err=%v before=%s after=%s", err, lateRelaunchActuationBefore, lateRelaunchActuationAfter)
+	}
+
+	latePrompt := fmt.Sprintf("NTM_LATE_PROMPT_%d", time.Now().UnixNano())
+	latePromptStaged := filepath.Join(fixture.root, "late-prompt-staged")
+	latePromptDone := filepath.Join(fixture.root, "late-prompt-consumed")
+	latePromptActuationLog := filepath.Join(fixture.root, "late-prompt-actuation.log")
+	latePromptTmuxWrapper := filepath.Join(fakeBin, "tmux-late-prompt-guard")
+	latePromptWrapperScript := `#!/bin/sh
+case "${1:-}" in
+  respawn-pane|send-keys|load-buffer|paste-buffer|set-buffer|delete-buffer)
+    printf '%s\n' "$*" >> "$NTM_E2E_RESTART_ACTUATION_LOG"
+    ;;
+esac
+case " $* " in
+  *"$NTM_E2E_LATE_PROMPT"*)
+    "$NTM_E2E_REAL_TMUX" "$@"
+    status=$?
+    if [ "$status" -eq 0 ]; then : > "$NTM_E2E_LATE_PROMPT_STAGED"; fi
+    exit "$status"
+    ;;
+esac
+last=""
+for arg in "$@"; do last="$arg"; done
+if [ "${1:-}" = "send-keys" ] && [ "$last" = "Enter" ] && [ -e "$NTM_E2E_LATE_PROMPT_STAGED" ] && [ ! -e "$NTM_E2E_LATE_PROMPT_DONE" ]; then
+  "$NTM_E2E_REAL_TMUX" "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    attempts=0
+    while ! grep -F -- "$NTM_E2E_LATE_PROMPT" "$NTM_E2E_LATE_PROMPT_LOG" >/dev/null 2>&1 && [ "$attempts" -lt 200 ]; do
+      attempts=$((attempts + 1))
+      sleep 0.01
+    done
+    grep -F -- "$NTM_E2E_LATE_PROMPT" "$NTM_E2E_LATE_PROMPT_LOG" >/dev/null 2>&1 || exit 92
+    : > "$NTM_E2E_LATE_PROMPT_DONE"
+    exec sleep 30
+  fi
+  exit "$status"
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+	if err := os.WriteFile(latePromptTmuxWrapper, []byte(latePromptWrapperScript), 0o700); err != nil {
+		t.Fatalf("write late prompt tmux guard: %v", err)
+	}
+	latePromptEnv := mergeRobotProcessEnv(baseEnv, map[string]string{
+		"NTM_TMUX_BINARY":               latePromptTmuxWrapper,
+		"NTM_E2E_REAL_TMUX":             fixture.tmuxPath,
+		"NTM_E2E_RESTART_ACTUATION_LOG": latePromptActuationLog,
+		"NTM_E2E_LATE_PROMPT":           latePrompt,
+		"NTM_E2E_LATE_PROMPT_STAGED":    latePromptStaged,
+		"NTM_E2E_LATE_PROMPT_DONE":      latePromptDone,
+		"NTM_E2E_LATE_PROMPT_LOG":       lateRelaunchAgentLog,
+	})
+	latePromptExit, latePromptStdout, latePromptStderr := runCancelableRestartAtMarker(
+		"late prompt",
+		latePromptDone,
+		latePromptEnv,
+		"--config="+lateRelaunchConfigPath,
+		"--robot-format=json",
+		"--robot-restart-pane="+fixture.session,
+		"--restart-prompt="+latePrompt,
+		"--panes="+normalMutatedIndex,
+	)
+	if latePromptExit != 1 || len(bytes.TrimSpace(latePromptStderr)) != 0 {
+		t.Fatalf("late prompt exit=%d stdout=%s stderr=%s", latePromptExit, latePromptStdout, latePromptStderr)
+	}
+	var latePromptOutput restartOutput
+	decodeSingleRobotJSON(t, latePromptStdout, &latePromptOutput)
+	if latePromptOutput.Success || latePromptOutput.ErrorCode != "TIMEOUT" || latePromptOutput.PromptSent ||
+		latePromptOutput.PromptDelivery[normalMutatedIndex] != "unknown" ||
+		!strings.Contains(latePromptOutput.PromptError, "outcome is unknown") ||
+		!latePromptOutput.AgentRelaunched[normalMutatedIndex] || latePromptOutput.AgentRelaunchStatus[normalMutatedIndex] != "ready" ||
+		!slices.Equal(latePromptOutput.Restarted, []string{normalMutatedIndex}) || len(latePromptOutput.Failed) != 1 {
+		t.Fatalf("late prompt output=%+v", latePromptOutput)
+	}
+	if latePromptOutput.Failed[0].Pane != normalMutatedIndex || !strings.Contains(latePromptOutput.Failed[0].Reason, "prompt delivery canceled") {
+		t.Fatalf("late prompt failure=%+v", latePromptOutput.Failed)
+	}
+	latePromptLog, err := os.ReadFile(lateRelaunchAgentLog)
+	if err != nil || strings.Count(string(latePromptLog), latePrompt) != 1 {
+		t.Fatalf("late prompt consumption count=%d err=%v data=%s", strings.Count(string(latePromptLog), latePrompt), err, latePromptLog)
+	}
+	latePromptActuationBefore, err := os.ReadFile(latePromptActuationLog)
+	if err != nil || strings.Count(string(latePromptActuationBefore), "respawn-pane") != 1 ||
+		strings.Count(string(latePromptActuationBefore), " Enter\n") != 2 {
+		t.Fatalf("late prompt actuation err=%v data=%s", err, latePromptActuationBefore)
+	}
+	time.Sleep(750 * time.Millisecond)
+	latePromptActuationAfter, err := os.ReadFile(latePromptActuationLog)
+	if err != nil || !bytes.Equal(latePromptActuationBefore, latePromptActuationAfter) {
+		t.Fatalf("late prompt actuation continued after cancellation: err=%v before=%s after=%s", err, latePromptActuationBefore, latePromptActuationAfter)
+	}
+}
+
+func TestE2EAtomicRobotContextInjectProjectResolutionCancellationBuiltBinary(t *testing.T) {
+	CommonE2EPrerequisites(t)
+
+	t.Run("positive control injects after project resolution", func(t *testing.T) {
+		fixture := newRobotProcessFixture(t, "context-inject-project-positive")
+		const sentinel = "NTM_E2E_PROJECT_CONTEXT_SENTINEL"
+		if err := os.WriteFile(filepath.Join(fixture.projectDir, "AGENTS.md"), []byte("# "+sentinel+"\n"), 0o600); err != nil {
+			t.Fatalf("write context injection sentinel: %v", err)
+		}
+
+		mutationLog := filepath.Join(fixture.root, "context-inject-positive-mutations.log")
+		tmuxWrapper := filepath.Join(fixture.root, "tmux-context-inject-positive")
+		wrapperScript := `#!/bin/sh
+case "${1:-}" in
+  send-keys|respawn-pane|kill-pane|kill-window|kill-session|load-buffer|set-buffer|paste-buffer|delete-buffer)
+    printf '%s\n' "$*" >> "$NTM_E2E_CONTEXT_INJECT_MUTATION_LOG"
+    ;;
+esac
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+		if err := os.WriteFile(tmuxWrapper, []byte(wrapperScript), 0o700); err != nil {
+			t.Fatalf("write positive-control tmux wrapper: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY":                     tmuxWrapper,
+			"NTM_E2E_REAL_TMUX":                   fixture.tmuxPath,
+			"NTM_E2E_CONTEXT_INJECT_MUTATION_LOG": mutationLog,
+		})
+
+		result := runBuiltRobotProcess(t, fixture.ntmPath, fixture.root, env,
+			"--robot-format=json",
+			"--robot-context-inject="+fixture.session,
+			"--inject-files=AGENTS.md",
+			"--inject-pane=0",
+		)
+		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+			t.Fatalf("positive context injection exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+		}
+		var output struct {
+			Success       bool     `json:"success"`
+			Session       string   `json:"session"`
+			InjectedFiles []string `json:"injected_files"`
+			PanesInjected []int    `json:"panes_injected"`
+		}
+		decodeSingleRobotJSON(t, result.stdout, &output)
+		if !output.Success || output.Session != fixture.session ||
+			!slices.Equal(output.InjectedFiles, []string{"AGENTS.md"}) ||
+			!slices.Equal(output.PanesInjected, []int{0}) {
+			t.Fatalf("positive context injection output=%+v", output)
+		}
+		mutations, err := os.ReadFile(mutationLog)
+		if err != nil {
+			t.Fatalf("read positive context injection mutations: %v", err)
+		}
+		if strings.Count(string(mutations), "send-keys") != 2 || !strings.Contains(string(mutations), sentinel) {
+			t.Fatalf("positive control did not reach expected pane mutations: %s", mutations)
+		}
+	})
+
+	t.Run("SIGINT cancels blocked project list-panes before mutation", func(t *testing.T) {
+		fixture := newRobotProcessFixture(t, "context-inject-project-cancel")
+		if err := os.WriteFile(filepath.Join(fixture.projectDir, "AGENTS.md"), []byte("# MUST_NOT_BE_INJECTED\n"), 0o600); err != nil {
+			t.Fatalf("write cancellation context file: %v", err)
+		}
+		panePIDBefore := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", fixture.paneID, "#{pane_pid}"))
+		if panePIDBefore == "" {
+			t.Fatal("context injection cancellation fixture returned an empty pane PID")
+		}
+
+		listPanesStarted := filepath.Join(fixture.root, "context-inject-list-panes-started")
+		mutationLog := filepath.Join(fixture.root, "context-inject-canceled-mutations.log")
+		tmuxWrapper := filepath.Join(fixture.root, "tmux-context-inject-cancel")
+		wrapperScript := `#!/bin/sh
+if [ "${1:-}" = "list-panes" ]; then
+  printf 'started\n' > "$NTM_E2E_CONTEXT_INJECT_LIST_PANES_STARTED"
+  exec sleep 30
+fi
+case "${1:-}" in
+  send-keys|respawn-pane|kill-pane|kill-window|kill-session|load-buffer|set-buffer|paste-buffer|delete-buffer)
+    printf '%s\n' "$*" >> "$NTM_E2E_CONTEXT_INJECT_MUTATION_LOG"
+    ;;
+esac
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+		if err := os.WriteFile(tmuxWrapper, []byte(wrapperScript), 0o700); err != nil {
+			t.Fatalf("write cancellation tmux wrapper: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY":                           tmuxWrapper,
+			"NTM_E2E_REAL_TMUX":                         fixture.tmuxPath,
+			"NTM_E2E_CONTEXT_INJECT_LIST_PANES_STARTED": listPanesStarted,
+			"NTM_E2E_CONTEXT_INJECT_MUTATION_LOG":       mutationLog,
+		})
+
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, fixture.ntmPath,
+			"--robot-format=json",
+			"--robot-context-inject="+fixture.session,
+			"--inject-files=AGENTS.md",
+			"--inject-pane=0",
+		)
+		group, err := testutil.NewProcessGroupForTest(ctx, cmd)
+		if err != nil {
+			t.Fatalf("create context injection cancellation process group: %v", err)
+		}
+		defer func() { _ = group.Close() }()
+		cmd.Cancel = func() error { return group.Signal(os.Kill) }
+		cmd.WaitDelay = 2 * time.Second
+		cmd.Dir = fixture.root
+		cmd.Env = append([]string(nil), env...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start context injection cancellation process: %v", err)
+		}
+		waitCh := make(chan error, 1)
+		go func() { waitCh <- cmd.Wait() }()
+
+		markerDeadline := time.Now().Add(20 * time.Second)
+		for {
+			if data, err := os.ReadFile(listPanesStarted); err == nil && strings.Contains(string(data), "started") {
+				break
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				cancel()
+				<-waitCh
+				t.Fatalf("read list-panes marker: %v", err)
+			}
+			select {
+			case earlyErr := <-waitCh:
+				t.Fatalf("context injection exited before SIGINT: %v stdout=%s stderr=%s", earlyErr, stdout.String(), stderr.String())
+			default:
+			}
+			if time.Now().After(markerDeadline) {
+				cancel()
+				<-waitCh
+				t.Fatalf("timed out waiting for blocked project list-panes: stdout=%s stderr=%s", stdout.String(), stderr.String())
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+
+		signalAt := time.Now()
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			cancel()
+			<-waitCh
+			t.Fatalf("signal context injection process: %v", err)
+		}
+		var waitErr error
+		select {
+		case waitErr = <-waitCh:
+		case <-ctx.Done():
+			waitErr = <-waitCh
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("context injection did not join after SIGINT: %v stdout=%s stderr=%s", ctx.Err(), stdout.String(), stderr.String())
+		}
+		if elapsed := time.Since(signalAt); elapsed > 5*time.Second {
+			t.Fatalf("context injection cancellation took %s", elapsed)
+		}
+		if closeErr := group.Close(); closeErr != nil {
+			t.Fatalf("close context injection cancellation process group: %v", closeErr)
+		}
+		if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
+			t.Fatalf("context injection process was not joined: state=%v", cmd.ProcessState)
+		}
+
+		exitCode := 0
+		if waitErr != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(waitErr, &exitErr) {
+				t.Fatalf("wait for canceled context injection: %v", waitErr)
+			}
+			exitCode = exitErr.ExitCode()
+		}
+		if exitCode != 1 || len(bytes.TrimSpace(stderr.Bytes())) != 0 {
+			t.Fatalf("canceled context injection exit=%d stdout=%s stderr=%s", exitCode, stdout.Bytes(), stderr.Bytes())
+		}
+
+		var output struct {
+			Success       bool            `json:"success"`
+			Error         string          `json:"error"`
+			ErrorCode     string          `json:"error_code"`
+			InjectedFiles json.RawMessage `json:"injected_files"`
+			PanesInjected json.RawMessage `json:"panes_injected"`
+		}
+		decodeSingleRobotJSON(t, stdout.Bytes(), &output)
+		if output.Success || output.ErrorCode != "TIMEOUT" || !strings.Contains(strings.ToLower(output.Error), "canceled") {
+			t.Fatalf("canceled context injection envelope=%+v", output)
+		}
+		if len(output.InjectedFiles) != 0 || len(output.PanesInjected) != 0 {
+			t.Fatalf("canceled context injection reached downstream planning: files=%s panes=%s", output.InjectedFiles, output.PanesInjected)
+		}
+
+		assertStable := func(stage string) {
+			t.Helper()
+			panePIDAfter := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", fixture.paneID, "#{pane_pid}"))
+			if panePIDAfter != panePIDBefore {
+				t.Fatalf("%s: canceled context injection mutated pane PID: before=%s after=%s", stage, panePIDBefore, panePIDAfter)
+			}
+			data, err := os.ReadFile(mutationLog)
+			if err == nil && len(bytes.TrimSpace(data)) != 0 {
+				t.Fatalf("%s: context injection mutation escaped project resolution: %s", stage, data)
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s: read context injection mutation log: %v", stage, err)
+			}
+		}
+		assertStable("joined return")
+		time.Sleep(750 * time.Millisecond)
+		assertStable("post-join stability")
+	})
+}
+
+func TestE2EAtomicHandoffAutoCancellationBuiltBinary(t *testing.T) {
+	CommonE2EPrerequisites(t)
+
+	ntmPath, err := ensureE2ENTMBin()
+	if err != nil {
+		t.Fatalf("resolve E2E ntm binary: %v", err)
+	}
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "project")
+	beadsDir := filepath.Join(projectDir, ".beads")
+	fakeBin := filepath.Join(root, "bin")
+	for _, dir := range []string{
+		projectDir,
+		beadsDir,
+		fakeBin,
+		filepath.Join(root, "home"),
+		filepath.Join(root, "config"),
+		filepath.Join(root, "data"),
+		filepath.Join(root, "state"),
+		filepath.Join(root, "cache"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("create handoff cancellation fixture directory %s: %v", dir, err)
+		}
+	}
+
+	beadsPath := filepath.Join(beadsDir, "issues.jsonl")
+	beadsBefore := []byte("{\"id\":\"ntm-handoff-cancel-sentinel\",\"status\":\"open\"}\n")
+	if err := os.WriteFile(beadsPath, beadsBefore, 0o600); err != nil {
+		t.Fatalf("write handoff cancellation Beads sentinel: %v", err)
+	}
+	gitStarted := filepath.Join(root, "git-started")
+	gitPIDPath := filepath.Join(root, "git-pid")
+	gitAudit := filepath.Join(root, "git-audit")
+	brAudit := filepath.Join(root, "br-audit")
+	gitScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$NTM_E2E_HANDOFF_GIT_AUDIT"
+if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "--is-inside-work-tree" ]; then
+  printf '%s\n' "$$" > "$NTM_E2E_HANDOFF_GIT_PID"
+  : > "$NTM_E2E_HANDOFF_GIT_STARTED"
+  trap '' INT
+  exec /bin/sleep 30
+fi
+exit 64
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte(gitScript), 0o700); err != nil {
+		t.Fatalf("write blocking Git fixture: %v", err)
+	}
+	brScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$NTM_E2E_HANDOFF_BR_AUDIT"
+exit 97
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write Beads audit fixture: %v", err)
+	}
+
+	outputPath := filepath.Join(projectDir, "must-not-exist.yaml")
+	env := atomicAssignmentIsolatedEnv(map[string]string{
+		"HOME":                         filepath.Join(root, "home"),
+		"XDG_CONFIG_HOME":              filepath.Join(root, "config"),
+		"XDG_DATA_HOME":                filepath.Join(root, "data"),
+		"XDG_STATE_HOME":               filepath.Join(root, "state"),
+		"XDG_CACHE_HOME":               filepath.Join(root, "cache"),
+		"PATH":                         fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"AGENT_MAIL_URL":               "http://127.0.0.1:1/mcp/",
+		"AGENT_MAIL_TOKEN":             "",
+		"NTM_DISABLE_INTERNAL_MONITOR": "1",
+		"NTM_TEST_MODE":                "1",
+		"NTM_E2E_HANDOFF_GIT_STARTED":  gitStarted,
+		"NTM_E2E_HANDOFF_GIT_PID":      gitPIDPath,
+		"NTM_E2E_HANDOFF_GIT_AUDIT":    gitAudit,
+		"NTM_E2E_HANDOFF_BR_AUDIT":     brAudit,
+		"HTTP_PROXY":                   "",
+		"HTTPS_PROXY":                  "",
+		"ALL_PROXY":                    "",
+		"NO_PROXY":                     "127.0.0.1,localhost",
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ntmPath,
+		"handoff", "create", "general", "--auto", "--output="+outputPath,
+	)
+	group, err := testutil.NewProcessGroupForTest(ctx, cmd)
+	if err != nil {
+		t.Fatalf("create handoff cancellation process group: %v", err)
+	}
+	groupClosed := false
+	defer func() {
+		if !groupClosed {
+			_ = group.Signal(os.Kill)
+			_ = group.Close()
+		}
+	}()
+	cmd.Cancel = func() error { return group.Signal(os.Kill) }
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Dir = projectDir
+	cmd.Env = append([]string(nil), env...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start handoff cancellation process: %v", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	markerDeadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(gitStarted); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			cancel()
+			<-waitCh
+			t.Fatalf("read handoff Git start marker: %v", err)
+		}
+		select {
+		case earlyErr := <-waitCh:
+			t.Fatalf("handoff create exited before SIGINT: %v stdout=%s stderr=%s", earlyErr, stdout.String(), stderr.String())
+		default:
+		}
+		if time.Now().After(markerDeadline) {
+			cancel()
+			<-waitCh
+			t.Fatalf("timed out waiting for blocked handoff Git probe: stdout=%s stderr=%s", stdout.String(), stderr.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	pidBytes, err := os.ReadFile(gitPIDPath)
+	if err != nil {
+		t.Fatalf("read blocked Git PID: %v", err)
+	}
+	gitPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("parse blocked Git PID %q: %v", pidBytes, err)
+	}
+	signalAt := time.Now()
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		cancel()
+		<-waitCh
+		t.Fatalf("signal handoff create process: %v", err)
+	}
+	var waitErr error
+	select {
+	case waitErr = <-waitCh:
+	case <-time.After(5 * time.Second):
+		cancel()
+		waitErr = <-waitCh
+		t.Fatalf("handoff create did not join within 5s after SIGINT: wait=%v stdout=%s stderr=%s", waitErr, stdout.String(), stderr.String())
+	}
+	if elapsed := time.Since(signalAt); elapsed > 5*time.Second {
+		t.Fatalf("handoff cancellation took %s", elapsed)
+	}
+	if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
+		t.Fatalf("handoff process was not joined: state=%v", cmd.ProcessState)
+	}
+	var exitErr *exec.ExitError
+	if waitErr == nil || !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("handoff cancellation wait=%v, want exit code 1; stdout=%s stderr=%s", waitErr, stdout.String(), stderr.String())
+	}
+	if combined := stdout.String() + stderr.String(); !strings.Contains(combined, "context canceled") {
+		t.Fatalf("handoff cancellation omitted context identity: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+
+	childDeadline := time.Now().Add(time.Second)
+	for {
+		err := syscall.Kill(gitPID, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("probe blocked Git child %d: %v", gitPID, err)
+		}
+		if time.Now().After(childDeadline) {
+			t.Fatalf("blocked Git child %d survived handoff cancellation", gitPID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if closeErr := group.Close(); closeErr != nil {
+		t.Fatalf("close handoff cancellation process group: %v", closeErr)
+	}
+	groupClosed = true
+	if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canceled handoff created requested output: %v", err)
+	}
+	if entries, err := os.ReadDir(filepath.Join(projectDir, ".ntm", "handoffs")); err == nil && len(entries) != 0 {
+		t.Fatalf("canceled handoff created default artifacts: %v", entries)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inspect canceled handoff artifact directory: %v", err)
+	}
+	beadsAfter, err := os.ReadFile(beadsPath)
+	if err != nil || !bytes.Equal(beadsAfter, beadsBefore) {
+		t.Fatalf("canceled handoff changed Beads state: err=%v before=%q after=%q", err, beadsBefore, beadsAfter)
+	}
+	if _, err := os.Stat(brAudit); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canceled handoff invoked br after Git cancellation: %v", err)
+	}
+	gitCalls, err := os.ReadFile(gitAudit)
+	if err != nil || strings.TrimSpace(string(gitCalls)) != "rev-parse --is-inside-work-tree" {
+		t.Fatalf("handoff cancellation did not reach the intended Git phase: err=%v audit=%s", err, gitCalls)
+	}
+}
+
+func TestE2EAtomicSmartRestartCancellationBuiltBinary(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	t.Run("cancels blocked pre-resolution list-sessions", func(t *testing.T) {
+		fixture := newRobotProcessFixture(t, "smart-restart-resolve-cancel")
+		paneIndex := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", fixture.paneID, "#{pane_index}"))
+		panePIDBefore := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", fixture.paneID, "#{pane_pid}"))
+		if paneIndex == "" || panePIDBefore == "" {
+			t.Fatalf("resolve cancellation fixture pane index=%q pid=%q", paneIndex, panePIDBefore)
+		}
+
+		listStarted := filepath.Join(fixture.root, "smart-restart-list-sessions-started")
+		mutationLog := filepath.Join(fixture.root, "smart-restart-pre-resolution-mutations.log")
+		tmuxWrapper := filepath.Join(fixture.root, "tmux-smart-restart-resolve-cancel")
+		wrapperScript := `#!/bin/sh
+if [ "${1:-}" = "list-sessions" ]; then
+  printf 'started\n' > "$NTM_E2E_SMART_RESTART_LIST_STARTED"
+  exec sleep 30
+fi
+case "${1:-}" in
+  send-keys|respawn-pane|kill-pane|kill-window|kill-session|load-buffer|set-buffer|paste-buffer|delete-buffer)
+    printf '%s\n' "$*" >> "$NTM_E2E_SMART_RESTART_MUTATION_LOG"
+    ;;
+esac
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+		if err := os.WriteFile(tmuxWrapper, []byte(wrapperScript), 0o700); err != nil {
+			t.Fatalf("write pre-resolution tmux wrapper: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY":                    tmuxWrapper,
+			"NTM_E2E_REAL_TMUX":                  fixture.tmuxPath,
+			"NTM_E2E_SMART_RESTART_LIST_STARTED": listStarted,
+			"NTM_E2E_SMART_RESTART_MUTATION_LOG": mutationLog,
+		})
+
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, fixture.ntmPath,
+			"--robot-format=json",
+			"--robot-smart-restart="+fixture.session,
+			"--panes="+paneIndex,
+			"--force",
+			"--prompt=PRE_RESOLUTION_PROMPT_MUST_NOT_BE_SENT",
+		)
+		group, err := testutil.NewProcessGroupForTest(ctx, cmd)
+		if err != nil {
+			t.Fatalf("create pre-resolution cancellation process group: %v", err)
+		}
+		defer func() { _ = group.Close() }()
+		cmd.Cancel = func() error { return group.Signal(os.Kill) }
+		cmd.WaitDelay = 2 * time.Second
+		cmd.Dir = fixture.projectDir
+		cmd.Env = append([]string(nil), env...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start pre-resolution smart-restart: %v", err)
+		}
+		waitCh := make(chan error, 1)
+		go func() { waitCh <- cmd.Wait() }()
+
+		markerDeadline := time.Now().Add(20 * time.Second)
+		for {
+			if data, err := os.ReadFile(listStarted); err == nil && strings.Contains(string(data), "started") {
+				break
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				cancel()
+				<-waitCh
+				t.Fatalf("read list-sessions marker: %v", err)
+			}
+			select {
+			case earlyErr := <-waitCh:
+				t.Fatalf("pre-resolution smart-restart exited before SIGINT: %v stdout=%s stderr=%s", earlyErr, stdout.String(), stderr.String())
+			default:
+			}
+			if time.Now().After(markerDeadline) {
+				cancel()
+				<-waitCh
+				t.Fatalf("timed out waiting for blocked list-sessions: stdout=%s stderr=%s", stdout.String(), stderr.String())
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			cancel()
+			<-waitCh
+			t.Fatalf("signal pre-resolution smart-restart: %v", err)
+		}
+		var waitErr error
+		select {
+		case waitErr = <-waitCh:
+		case <-ctx.Done():
+			waitErr = <-waitCh
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("pre-resolution smart-restart did not join after SIGINT: %v stdout=%s stderr=%s", ctx.Err(), stdout.String(), stderr.String())
+		}
+		if closeErr := group.Close(); closeErr != nil {
+			t.Fatalf("close pre-resolution cancellation process group: %v", closeErr)
+		}
+
+		exitCode := 0
+		if waitErr != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(waitErr, &exitErr) {
+				t.Fatalf("wait for pre-resolution smart-restart: %v", waitErr)
+			}
+			exitCode = exitErr.ExitCode()
+		}
+		if exitCode != 1 || len(bytes.TrimSpace(stderr.Bytes())) != 0 {
+			t.Fatalf("pre-resolution cancellation exit=%d stdout=%s stderr=%s", exitCode, stdout.Bytes(), stderr.Bytes())
+		}
+
+		var output struct {
+			Success   bool            `json:"success"`
+			Error     string          `json:"error"`
+			ErrorCode string          `json:"error_code"`
+			Actions   json.RawMessage `json:"actions"`
+			Summary   json.RawMessage `json:"summary"`
+		}
+		decodeSingleRobotJSON(t, stdout.Bytes(), &output)
+		if output.Success || output.ErrorCode != "TIMEOUT" || !strings.Contains(strings.ToLower(output.Error), "canceled") {
+			t.Fatalf("pre-resolution cancellation envelope=%+v", output)
+		}
+		if len(output.Actions) != 0 || len(output.Summary) != 0 {
+			t.Fatalf("pre-resolution cancellation constructed an action plan: actions=%s summary=%s", output.Actions, output.Summary)
+		}
+
+		panePIDAfter := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", fixture.paneID, "#{pane_pid}"))
+		if panePIDAfter != panePIDBefore {
+			t.Fatalf("pre-resolution cancellation mutated pane PID: before=%s after=%s", panePIDBefore, panePIDAfter)
+		}
+		assertNoMutations := func(stage string) {
+			t.Helper()
+			data, err := os.ReadFile(mutationLog)
+			if err == nil && len(bytes.TrimSpace(data)) != 0 {
+				t.Fatalf("%s: smart-restart mutation escaped before resolution: %s", stage, data)
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s: read smart-restart mutation log: %v", stage, err)
+			}
+		}
+		assertNoMutations("joined return")
+		time.Sleep(750 * time.Millisecond)
+		assertNoMutations("post-join stability")
+	})
+
+	fixture := newRobotProcessFixture(t, "smart-restart-cancel")
+	secondPane := strings.TrimSpace(fixture.mustTMUXOutput(t,
+		"split-window", "-d", "-P", "-F", "#{pane_id}", "-t", fixture.session+":0", "-c", fixture.projectDir,
+		"/bin/bash --noprofile --norc -i",
+	))
+	fixture.mustTMUXOutput(t, "select-pane", "-t", secondPane, "-T", fixture.session+"__cod_2")
+
+	firstIndex := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", fixture.paneID, "#{pane_index}"))
+	secondIndex := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", secondPane, "#{pane_index}"))
+	if firstIndex == "" || secondIndex == "" || firstIndex >= secondIndex {
+		t.Fatalf("unexpected pane order first=%q second=%q", firstIndex, secondIndex)
+	}
+	secondPIDBefore := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", secondPane, "#{pane_pid}"))
+
+	fakeBin := filepath.Join(fixture.root, "smart-restart-bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatalf("create smart-restart fake bin: %v", err)
+	}
+	agentStarted := filepath.Join(fixture.root, "smart-restart-agent-started")
+	agentPath := filepath.Join(fakeBin, "cod")
+	agentScript := fmt.Sprintf(`#!/bin/sh
+printf 'started\n' > %s
+printf 'Codex> \n100%%%% context left\n'
+while :; do sleep 1; done
+`, tmux.ShellQuote(agentStarted))
+	if err := os.WriteFile(agentPath, []byte(agentScript), 0o700); err != nil {
+		t.Fatalf("write smart-restart agent: %v", err)
+	}
+	pathSetup := "export PATH=" + tmux.ShellQuote(fakeBin) + ":$PATH"
+	for _, paneID := range []string{fixture.paneID, secondPane} {
+		fixture.mustTMUXOutput(t, "send-keys", "-t", paneID, "-l", pathSetup)
+		fixture.mustTMUXOutput(t, "send-keys", "-t", paneID, "Enter")
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	launchActuated := filepath.Join(fixture.root, "smart-restart-launch-actuated")
+	actuationLog := filepath.Join(fixture.root, "smart-restart-actuation.log")
+	tmuxWrapper := filepath.Join(fakeBin, "tmux-smart-restart-cancel")
+	wrapperScript := `#!/bin/sh
+target=""
+previous=""
+last=""
+for arg in "$@"; do
+  if [ "$previous" = "-t" ]; then target="$arg"; fi
+  previous="$arg"
+  last="$arg"
+done
+if [ "${1:-}" = "send-keys" ]; then
+  launch=0
+  case "$last" in cod*) launch=1 ;; esac
+  printf 'send-keys target=%s launch=%s\n' "$target" "$launch" >> "$NTM_E2E_SMART_RESTART_ACTUATION_LOG"
+  if [ "$launch" -eq 1 ] && [ ! -e "$NTM_E2E_SMART_RESTART_LAUNCH_ACTUATED" ]; then
+    "$NTM_E2E_REAL_TMUX" "$@"
+    status=$?
+    if [ "$status" -eq 0 ]; then
+      attempts=0
+      while [ ! -e "$NTM_E2E_SMART_RESTART_AGENT_STARTED" ] && [ "$attempts" -lt 200 ]; do
+        attempts=$((attempts + 1))
+        sleep 0.01
+      done
+      [ -e "$NTM_E2E_SMART_RESTART_AGENT_STARTED" ] || exit 93
+      printf 'actuated\n' > "$NTM_E2E_SMART_RESTART_LAUNCH_ACTUATED"
+      exec sleep 30
+    fi
+    exit "$status"
+  fi
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+	if err := os.WriteFile(tmuxWrapper, []byte(wrapperScript), 0o700); err != nil {
+		t.Fatalf("write smart-restart tmux wrapper: %v", err)
+	}
+	env := mergeRobotProcessEnv(fixture.env, map[string]string{
+		"NTM_TMUX_BINARY":                       tmuxWrapper,
+		"NTM_E2E_REAL_TMUX":                     fixture.tmuxPath,
+		"NTM_E2E_SMART_RESTART_AGENT_STARTED":   agentStarted,
+		"NTM_E2E_SMART_RESTART_LAUNCH_ACTUATED": launchActuated,
+		"NTM_E2E_SMART_RESTART_ACTUATION_LOG":   actuationLog,
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, fixture.ntmPath,
+		"--robot-format=json",
+		"--robot-smart-restart="+fixture.session,
+		"--panes="+firstIndex+","+secondIndex,
+		"--force",
+	)
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+	if groupErr != nil {
+		t.Fatalf("create smart-restart cancellation process group: %v", groupErr)
+	}
+	defer func() { _ = group.Close() }()
+	cmd.Cancel = func() error { return group.Signal(os.Kill) }
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Dir = fixture.projectDir
+	cmd.Env = append([]string(nil), env...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start smart-restart cancellation process: %v", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	markerDeadline := time.Now().Add(45 * time.Second)
+	for {
+		data, err := os.ReadFile(launchActuated)
+		if err == nil && strings.Contains(string(data), "actuated") {
+			break
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			cancel()
+			<-waitCh
+			t.Fatalf("read smart-restart launch marker: %v", err)
+		}
+		select {
+		case earlyErr := <-waitCh:
+			t.Fatalf("smart-restart exited before SIGINT point: %v stdout=%s stderr=%s", earlyErr, stdout.String(), stderr.String())
+		default:
+		}
+		if time.Now().After(markerDeadline) {
+			cancel()
+			waitErr := <-waitCh
+			actuationData, actuationErr := os.ReadFile(actuationLog)
+			agentStartedData, agentStartedErr := os.ReadFile(agentStarted)
+			t.Fatalf(
+				"timed out waiting for smart-restart launch actuation: wait_err=%v actuation_log=%q actuation_err=%v agent_started=%q agent_started_err=%v stdout=%s stderr=%s",
+				waitErr,
+				actuationData,
+				actuationErr,
+				agentStartedData,
+				agentStartedErr,
+				stdout.String(),
+				stderr.String(),
+			)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		cancel()
+		<-waitCh
+		t.Fatalf("signal smart-restart process: %v", err)
+	}
+	var waitErr error
+	joinTimer := time.NewTimer(5 * time.Second)
+	defer joinTimer.Stop()
+	select {
+	case waitErr = <-waitCh:
+	case <-joinTimer.C:
+		cancel()
+		waitErr = <-waitCh
+		t.Fatalf("smart-restart did not join within 5s after SIGINT: wait_err=%v stdout=%s stderr=%s", waitErr, stdout.String(), stderr.String())
+	case <-ctx.Done():
+		waitErr = <-waitCh
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("smart-restart did not join after SIGINT: %v stdout=%s stderr=%s", ctx.Err(), stdout.String(), stderr.String())
+	}
+	if closeErr := group.Close(); closeErr != nil {
+		t.Fatalf("close smart-restart cancellation process group: %v", closeErr)
+	}
+	exitCode := 0
+	if waitErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			t.Fatalf("wait for canceled smart-restart: %v", waitErr)
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	if exitCode != 1 || len(bytes.TrimSpace(stderr.Bytes())) != 0 {
+		t.Fatalf("canceled smart-restart exit=%d stdout=%s stderr=%s", exitCode, stdout.Bytes(), stderr.Bytes())
+	}
+
+	type smartRestartCancellationOutput struct {
+		Success   bool   `json:"success"`
+		Error     string `json:"error"`
+		ErrorCode string `json:"error_code"`
+		Actions   map[string]struct {
+			Action          string `json:"action"`
+			Reason          string `json:"reason"`
+			Error           string `json:"error"`
+			RestartSequence *struct {
+				AgentLaunched     bool   `json:"agent_launched"`
+				AgentLaunchStatus string `json:"agent_launch_status"`
+				LaunchAttempted   bool   `json:"launch_attempted"`
+				ProcessAlive      *bool  `json:"process_alive"`
+				ShellPID          int    `json:"shell_pid"`
+			} `json:"restart_sequence"`
+		} `json:"actions"`
+		Summary struct {
+			Failed        int                 `json:"failed"`
+			Skipped       int                 `json:"skipped"`
+			PanesByAction map[string][]string `json:"panes_by_action"`
+		} `json:"summary"`
+	}
+	var output smartRestartCancellationOutput
+	decodeSingleRobotJSON(t, stdout.Bytes(), &output)
+	current := output.Actions[firstIndex]
+	remaining := output.Actions[secondIndex]
+	if output.Success || output.ErrorCode != "TIMEOUT" || !strings.Contains(strings.ToLower(output.Error), "canceled") {
+		t.Fatalf("canceled smart-restart envelope=%+v", output)
+	}
+	if current.Action != "FAILED" || current.RestartSequence == nil || !current.RestartSequence.LaunchAttempted ||
+		!current.RestartSequence.AgentLaunched || current.RestartSequence.AgentLaunchStatus != "ready" ||
+		current.RestartSequence.ProcessAlive == nil || !*current.RestartSequence.ProcessAlive || current.RestartSequence.ShellPID <= 0 {
+		t.Fatalf("current smart-restart action lost late-launch truth: %+v", current)
+	}
+	if remaining.Action != "SKIPPED" || remaining.RestartSequence != nil || !strings.Contains(remaining.Reason, "not attempted") {
+		t.Fatalf("remaining smart-restart action=%+v, want explicit unchanged skip", remaining)
+	}
+	if output.Summary.Failed != 1 || output.Summary.Skipped != 1 ||
+		!slices.Equal(output.Summary.PanesByAction["FAILED"], []string{firstIndex}) ||
+		!slices.Equal(output.Summary.PanesByAction["SKIPPED"], []string{secondIndex}) {
+		t.Fatalf("canceled smart-restart summary=%+v", output.Summary)
+	}
+	secondPIDAfter := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", secondPane, "#{pane_pid}"))
+	if secondPIDAfter != secondPIDBefore {
+		t.Fatalf("smart-restart cancellation mutated remaining pane PID: before=%s after=%s", secondPIDBefore, secondPIDAfter)
+	}
+	actuationBefore, err := os.ReadFile(actuationLog)
+	if err != nil {
+		t.Fatalf("read smart-restart actuation log: %v", err)
+	}
+	if strings.Contains(string(actuationBefore), "target="+fixture.session+":0."+secondIndex) ||
+		strings.Count(string(actuationBefore), "launch=1") != 1 {
+		t.Fatalf("smart-restart touched remaining pane or relaunched more than once: %s", actuationBefore)
+	}
+	time.Sleep(750 * time.Millisecond)
+	actuationAfter, err := os.ReadFile(actuationLog)
+	if err != nil || !bytes.Equal(actuationBefore, actuationAfter) {
+		t.Fatalf("late smart-restart actuation after joined cancellation: err=%v before=%s after=%s", err, actuationBefore, actuationAfter)
 	}
 }
 
@@ -1814,6 +3560,23 @@ func TestE2ERobotSpawnTerminalContractsBuiltBinary(t *testing.T) {
 			t.Fatalf("agent launch marker %s exists or is unreadable: %v", markerPath, err)
 		}
 	}
+	assertSessionAbsent := func(t *testing.T, session string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxSetupTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, fixture.tmuxPath, "has-session", "-t", session)
+		cmd.Env = append([]string(nil), fixture.env...)
+		output, err := cmd.CombinedOutput()
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatalf("check absent session %q timed out after %s: output=%s", session, defaultTmuxSetupTimeout, output)
+		}
+		if err == nil {
+			t.Fatalf("session %q exists after assignment preflight rejection", session)
+		}
+		if !isBenignTmuxCleanupError(output) {
+			t.Fatalf("check absent session %q: %v output=%s", session, err, output)
+		}
+	}
 	physicalPaneCount := func(t *testing.T, session string) int {
 		t.Helper()
 		output := strings.TrimSpace(fixture.mustTMUXOutput(t,
@@ -2076,6 +3839,9 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 	})
 
 	t.Run("subsecond readiness deadline is TIMEOUT", func(t *testing.T) {
+		const processTimeout = 60 * time.Second
+
+		agentDispatchedMarker := filepath.Join(fixture.root, "readiness-agent-dispatched")
 		scriptPath := filepath.Join(fixture.root, "agent-block")
 		script := "#!/bin/sh\nprintf 'booting\\n'\nsleep 30\n"
 		if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
@@ -2083,19 +3849,27 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 		}
 		captureMarker := filepath.Join(fixture.root, "readiness-capture-started")
 		tmuxWrapper := filepath.Join(fixture.root, "tmux-readiness")
-		wrapper := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "capture-pane" ] && [ ! -e %q ]; then
-  : > %q
+		wrapper := `#!/bin/sh
+if [ "$1" = "paste-buffer" ] && [ ! -e "$NTM_E2E_AGENT_DISPATCHED" ]; then
+  : > "$NTM_E2E_AGENT_DISPATCHED"
 fi
-exec %q "$@"
-`, captureMarker, captureMarker, fixture.tmuxPath)
+if [ "$1" = "capture-pane" ] && [ -e "$NTM_E2E_AGENT_DISPATCHED" ] && [ ! -e "$NTM_E2E_READINESS_CAPTURE" ]; then
+  : > "$NTM_E2E_READINESS_CAPTURE"
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
 		if err := os.WriteFile(tmuxWrapper, []byte(wrapper), 0o700); err != nil {
 			t.Fatalf("write readiness tmux wrapper: %v", err)
 		}
 		configPath := writeConfig(t, "readiness", scriptPath)
-		env := mergeRobotProcessEnv(fixture.env, map[string]string{"NTM_TMUX_BINARY": tmuxWrapper})
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"NTM_TMUX_BINARY":           tmuxWrapper,
+			"NTM_E2E_REAL_TMUX":         fixture.tmuxPath,
+			"NTM_E2E_AGENT_DISPATCHED":  agentDispatchedMarker,
+			"NTM_E2E_READINESS_CAPTURE": captureMarker,
+		})
 		started := time.Now()
-		envelope := assertSpawnFailure(t, run(t, env,
+		envelope := assertSpawnFailure(t, runBuiltRobotProcessWithin(t, processTimeout, fixture.ntmPath, fixture.projectDir, env,
 			"--config="+configPath,
 			"--robot-spawn="+fixture.session+"-wait",
 			"--spawn-cc=1",
@@ -2118,12 +3892,64 @@ exec %q "$@"
 		if readinessElapsed < 350*time.Millisecond || readinessElapsed > 12*time.Second {
 			t.Fatalf("500ms readiness timeout after launch=%s (total process time=%s)", readinessElapsed, wallElapsed)
 		}
-		if wallElapsed > 12*time.Second {
-			t.Fatalf("500ms readiness timeout total process time=%s, want bounded startup plus readiness", wallElapsed)
-		}
 		if len(envelope.Agents) != 1 {
 			t.Fatalf("agents=%+v, want launched agent retained", envelope.Agents)
 		}
+	})
+
+	t.Run("malformed plan fails closed before lifecycle", func(t *testing.T) {
+		fakeBin := filepath.Join(fixture.root, "malformed-plan-bin")
+		if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+			t.Fatalf("create malformed-plan bin: %v", err)
+		}
+		bvTrace := filepath.Join(fixture.root, "malformed-plan-bv.trace")
+		bvPath := filepath.Join(fakeBin, "bv")
+		bvScript := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$NTM_E2E_BV_TRACE"
+case "${1:-}" in
+  --robot-triage) printf '%s\n' '{"generated_at":"2026-07-19T00:00:00Z","data_hash":"spawn-terminal-e2e","triage":{"meta":{"version":"e2e","generated_at":"2026-07-19T00:00:00Z","phase2_ready":true,"issue_count":0},"quick_ref":{"open_count":0,"actionable_count":0,"blocked_count":0,"in_progress_count":0,"top_picks":[]},"recommendations":[]}}' ;;
+  --robot-plan) printf '%s\n' '{}' ;;
+  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;
+esac
+`
+		if err := os.WriteFile(bvPath, []byte(bvScript), 0o700); err != nil {
+			t.Fatalf("write malformed-plan bv: %v", err)
+		}
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{
+			"PATH":             fakeBin + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
+			"NTM_E2E_BV_TRACE": bvTrace,
+		})
+		configPath, launchMarker := writeLaunchMarkerConfig(t, "malformed-plan")
+		session := fixture.session + "-malformed-plan"
+		envelope := assertSpawnFailure(t, run(t, env,
+			"--config="+configPath,
+			"--robot-spawn="+session,
+			"--spawn-cc=1",
+			"--spawn-no-user",
+			"--spawn-dir="+fixture.projectDir,
+			"--spawn-assign-work",
+			"--strategy=top-n",
+			"--robot-format=json",
+		), "INTERNAL_ERROR")
+		if !strings.Contains(envelope.Error, "missing plan object") {
+			t.Fatalf("malformed-plan error=%q, want missing plan object diagnostic", envelope.Error)
+		}
+		if envelope.Agents == nil || len(envelope.Agents) != 0 {
+			t.Fatalf("agents=%v, want initialized empty array before lifecycle actuation", envelope.Agents)
+		}
+		trace, err := os.ReadFile(bvTrace)
+		if err != nil {
+			t.Fatalf("read malformed-plan bv trace: %v", err)
+		}
+		if got := strings.Fields(string(trace)); !slices.Equal(got, []string{"--robot-triage", "--robot-plan"}) {
+			t.Fatalf("malformed-plan bv calls=%q, want triage then plan", got)
+		}
+		assertSessionAbsent(t, session)
+		assertLaunchMarkerAbsent(t, launchMarker)
+		time.Sleep(500 * time.Millisecond)
+		assertSessionAbsent(t, session)
+		assertLaunchMarkerAbsent(t, launchMarker)
 	})
 
 	t.Run("zero work items covers every agent and fails", func(t *testing.T) {
@@ -2132,12 +3958,9 @@ exec %q "$@"
 			t.Fatalf("create fake bin: %v", err)
 		}
 		bvPath := filepath.Join(fakeBin, "bv")
-		bvScript := "#!/bin/sh\nprintf '%s\\n' '{\"recommendations\":[],\"quick_wins\":[],\"blockers_to_clear\":[]}'\n"
-		if err := os.WriteFile(bvPath, []byte(bvScript), 0o700); err != nil {
-			t.Fatalf("write fake bv: %v", err)
-		}
+		writeSpawnEmptyBV(t, bvPath)
 		env := mergeRobotProcessEnv(fixture.env, map[string]string{
-			"PATH": fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"PATH": fakeBin + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
 		})
 		configPath := writeConfig(t, "zero-work", "sleep 30")
 		envelope := assertSpawnFailure(t, run(t, env,

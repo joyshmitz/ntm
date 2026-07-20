@@ -86,7 +86,7 @@ Examples:
 			if noTUI {
 				return runDashboardPlain(cmd.OutOrStdout(), cmd.ErrOrStderr(), session)
 			}
-			return runDashboard(cmd.OutOrStdout(), cmd.ErrOrStderr(), session, debug, popup, attentionCursor, inferredFlag)
+			return runDashboard(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), session, debug, popup, attentionCursor, inferredFlag)
 		},
 	}
 
@@ -348,6 +348,7 @@ func dashboardPaneTypeSummary(panes []tmux.Pane) string {
 		"claude":   0,
 		"codex":    0,
 		"gemini":   0,
+		"grok":     0,
 		"cursor":   0,
 		"windsurf": 0,
 		"aider":    0,
@@ -359,7 +360,7 @@ func dashboardPaneTypeSummary(panes []tmux.Pane) string {
 
 	for _, pane := range panes {
 		switch normalizedType := normalizeAgentType(string(pane.Type)); normalizedType {
-		case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "oc", "ollama", "user":
+		case "claude", "codex", "gemini", "grok", "cursor", "windsurf", "aider", "oc", "ollama", "user":
 			counts[normalizedType]++
 		default:
 			counts["other"]++
@@ -367,10 +368,11 @@ func dashboardPaneTypeSummary(panes []tmux.Pane) string {
 	}
 
 	return fmt.Sprintf(
-		"Claude=%d Codex=%d Gemini=%d Cursor=%d Windsurf=%d Aider=%d Opencode=%d Ollama=%d User=%d Other=%d",
+		"Claude=%d Codex=%d Gemini=%d Grok=%d Cursor=%d Windsurf=%d Aider=%d Opencode=%d Ollama=%d User=%d Other=%d",
 		counts["claude"],
 		counts["codex"],
 		counts["gemini"],
+		counts["grok"],
 		counts["cursor"],
 		counts["windsurf"],
 		counts["aider"],
@@ -381,7 +383,7 @@ func dashboardPaneTypeSummary(panes []tmux.Pane) string {
 	)
 }
 
-func runDashboard(w io.Writer, errW io.Writer, session string, debug bool, popup bool, attentionCursor int64, inferredFlag bool) error {
+func runDashboard(ctx context.Context, w io.Writer, errW io.Writer, session string, debug bool, popup bool, attentionCursor int64, inferredFlag bool) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
@@ -420,7 +422,7 @@ func runDashboard(w io.Writer, errW io.Writer, session string, debug bool, popup
 		}
 	}
 
-	prefetchCtx, cancelPrefetch := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	prefetchCtx, cancelPrefetch := context.WithTimeout(ctx, 500*time.Millisecond)
 	initialPanes, err := tmux.GetPanesWithActivityContext(prefetchCtx, session)
 	cancelPrefetch()
 	if err != nil {
@@ -432,7 +434,7 @@ func runDashboard(w io.Writer, errW io.Writer, session string, debug bool, popup
 		initialPanes = nil
 	}
 
-	projectDir := resolveCommandProjectDirForSession(session, inferred)
+	projectDir := resolveCommandProjectDirForSession(ctx, session, inferred)
 	if projectDir == "" && !inferred {
 		return fmt.Errorf("getting project root failed")
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -364,6 +365,67 @@ func TestPrepareBuildsThenRedactsEveryFinalMessageBeforeDelivery(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "secret-for") || strings.Contains(string(encoded), `"Message"`) {
 		t.Fatalf("safe result leaked final message: %s", encoded)
+	}
+}
+
+func TestPrepareRejectsGrokBeforePromptPipelineForSubmitAndStageOnly(t *testing.T) {
+	t.Parallel()
+	panes := []tmux.Pane{
+		testPane("%1", 0, 0, tmux.AgentClaude, ""),
+		testPane("%2", 0, 1, tmux.AgentType(" XAI_GROK_BUILD "), ""),
+		testPane("%3", 0, 2, tmux.AgentCodex, ""),
+	}
+
+	for _, submit := range []bool{true, false} {
+		submit := submit
+		name := "stage_only"
+		if submit {
+			name = "submit"
+		}
+		t.Run(name, func(t *testing.T) {
+			var built, redacted, planned, delivered int
+			service, err := NewService(Ports{
+				Builder: FinalMessageBuilderFunc(func(_ context.Context, in BuildInput) (string, error) {
+					built++
+					return in.BaseMessage, nil
+				}),
+				Redactor: FinalMessageRedactorFunc(func(_ context.Context, _ Target, message string) (RedactionResult, error) {
+					redacted++
+					return RedactionResult{Message: message}, nil
+				}),
+				Protocols: ProtocolPlannerFunc(func(_ context.Context, _ Target, _ bool) (ProtocolPlan, error) {
+					planned++
+					return ProtocolPlan{Protocol: ProtocolStageOnly}, nil
+				}),
+				Deliverer: DelivererFunc(func(context.Context, Delivery) error {
+					delivered++
+					return nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := service.Execute(context.Background(), Request{
+				Session: "proj",
+				Panes:   panes,
+				Message: "work",
+				Submit:  submit,
+			})
+			dispatchErr := requireCode(t, err, ErrPromptDeliveryUnsupported)
+			if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+				t.Fatalf("error = %v, want shared prompt-delivery sentinel", err)
+			}
+			if dispatchErr.Target == nil || dispatchErr.Target.AgentType.Canonical() != tmux.AgentGrok || dispatchErr.Target.Address != "1" {
+				t.Fatalf("unsupported target = %+v, want Grok address 1", dispatchErr.Target)
+			}
+			if built != 0 || redacted != 0 || planned != 0 || delivered != 0 {
+				t.Fatalf("prompt pipeline calls = build:%d redact:%d protocol:%d deliver:%d, want all zero", built, redacted, planned, delivered)
+			}
+			if result.Delivered != 0 || len(result.Targets) != 0 || len(result.Receipts) != 0 {
+				t.Fatalf("rejected mixed request result = %+v", result)
+			}
+		})
 	}
 }
 

@@ -68,7 +68,7 @@ func init() {
 		if opts.Pane == nil {
 			return nil, fmt.Errorf("pane is required")
 		}
-		return buildZoomResponse(opts.Session, *opts.Pane)
+		return buildZoomResponse(ctx, opts.Session, *opts.Pane)
 	})
 }
 
@@ -210,11 +210,11 @@ func runZoom(w io.Writer, session string, paneIdx int, paneSelector string) erro
 	return tmux.AttachOrSwitch(session)
 }
 
-func buildZoomResponse(session string, paneIdx int) (output.SuccessResponse, error) {
+func buildZoomResponse(ctx context.Context, session string, paneIdx int) (output.SuccessResponse, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return output.SuccessResponse{}, err
 	}
-	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	resolvedSession, err := normalizeExplicitLiveSessionName(ctx, session, true)
 	if err != nil {
 		return output.SuccessResponse{}, err
 	}

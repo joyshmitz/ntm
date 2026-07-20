@@ -36,6 +36,11 @@ type AccountRotatorI interface {
 // Returns the project directory path, or empty string if not found.
 type ProjectPathLookup func(sessionPane string) string
 
+type autoRespawnerPromptInjector interface {
+	InjectPrompt(sessionPane, agentType, prompt string) error
+	GetTemplate(name string) string
+}
+
 // RespawnResult tracks the result of a single respawn attempt.
 type RespawnResult struct {
 	Success         bool          `json:"success"`
@@ -131,6 +136,8 @@ type AutoRespawner struct {
 
 	// PromptInjector re-sends marching orders.
 	PromptInjector *PromptInjector
+
+	promptInjectorOverride autoRespawnerPromptInjector
 
 	// PaneSpawner from context package (REUSES EXISTING interface).
 	PaneSpawner ntmcontext.PaneSpawner
@@ -270,6 +277,16 @@ func (r *AutoRespawner) logger() *slog.Logger {
 	return slog.Default()
 }
 
+func (r *AutoRespawner) promptInjector() autoRespawnerPromptInjector {
+	if r.promptInjectorOverride != nil {
+		return r.promptInjectorOverride
+	}
+	if r.PromptInjector == nil {
+		return nil
+	}
+	return r.PromptInjector
+}
+
 // Events returns the stable channel that emits respawn events.
 // Subscribers may keep this channel across Stop/Start cycles.
 func (r *AutoRespawner) Events() <-chan RespawnEvent {
@@ -352,6 +369,15 @@ func (r *AutoRespawner) processLimitEvents(ctx context.Context) {
 				"agent_type", event.AgentType,
 				"pattern", event.Pattern)
 
+			if err := validateAutoRespawnAgentType(event.AgentType); err != nil {
+				canonical := agent.AgentType(event.AgentType).Canonical()
+				r.logger().Warn("[AutoRespawner] capability_rejected",
+					"session_pane", event.SessionPane,
+					"agent_type", canonical,
+					"error", fmt.Errorf("respawn is unavailable for %s: %w", canonical, err))
+				continue
+			}
+
 			// Check retry limits
 			if r.isRetryLimitExceeded(event.SessionPane) {
 				r.logger().Warn("[AutoRespawner] retry_limit_exceeded",
@@ -422,6 +448,11 @@ func (r *AutoRespawner) respawn(ctx context.Context, event LimitEvent) *RespawnR
 		SessionPane: sessionPane,
 		AgentType:   agentType,
 		RespawnedAt: start,
+	}
+	if err := validateAutoRespawnAgentType(agentType); err != nil {
+		result.Error = fmt.Sprintf("respawn is unavailable for %s: %v", agent.AgentType(agentType).Canonical(), err)
+		result.Duration = time.Since(start)
+		return result
 	}
 
 	r.logger().Info("[AutoRespawner] respawn_start",
@@ -554,7 +585,8 @@ func (r *AutoRespawner) respawn(ctx context.Context, event LimitEvent) *RespawnR
 	}
 
 	// Step 7: Re-inject marching orders
-	if err := ctx.Err(); err == nil && r.PromptInjector != nil {
+	injector := r.promptInjector()
+	if err := ctx.Err(); err == nil && injector != nil {
 		prompt, source := r.getMarchingOrders(agentType)
 		r.logger().Info("[AutoRespawner] marching_orders_selected",
 			"session_pane", sessionPane,
@@ -562,7 +594,7 @@ func (r *AutoRespawner) respawn(ctx context.Context, event LimitEvent) *RespawnR
 			"source", source,
 			"prompt_len", len(prompt))
 
-		if err := r.PromptInjector.InjectPrompt(sessionPane, agentType, prompt); err != nil {
+		if err := injector.InjectPrompt(sessionPane, agentType, prompt); err != nil {
 			r.logger().Warn("[AutoRespawner] marching_orders_failed",
 				"session_pane", sessionPane,
 				"error", err)
@@ -592,6 +624,10 @@ func (r *AutoRespawner) respawn(ctx context.Context, event LimitEvent) *RespawnR
 
 // killAgent sends the appropriate kill sequence for the agent type.
 func (r *AutoRespawner) killAgent(ctx context.Context, sessionPane, agentType string) error {
+	if err := agent.AgentType(agentType).ValidateAutomatedRelaunch(); err != nil {
+		return err
+	}
+
 	r.logger().Info("[AutoRespawner] killing_agent",
 		"session_pane", sessionPane,
 		"method", agentType)
@@ -659,6 +695,10 @@ func (r *AutoRespawner) killAgent(ctx context.Context, sessionPane, agentType st
 
 // killWithFallback tries graceful kill first, then force kill if needed.
 func (r *AutoRespawner) killWithFallback(ctx context.Context, sessionPane, agentType string) error {
+	if err := agent.AgentType(agentType).ValidateAutomatedRelaunch(); err != nil {
+		return err
+	}
+
 	if err := r.killAgent(ctx, sessionPane, agentType); err != nil {
 		r.logger().Warn("[AutoRespawner] graceful_kill_failed",
 			"session_pane", sessionPane,
@@ -910,6 +950,10 @@ func (r *AutoRespawner) cdToProject(ctx context.Context, sessionPane string) err
 
 // spawnAgent launches the agent command in the pane.
 func (r *AutoRespawner) spawnAgent(sessionPane, agentType string) error {
+	if err := agent.AgentType(agentType).ValidateAutomatedRelaunch(); err != nil {
+		return err
+	}
+
 	r.logger().Info("[AutoRespawner] spawning_agent",
 		"session_pane", sessionPane,
 		"agent_type", agentType)
@@ -949,6 +993,8 @@ func (r *AutoRespawner) getAgentCommand(agentType string) string {
 		return "cod"
 	case "gmi":
 		return "gmi"
+	case "grok":
+		return ""
 	case "cursor":
 		return "cursor"
 	case "windsurf":
@@ -979,8 +1025,8 @@ func (r *AutoRespawner) getMarchingOrders(agentType string) (string, string) {
 	}
 
 	// Fallback to PromptInjector's default template
-	if r.PromptInjector != nil {
-		return r.PromptInjector.GetTemplate("default"), "injector"
+	if injector := r.promptInjector(); injector != nil {
+		return injector.GetTemplate("default"), "injector"
 	}
 
 	// Ultimate fallback if no injector configured
@@ -1020,6 +1066,14 @@ func normalizeAutoRespawnerAgentType(agentType string) string {
 		return ""
 	}
 	return string(agent.AgentType(normalized).Canonical())
+}
+
+func validateAutoRespawnAgentType(agentType string) error {
+	canonical := agent.AgentType(agentType)
+	if err := canonical.ValidateAutomatedRelaunch(); err != nil {
+		return err
+	}
+	return canonical.ValidateAutomatedPromptDelivery()
 }
 
 func gracefulExitMethodForAgent(agentType string) gracefulExitMethod {

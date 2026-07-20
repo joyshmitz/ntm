@@ -149,10 +149,13 @@ ntm --robot-spawn=research --spawn-grok=1
 ```
 
 NTM launches Grok Build with its official `--always-approve` automation flag.
-Phase one intentionally covers configuration, exact process discovery, launch,
-model/effort arguments, and counts only. Authenticated fullscreen-TUI readiness,
-prompt injection/assignment, and restart behavior are not yet claimed; robot
-`--spawn-wait` and `--spawn-assign-work` therefore fail closed for Grok panes.
+Phase one intentionally covers configuration, model and `--effort` arguments,
+launch, adopt, exact process discovery, status/count/schema/doctor projections,
+and topology-only saved-session restore. Authenticated fullscreen-TUI readiness,
+automated prompt delivery/assignment, interrupt-with-message, restart, and
+restore-time process relaunch are not yet claimed. Those operations fail closed
+before pane mutation; interact with an authenticated Grok pane directly. Robot
+`--spawn-wait` and `--spawn-assign-work` also fail closed for Grok panes.
 
 Use labels when you want multiple coordinated swarms on the same project while
 keeping a shared project directory:
@@ -199,6 +202,21 @@ ntm work graph
 ntm assign payments --auto --strategy=dependency
 ntm assign payments --beads=br-123,br-124 --agent=codex
 ```
+
+Automated assignment treats tracker labels as an authorization boundary. Add
+organization-specific approval labels globally or in `.ntm/config.toml`; project
+labels extend the global list and cannot remove built-in gates:
+
+```toml
+[assign]
+operator_gated_labels = ["security-review", "legal-approval"]
+```
+
+Matching is case-insensitive. NTM requires a structurally valid full actionable
+plan, uses scored triage only to rank IDs authorized by that plan, and restores
+every candidate's labels from both `br ready` and `br list --status open` so
+epics are covered. Any plan command, parse, structure, ID, label lookup, or
+coverage failure stops automated assignment before dispatch.
 
 When `br` and `bv` report that no ready work exists, use the queue-dry flow to
 distinguish a genuinely empty queue from stale coordination state:
@@ -269,7 +287,18 @@ ntm locks force-release payments 42 --note "agent inactive"
 ntm coordinator status payments
 ntm coordinator digest payments
 ntm coordinator conflicts payments
+ntm coordinator enable auto-assign
+ntm coordinator enable digest --interval=30m
+ntm coordinator disable conflict-negotiate
 ```
+
+`coordinator enable` and `disable` persist the selected `--config` file, or the
+global config by default, without replacing unrelated settings or comments.
+Restart an already running `ntm coordinator run` daemon to apply a toggle.
+The selected file may use a `[coordinator]` table or root dotted assignments
+such as `coordinator.auto_assign = false`. A whole-section inline assignment
+such as `coordinator = { auto_assign = false }` is rejected without changing
+the file; convert it to either supported form before toggling a feature.
 
 ### 5. Safety Policy and Approvals
 
@@ -434,6 +463,7 @@ Project-local assets live under `.ntm/` and override built-ins and user defaults
 - `.ntm/personas.toml`
 - `.ntm/recipes.toml`
 - `.ntm/checkpoints/`
+- `.ntm/config.toml` for project-scoped settings such as additional assignment approval labels
 
 Useful config commands:
 
@@ -445,6 +475,12 @@ ntm config get projects_base
 ntm config edit
 ntm config reset
 ```
+
+Configuration loading is strict: unknown fields are errors. The unused TOML
+`[health]` section has been removed; migrate restart and monitoring settings to
+`[resilience]` (`auto_restart`, `max_restarts`, `restart_delay_seconds`,
+`health_check_seconds`, and `crash_threshold`). The `ntm health` command remains
+available and is unrelated to that removed config section.
 
 ## Design Principles
 
@@ -590,7 +626,7 @@ exec ntm "$@"
 ```
 
 Make it executable (`chmod +x ~/bin/ntm-wrapper`) and invoke that instead of `ntm`. Re-run
-`ntm deps -v` through the wrapper to confirm all three CLIs are now detected.
+`ntm deps -v` through the wrapper to confirm all listed CLIs are now detected.
 
 ### A work command has nothing useful to say
 
@@ -641,7 +677,7 @@ of the normal product model.
 - NTM is intentionally `tmux`-centric.
 - Linux and macOS are the primary environments.
 - Some advanced workflows depend on external tools such as Agent Mail, `br`, `bv`, `cass`, or worktree helpers.
-- Grok Build support is currently phase one: launch/discovery/counting work, while authenticated TUI readiness, automated prompt delivery/assignment, and restart are deliberately unsupported.
+- Grok Build support is currently phase one: launch/discovery/counting work, while authenticated TUI readiness, automated prompt delivery/assignment, interrupt-with-message, restart, and restore-time relaunch are deliberately unsupported and fail closed.
 - The system is local-first. It is not a hosted SaaS control plane.
 
 ## Development

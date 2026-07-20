@@ -11,6 +11,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/assign"
 	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -143,9 +144,9 @@ func GetAssignRecommendations(ctx context.Context, opts AssignOptions) ([]Distri
 	if err != nil {
 		return nil, err
 	}
-	readyBeads, err := bv.GetReadyPreviewContext(ctx, projectDir, 50)
+	readyBeads, err := getAssignableBeadPreviews(ctx, projectDir, 50)
 	if err != nil {
-		return nil, fmt.Errorf("read ready Beads work: %w", err)
+		return nil, fmt.Errorf("read actionable Beads work: %w", err)
 	}
 
 	if len(readyBeads) == 0 {
@@ -267,9 +268,9 @@ func GetAssign(ctx context.Context, opts AssignOptions) (*AssignOutput, error) {
 		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Provide a readable project directory for Beads")
 		return output, nil
 	}
-	readyBeads, err := bv.GetReadyPreviewContext(ctx, projectDir, 50)
+	readyBeads, err := getAssignableBeadPreviews(ctx, projectDir, 50)
 	if err != nil {
-		setAssignError(output, fmt.Errorf("read ready Beads work: %w", err), "Ensure br can read the target project's Beads database")
+		setAssignError(output, fmt.Errorf("read actionable Beads work: %w", err), "Ensure bv and br can verify the target project's actionable work and labels")
 		return output, nil
 	}
 	inProgress, err := bv.GetInProgressListContext(ctx, projectDir, 50)
@@ -406,6 +407,124 @@ func assignOptionsProjectDir(opts AssignOptions) (string, error) {
 		return "", fmt.Errorf("resolve assignment project directory: %w", err)
 	}
 	return projectDir, nil
+}
+
+// getAssignableBeadPreviews translates the dependency-aware bv planning
+// surface into the compact representation used by robot assignment. Request
+// the uncapped set so filtered-out high-ranked rows cannot starve eligible work
+// below them, then apply the public recommendation limit after safety gates.
+func getAssignableBeadPreviews(ctx context.Context, projectDir string, limit int) ([]bv.BeadPreview, error) {
+	recommendations, err := getAssignableActionableRecommendations(ctx, projectDir, limit)
+	if err != nil {
+		return nil, err
+	}
+	return filterAssignableBeadPreviewsForProject(projectDir, recommendations, 0), nil
+}
+
+func getAssignableActionableRecommendations(ctx context.Context, projectDir string, limit int) ([]bv.TriageRecommendation, error) {
+	recommendations, err := bv.GetActionableRecommendationsContext(ctx, projectDir, 0)
+	if err != nil {
+		return nil, err
+	}
+	return filterAssignableActionableRecommendationsForProject(projectDir, recommendations, limit), nil
+}
+
+func filterAssignableBeadPreviews(recommendations []bv.TriageRecommendation, limit int) []bv.BeadPreview {
+	return filterAssignableBeadPreviewsWithGate(recommendations, limit, bv.IsOperatorGatedLabel)
+}
+
+func filterAssignableBeadPreviewsForProject(projectDir string, recommendations []bv.TriageRecommendation, limit int) []bv.BeadPreview {
+	return filterAssignableBeadPreviewsWithGate(recommendations, limit, func(label string) bool {
+		return bv.IsOperatorGatedLabelForProject(projectDir, label)
+	})
+}
+
+func filterAssignableBeadPreviewsWithGate(recommendations []bv.TriageRecommendation, limit int, operatorGated func(string) bool) []bv.BeadPreview {
+	assignable := filterAssignableActionableRecommendationsWithGate(recommendations, limit, operatorGated)
+	previews := make([]bv.BeadPreview, 0, len(assignable))
+	for _, recommendation := range assignable {
+		previews = append(previews, bv.BeadPreview{
+			ID:       recommendation.ID,
+			Title:    recommendation.Title,
+			Priority: fmt.Sprintf("P%d", recommendation.Priority),
+			Type:     recommendation.Type,
+		})
+	}
+	return previews
+}
+
+// filterAssignableActionableRecommendations is the shared policy boundary for
+// robot assignment consumers. It assumes the caller sourced recommendations
+// from GetActionableRecommendationsContext, then independently enforces the
+// status, dependency, and operator-gate invariants before planning dispatch.
+func filterAssignableActionableRecommendations(recommendations []bv.TriageRecommendation, limit int) []bv.TriageRecommendation {
+	return filterAssignableActionableRecommendationsWithGate(recommendations, limit, bv.IsOperatorGatedLabel)
+}
+
+func filterAssignableActionableRecommendationsForProject(projectDir string, recommendations []bv.TriageRecommendation, limit int) []bv.TriageRecommendation {
+	return filterAssignableActionableRecommendationsWithGate(recommendations, limit, func(label string) bool {
+		return bv.IsOperatorGatedLabelForProject(projectDir, label)
+	})
+}
+
+func filterAssignableActionableRecommendationsWithGate(recommendations []bv.TriageRecommendation, limit int, operatorGated func(string) bool) []bv.TriageRecommendation {
+	filtered := make([]bv.TriageRecommendation, 0, len(recommendations))
+	seen := make(map[string]struct{}, len(recommendations))
+	for _, recommendation := range recommendations {
+		beadID := strings.TrimSpace(recommendation.ID)
+		if beadID == "" || len(recommendation.BlockedBy) > 0 {
+			continue
+		}
+
+		gated := false
+		for _, label := range recommendation.Labels {
+			if operatorGated(label) {
+				gated = true
+				break
+			}
+		}
+		if gated {
+			continue
+		}
+
+		status := strings.ToLower(strings.TrimSpace(recommendation.Status))
+		if status != "open" && status != "ready" {
+			continue
+		}
+		if _, duplicate := seen[beadID]; duplicate {
+			continue
+		}
+		seen[beadID] = struct{}{}
+
+		recommendation.ID = beadID
+		recommendation.Title = strings.TrimSpace(recommendation.Title)
+		recommendation.Type = strings.TrimSpace(recommendation.Type)
+		filtered = append(filtered, recommendation)
+		if limit > 0 && len(filtered) >= limit {
+			break
+		}
+	}
+	return filtered
+}
+
+// loadAuthoritativeAssignmentPolicy strictly loads assignment policy for the
+// project that owns the Beads data and installs its merged operator-gate
+// vocabulary before any automated planning or dispatch.
+func loadAuthoritativeAssignmentPolicy(projectDir, globalPath string, requireGlobal bool) (*config.Config, error) {
+	globalPath = strings.TrimSpace(globalPath)
+	if globalPath == "" {
+		globalPath = config.DefaultPath()
+	}
+	effective, err := config.LoadAssignmentPolicyStrict(projectDir, globalPath, requireGlobal)
+	if err != nil {
+		return nil, fmt.Errorf("load assignment safety policy for %s: %w", strings.TrimSpace(projectDir), err)
+	}
+	if err := bv.ConfigureProjectOperatorGatedLabels(projectDir, effective.Assign.OperatorGatedLabels); err != nil {
+		return nil, fmt.Errorf("register assignment safety policy for %s: %w", strings.TrimSpace(projectDir), err)
+	}
+	// Keep the legacy process policy current for non-project-aware callers.
+	bv.ConfigureOperatorGatedLabels(effective.Assign.OperatorGatedLabels)
+	return effective, nil
 }
 
 func excludeDurablyOccupiedAssignAgents(session string, idleAgentPanes []string) ([]string, error) {

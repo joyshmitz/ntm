@@ -135,6 +135,7 @@ type Model struct {
 	claudeCount      int
 	codexCount       int
 	geminiCount      int
+	grokCount        int
 	antigravityCount int
 	cursorCount      int
 	windsurfCount    int

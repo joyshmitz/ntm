@@ -38,7 +38,7 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
 			patterns := args[1:]
-			return runLock(session, patterns, reason, ttl, shared)
+			return runLock(cmd.Context(), session, patterns, reason, ttl, shared)
 		},
 	}
 
@@ -61,7 +61,7 @@ type LockResult struct {
 	Error     string                          `json:"error,omitempty"`
 }
 
-func runLock(session string, patterns []string, reason, ttlStr string, shared bool) error {
+func runLock(ctx context.Context, session string, patterns []string, reason, ttlStr string, shared bool) error {
 	ttlDuration, err := util.ParseDuration(ttlStr)
 	if err != nil {
 		return fmt.Errorf("invalid TTL format '%s': use format like 30m, 1h, 1d", ttlStr)
@@ -71,7 +71,7 @@ func runLock(session string, patterns []string, reason, ttlStr string, shared bo
 		return fmt.Errorf("TTL must be at least 1 minute")
 	}
 
-	session, projectKey, err := resolveAgentMailScope(session)
+	session, projectKey, err := resolveAgentMailScope(ctx, session)
 	if err != nil {
 		return err
 	}

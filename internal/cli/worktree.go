@@ -116,6 +116,17 @@ var (
 	dryRun         bool                 // Preview changes without applying
 )
 
+func newWorktreeCommandContext(cmd *cobra.Command, timeout time.Duration) (context.Context, context.CancelFunc, error) {
+	if cmd == nil || cmd.Context() == nil {
+		return nil, nil, fmt.Errorf("worktree command requires a command context")
+	}
+	if err := cmd.Context().Err(); err != nil {
+		return nil, nil, fmt.Errorf("worktree command canceled: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+	return ctx, cancel, nil
+}
+
 func init() {
 	// Add subcommands
 	worktreeCmd.AddCommand(worktreeListCmd)
@@ -139,18 +150,21 @@ func init() {
 
 // runWorktreeList handles the 'ntm worktree list' command
 func runWorktreeList(cmd *cobra.Command, args []string) error {
-	projectDir, err := getProjectDir()
+	ctx, cancel, err := newWorktreeCommandContext(cmd, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
+	projectDir, err := getProjectDir(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to determine project directory: %w", err)
 	}
 
-	wm, err := git.NewWorktreeManager(projectDir)
+	wm, err := git.NewWorktreeManager(ctx, projectDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize worktree manager: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	worktrees, err := wm.ListWorktrees(ctx)
 	if err != nil {
@@ -180,26 +194,35 @@ func runWorktreeList(cmd *cobra.Command, args []string) error {
 
 // runWorktreeProvision handles the 'ntm worktree provision' command
 func runWorktreeProvision(cmd *cobra.Command, args []string) error {
+	ctx, cancel, err := newWorktreeCommandContext(cmd, 60*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
 	agentName := args[0]
 	sessionID := args[1]
 
-	projectDir, err := getProjectDir()
+	projectDir, err := getProjectDir(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to determine project directory: %w", err)
 	}
 
-	wm, err := git.NewWorktreeManager(projectDir)
+	wm, err := git.NewWorktreeManager(ctx, projectDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize worktree manager: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 
 	fmt.Printf("Provisioning worktree for agent '%s' with session '%s'...\n", agentName, sessionID)
 
 	worktree, err := wm.ProvisionWorktree(ctx, agentName, sessionID)
 	if err != nil {
+		if worktree != nil {
+			return fmt.Errorf(
+				"failed to provision worktree; checkout retained at %s on branch %s: %w",
+				worktree.Path, worktree.Branch, err,
+			)
+		}
 		return fmt.Errorf("failed to provision worktree: %w", err)
 	}
 
@@ -213,21 +236,24 @@ func runWorktreeProvision(cmd *cobra.Command, args []string) error {
 
 // runWorktreeRemove handles the 'ntm worktree remove' command
 func runWorktreeRemove(cmd *cobra.Command, args []string) error {
+	ctx, cancel, err := newWorktreeCommandContext(cmd, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
 	agentName := args[0]
 	sessionID := args[1]
 
-	projectDir, err := getProjectDir()
+	projectDir, err := getProjectDir(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to determine project directory: %w", err)
 	}
 
-	wm, err := git.NewWorktreeManager(projectDir)
+	wm, err := git.NewWorktreeManager(ctx, projectDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize worktree manager: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	fmt.Printf("Removing worktree for agent '%s' with session '%s'...\n", agentName, sessionID)
 
@@ -242,18 +268,21 @@ func runWorktreeRemove(cmd *cobra.Command, args []string) error {
 
 // runWorktreeCleanup handles the 'ntm worktree cleanup' command
 func runWorktreeCleanup(cmd *cobra.Command, args []string) error {
-	projectDir, err := getProjectDir()
+	ctx, cancel, err := newWorktreeCommandContext(cmd, 60*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
+	projectDir, err := getProjectDir(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to determine project directory: %w", err)
 	}
 
-	wm, err := git.NewWorktreeManager(projectDir)
+	wm, err := git.NewWorktreeManager(ctx, projectDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize worktree manager: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 
 	if dryRun {
 		// Show what would be cleaned up
@@ -298,6 +327,12 @@ func runWorktreeCleanup(cmd *cobra.Command, args []string) error {
 
 // runWorktreeSync handles the 'ntm worktree sync' command
 func runWorktreeSync(cmd *cobra.Command, args []string) error {
+	ctx, cancel, err := newWorktreeCommandContext(cmd, 60*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
 	worktreePath := args[0]
 
 	worktreeRoot, err := resolveWorktreeSyncRoot(worktreePath)
@@ -305,13 +340,10 @@ func runWorktreeSync(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	wm, err := git.NewWorktreeManager(worktreeRoot)
+	wm, err := git.NewWorktreeManager(ctx, worktreeRoot)
 	if err != nil {
 		return fmt.Errorf("failed to initialize worktree manager: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 
 	fmt.Printf("Synchronizing worktree %s...\n", worktreeRoot)
 
@@ -335,14 +367,24 @@ func resolveWorktreeSyncRoot(worktreePath string) (string, error) {
 // Helper functions
 
 // getProjectDir determines the current project directory
-func getProjectDir() (string, error) {
+func getProjectDir(ctx context.Context) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("project directory lookup requires a command context")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("project directory lookup canceled: %w", err)
+	}
 	// Try current working directory first
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
 
-	if git.IsGitRepository(cwd) {
+	isRepository, err := git.IsGitRepository(ctx, cwd)
+	if err != nil {
+		return "", fmt.Errorf("check current project directory: %w", err)
+	}
+	if isRepository {
 		return cwd, nil
 	}
 
@@ -401,6 +443,12 @@ func loadWorktreeConfig() (*config.Config, error) {
 
 // runWorktreeAutoProvision handles the 'ntm worktree auto-provision' command
 func runWorktreeAutoProvision(cmd *cobra.Command, args []string) error {
+	ctx, cancel, err := newWorktreeCommandContext(cmd, 120*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
 	sessionName := args[0]
 
 	cfg, err := loadWorktreeConfig()
@@ -409,9 +457,6 @@ func runWorktreeAutoProvision(cmd *cobra.Command, args []string) error {
 	}
 
 	service := git.NewWorktreeService(cfg)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
 
 	fmt.Printf("Auto-provisioning worktrees for session '%s'...\n", sessionName)
 
@@ -462,14 +507,23 @@ func runWorktreeAutoProvision(cmd *cobra.Command, args []string) error {
 
 // runWorktreeStatus handles the 'ntm worktree status' command
 func runWorktreeStatus(cmd *cobra.Command, args []string) error {
+	ctx, cancel, err := newWorktreeCommandContext(cmd, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
 	var sessionName string
 	if len(args) > 0 {
 		sessionName = args[0]
 	} else {
 		// Try to detect session from tmux
-		if session, err := getCurrentTmuxSession(); err == nil {
+		if session, err := getCurrentTmuxSession(ctx); err == nil {
 			sessionName = session
 		} else {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("failed to detect current tmux session: %w", ctxErr)
+			}
 			return fmt.Errorf("session name required (not in tmux session)")
 		}
 	}
@@ -480,9 +534,6 @@ func runWorktreeStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	service := git.NewWorktreeService(cfg)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	worktrees, err := service.GetSessionWorktreeStatus(ctx, sessionName)
 	if err != nil {
@@ -522,6 +573,12 @@ func runWorktreeStatus(cmd *cobra.Command, args []string) error {
 
 // runWorktreeCleanSession handles the 'ntm worktree clean-session' command
 func runWorktreeCleanSession(cmd *cobra.Command, args []string) error {
+	ctx, cancel, err := newWorktreeCommandContext(cmd, 60*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
 	sessionName := args[0]
 
 	cfg, err := loadWorktreeConfig()
@@ -530,9 +587,6 @@ func runWorktreeCleanSession(cmd *cobra.Command, args []string) error {
 	}
 
 	service := git.NewWorktreeService(cfg)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 
 	fmt.Printf("Cleaning up worktrees for session '%s'...\n", sessionName)
 
@@ -551,7 +605,13 @@ func runWorktreeCleanSession(cmd *cobra.Command, args []string) error {
 }
 
 // getCurrentTmuxSession returns the current tmux session name if we're in one
-func getCurrentTmuxSession() (string, error) {
+func getCurrentTmuxSession(ctx context.Context) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("tmux session lookup requires a command context")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("tmux session lookup canceled: %w", err)
+	}
 	tmuxSession := os.Getenv("TMUX")
 	if tmuxSession == "" {
 		return "", fmt.Errorf("not in a tmux session")
@@ -559,9 +619,13 @@ func getCurrentTmuxSession() (string, error) {
 
 	// Extract session name from tmux environment
 	// This is a simplified approach - could be enhanced
-	cmd := exec.Command(tmux.BinaryPath(), "display-message", "-p", "#S")
+	cmd := exec.CommandContext(ctx, tmux.BinaryPath(), "display-message", "-p", "#S")
+	cmd.WaitDelay = 2 * time.Second
 	output, err := cmd.Output()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("failed to get tmux session: %w", ctxErr)
+		}
 		return "", fmt.Errorf("failed to get tmux session: %w", err)
 	}
 

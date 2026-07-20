@@ -102,6 +102,14 @@ func TestPersonaValidation(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid grok alias",
+			persona: Persona{
+				Name:      "test",
+				AgentType: "xai_grok_build",
+			},
+			wantErr: false,
+		},
+		{
 			name: "valid windsurf alias",
 			persona: Persona{
 				Name:      "test",
@@ -164,6 +172,8 @@ func TestAgentTypeFlag(t *testing.T) {
 		{"Gemini", "gmi"},
 		{"gmi", "gmi"},
 		{" google_gemini ", "gmi"},
+		{"grok", "grok"},
+		{" xai-grok-build ", "grok"},
 		{"claude_code", "cc"},
 		{"ws", "windsurf"},
 		{"cursor", "cursor"},

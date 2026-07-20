@@ -19,6 +19,8 @@ func TestValidateAgentSpec(t *testing.T) {
 		{"valid_claude_alias", AgentSpec{Type: "claude", Count: 1}, false},
 		{"valid_codex_alias", AgentSpec{Type: "openai-codex", Count: 1}, false},
 		{"valid_gemini_alias", AgentSpec{Type: "google-gemini", Count: 1}, false},
+		{"valid_grok", AgentSpec{Type: "grok", Count: 1}, false},
+		{"valid_grok_alias", AgentSpec{Type: "xai_grok_build", Count: 1}, false},
 		{"valid_windsurf_alias", AgentSpec{Type: "ws", Count: 1}, false},
 		{"missing_type", AgentSpec{Count: 1}, true},
 		{"zero_count", AgentSpec{Type: "cc", Count: 0}, true},
@@ -26,6 +28,7 @@ func TestValidateAgentSpec(t *testing.T) {
 		{"high_count", AgentSpec{Type: "cc", Count: 21}, true},
 		{"max_count", AgentSpec{Type: "cc", Count: 20}, false},
 		{"with_model", AgentSpec{Type: "cc", Count: 1, Model: "opus"}, false},
+		{"with_reasoning_effort", AgentSpec{Type: "grok", Count: 1, Model: "grok-4", ReasoningEffort: "high"}, false},
 		{"with_persona", AgentSpec{Type: "cc", Count: 1, Persona: "code-reviewer"}, false},
 		{"user_not_supported", AgentSpec{Type: "user", Count: 1}, true},
 		{"unknown_type", AgentSpec{Type: "custom-plugin", Count: 1}, true},
@@ -271,6 +274,11 @@ count = 2
 [[recipes.agents]]
 type = "ws"
 count = 1
+[[recipes.agents]]
+type = " xai_grok_build "
+count = 1
+model = " grok-4 "
+reasoning_effort = " high "
 `
 	if err := os.WriteFile(recipesPath, []byte(content), 0644); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
@@ -288,6 +296,9 @@ count = 1
 	}
 	if got := recipes[0].Agents[2].Type; got != "windsurf" {
 		t.Fatalf("recipes[0].Agents[2].Type = %q, want %q", got, "windsurf")
+	}
+	if got := recipes[0].Agents[3]; got.Type != "grok" || got.Model != "grok-4" || got.ReasoningEffort != "high" {
+		t.Fatalf("recipes[0].Agents[3] = %+v, want normalized Grok model and effort", got)
 	}
 }
 

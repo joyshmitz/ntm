@@ -159,7 +159,7 @@ func TestRunGitSyncNonConflictPullFailureIsTerminalJSON(t *testing.T) {
 	t.Cleanup(func() { jsonOutput = originalJSON })
 
 	stdout, runErr := captureStdout(t, func() error {
-		return runGitSync("", true, false, false, false)
+		return runGitSync(t.Context(), "", true, false, false, false)
 	})
 	if !errors.Is(runErr, errJSONFailure) {
 		t.Fatalf("runGitSync error = %v, want terminal JSON failure", runErr)
@@ -276,7 +276,7 @@ func TestResolveGitProjectDirUsesSavedSessionAgentProjectKey(t *testing.T) {
 	}
 	saveSessionAgentForTest(t, "mysession", actualProject, "GreenCastle")
 
-	session, workDir, err := resolveGitProjectDir("mysession")
+	session, workDir, err := resolveGitProjectDir(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolveGitProjectDir() error = %v", err)
 	}
@@ -314,7 +314,7 @@ func TestResolveGitProjectDirRejectsWorkspaceFallbackForExplicitSession(t *testi
 		t.Fatalf("chdir cwd: %v", err)
 	}
 
-	_, _, err := resolveGitProjectDir("mysession")
+	_, _, err := resolveGitProjectDir(t.Context(), "mysession")
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}

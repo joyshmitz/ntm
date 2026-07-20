@@ -127,7 +127,7 @@ func init() {
 		if strings.TrimSpace(opts.Session) == "" {
 			return nil, fmt.Errorf("session is required")
 		}
-		return buildControllerResponse(opts)
+		return buildControllerResponse(ctx, opts)
 	})
 }
 
@@ -169,7 +169,7 @@ Custom prompt files support template variables:
 				PromptFile: promptFile,
 				NoPrompt:   noPrompt,
 			}
-			return runController(opts)
+			return runController(cmd.Context(), opts)
 		},
 	}
 
@@ -181,17 +181,17 @@ Custom prompt files support template variables:
 	return cmd
 }
 
-func runController(opts ControllerInput) error {
+func runController(ctx context.Context, opts ControllerInput) error {
 	// Use kernel for JSON output mode
 	if IsJSONOutput() {
-		result, err := kernel.Run(context.Background(), "sessions.controller", opts)
+		result, err := kernel.Run(ctx, "sessions.controller", opts)
 		if err != nil {
 			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
 		return output.PrintJSON(result)
 	}
 
-	resp, err := buildControllerResponse(opts)
+	resp, err := buildControllerResponse(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -209,7 +209,7 @@ func runController(opts ControllerInput) error {
 	return nil
 }
 
-func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) {
+func buildControllerResponse(ctx context.Context, opts ControllerInput) (*ControllerResponse, error) {
 	session := opts.Session
 
 	if err := tmux.EnsureInstalled(); err != nil {
@@ -284,7 +284,7 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 		return nil, fmt.Errorf("unknown agent type: %s", agentType)
 	}
 
-	dir, err := resolveExplicitProjectDirForSession(session)
+	dir, err := resolveExplicitProjectDirForSessionContext(ctx, session)
 	if err != nil {
 		return nil, err
 	}

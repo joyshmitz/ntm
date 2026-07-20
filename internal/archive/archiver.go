@@ -64,6 +64,7 @@ type Archiver struct {
 	started         time.Time
 	totalRecords    int
 	onRecord        func(*ArchiveRecord) // Optional callback for testing
+	getPanes        func(context.Context, string) ([]tmux.Pane, error)
 }
 
 // ArchiverOptions configures the Archiver.
@@ -130,6 +131,7 @@ func NewArchiver(opts ArchiverOptions) (*Archiver, error) {
 		encoder:         json.NewEncoder(f),
 		started:         time.Now(),
 		onRecord:        opts.OnRecord,
+		getPanes:        tmux.GetPanesContext,
 	}, nil
 }
 
@@ -167,13 +169,16 @@ func (a *Archiver) Run(ctx context.Context) error {
 
 // archiveNewContent captures new content from all panes.
 func (a *Archiver) archiveNewContent(ctx context.Context) error {
-	// Get session info with panes
-	session, err := tmux.GetSession(a.sessionName)
-	if err != nil {
-		return fmt.Errorf("getting session info: %w", err)
+	if err := tmux.ValidateSessionName(a.sessionName); err != nil {
+		return fmt.Errorf("validating session name: %w", err)
 	}
 
-	for _, pane := range session.Panes {
+	panes, err := a.getPanes(ctx, a.sessionName)
+	if err != nil {
+		return fmt.Errorf("getting session panes: %w", err)
+	}
+
+	for _, pane := range panes {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

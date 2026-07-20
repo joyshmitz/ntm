@@ -59,7 +59,7 @@ func newAnalyticsCmd() *cobra.Command {
 
 Shows summary statistics including:
   - Total sessions created
-  - Agent spawn counts by type (Claude, Codex, Gemini)
+  - Agent spawn counts by type (Claude, Codex, Gemini, Grok)
   - Prompts sent and character counts
   - Error occurrences
 
@@ -209,6 +209,10 @@ func aggregateStats(eventList []events.Event, days int, since string, cutoff tim
 				stats.TotalAgents += int(gmi)
 				updateAgentStats(stats.AgentBreakdown, "gemini", int(gmi), 0, 0)
 			}
+			if grok, ok := event.Data["grok_count"].(float64); ok {
+				stats.TotalAgents += int(grok)
+				updateAgentStats(stats.AgentBreakdown, "grok", int(grok), 0, 0)
+			}
 			if cursor, ok := event.Data["cursor_count"].(float64); ok {
 				stats.TotalAgents += int(cursor)
 				updateAgentStats(stats.AgentBreakdown, "cursor", int(cursor), 0, 0)
@@ -285,7 +289,7 @@ func updateAgentStats(breakdown map[string]AgentStats, agentType string, countDe
 
 func isAnalyticsAgentType(agentType string) bool {
 	switch agentType {
-	case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "oc", "ollama":
+	case "claude", "codex", "gemini", "grok", "cursor", "windsurf", "aider", "oc", "ollama":
 		return true
 	default:
 		return false
@@ -324,7 +328,7 @@ func parseTargetTypes(targets string) []string {
 	}
 
 	if legacyAll && len(result) == 0 {
-		return []string{"claude", "codex", "gemini"}
+		return []string{"claude", "codex", "gemini", "grok"}
 	}
 	return result
 }
@@ -359,6 +363,9 @@ func buildSessionDetails(eventList []events.Event) []SessionSummary {
 			}
 			if gmi, ok := event.Data["gemini_count"].(float64); ok {
 				summary.AgentCount += int(gmi)
+			}
+			if grok, ok := event.Data["grok_count"].(float64); ok {
+				summary.AgentCount += int(grok)
 			}
 			if cursor, ok := event.Data["cursor_count"].(float64); ok {
 				summary.AgentCount += int(cursor)

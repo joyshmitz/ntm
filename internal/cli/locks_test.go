@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +19,8 @@ func jsonEncodeIndent(v interface{}) ([]byte, error) {
 func TestBuildLocksAdviceResult_AgentMailUnavailableKeepsProofMode(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
-	result := buildLocksAdviceResult(
+	result, err := buildLocksAdviceResult(
+		t.Context(),
 		"proj",
 		"",
 		"/repo",
@@ -28,6 +31,9 @@ func TestBuildLocksAdviceResult_AgentMailUnavailableKeepsProofMode(t *testing.T)
 		true,
 		"connection refused",
 	)
+	if err != nil {
+		t.Fatalf("buildLocksAdviceResult() error = %v", err)
+	}
 
 	if !result.Success {
 		t.Fatal("Success = false, want proof-mode success")
@@ -49,7 +55,8 @@ func TestBuildLocksAdviceResult_AgentMailUnavailableKeepsProofMode(t *testing.T)
 func TestBuildLocksAdviceResult_CombinesReservationAndWorktreeLogRows(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
-	result := buildLocksAdviceResult(
+	result, err := buildLocksAdviceResult(
+		t.Context(),
 		"proj",
 		"BlueLake",
 		"/repo",
@@ -69,6 +76,9 @@ func TestBuildLocksAdviceResult_CombinesReservationAndWorktreeLogRows(t *testing
 		false,
 		"",
 	)
+	if err != nil {
+		t.Fatalf("buildLocksAdviceResult() error = %v", err)
+	}
 
 	if !result.AgentMailAvailable {
 		t.Fatal("AgentMailAvailable = false, want true")
@@ -85,6 +95,16 @@ func TestBuildLocksAdviceResult_CombinesReservationAndWorktreeLogRows(t *testing
 	}
 	if !locksTextEqual(row.Action, reservationsim.ReservationActionNarrow) && !locksTextEqual(row.Action, reservationsim.ReservationActionRenew) {
 		t.Fatalf("Action = %q, want narrow or renew", row.Action)
+	}
+}
+
+func TestBuildLocksAdviceResultRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := buildLocksAdviceResult(ctx, "proj", "", t.TempDir(), nil, nil, nil, time.Now(), false, "")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("buildLocksAdviceResult() error = %v, want context.Canceled", err)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -43,6 +44,8 @@ type RecoveryManager struct {
 	maxRecoveries      int
 	maxEventAge        time.Duration
 	includeBeadContext bool
+	resolvePaneType    func(session string, paneIndex int, paneID string) (agent.AgentType, error)
+	sendPrompt         func(target, prompt string, enter bool) error
 }
 
 // RecoveryConfig holds configuration for recovery behavior.
@@ -128,6 +131,18 @@ func (rm *RecoveryManager) SendRecoveryPrompt(session string, paneIndex int) (bo
 // SendRecoveryPromptByID sends recovery with explicit pane ID.
 // It executes asynchronously to avoid blocking the UI during prompt construction.
 func (rm *RecoveryManager) SendRecoveryPromptByID(session string, paneIndex int, paneID, triggerText string) (bool, error) {
+	agentType, err := rm.recoveryPaneType(session, paneIndex, paneID)
+	if err != nil {
+		return false, err
+	}
+	return rm.sendRecoveryPromptByIDForAgent(session, paneIndex, paneID, triggerText, agentType)
+}
+
+func (rm *RecoveryManager) sendRecoveryPromptByIDForAgent(session string, paneIndex int, paneID, triggerText string, agentType agent.AgentType) (bool, error) {
+	if err := agentType.ValidateAutomatedPromptDelivery(); err != nil {
+		return false, err
+	}
+
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -161,7 +176,7 @@ func (rm *RecoveryManager) SendRecoveryPromptByID(session string, paneIndex int,
 		promptToSend := BuildContextAwarePrompt(prompt, includeBeadContext)
 
 		// Send the recovery prompt
-		if err := tmux.SendKeys(target, promptToSend, true); err != nil {
+		if err := rm.sendRecoveryPrompt(target, promptToSend, true); err != nil {
 			// Log error if possible, or just fail silently
 			// Revert the state update so it can retry without losing a count
 			rm.mu.Lock()
@@ -188,16 +203,50 @@ func (rm *RecoveryManager) SendRecoveryPromptByID(session string, paneIndex int,
 	return true, nil
 }
 
+func (rm *RecoveryManager) recoveryPaneType(session string, paneIndex int, paneID string) (agent.AgentType, error) {
+	if rm.resolvePaneType != nil {
+		return rm.resolvePaneType(session, paneIndex, paneID)
+	}
+
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		return agent.AgentTypeUnknown, fmt.Errorf("resolve recovery pane type: %w", err)
+	}
+	if paneID != "" {
+		for _, pane := range panes {
+			if pane.ID == paneID {
+				return pane.Type, nil
+			}
+		}
+	}
+	for _, pane := range panes {
+		if pane.Index == paneIndex {
+			return pane.Type, nil
+		}
+	}
+	return agent.AgentTypeUnknown, fmt.Errorf("resolve recovery pane type: pane %d not found in session %q", paneIndex, session)
+}
+
+func (rm *RecoveryManager) sendRecoveryPrompt(target, prompt string, enter bool) error {
+	if rm.sendPrompt != nil {
+		return rm.sendPrompt(target, prompt, enter)
+	}
+	return tmux.SendKeys(target, prompt, enter)
+}
+
 // HandleCompactionEvent processes a compaction event and sends recovery if appropriate.
 func (rm *RecoveryManager) HandleCompactionEvent(event *CompactionEvent, session string, paneIndex int) (bool, error) {
 	if event == nil {
 		return false, nil
 	}
+	if err := agent.AgentType(event.AgentType).ValidateAutomatedPromptDelivery(); err != nil {
+		return false, err
+	}
 
 	paneID := makePaneID(session, paneIndex)
 	event.PaneID = paneID
 
-	return rm.SendRecoveryPromptByID(session, paneIndex, paneID, event.MatchedText)
+	return rm.sendRecoveryPromptByIDForAgent(session, paneIndex, paneID, event.MatchedText, agent.AgentType(event.AgentType))
 }
 
 // GetRecoveryEvents returns recent recovery events.

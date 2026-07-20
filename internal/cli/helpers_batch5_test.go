@@ -515,6 +515,7 @@ func TestIsInterruptibleAgentPane(t *testing.T) {
 		{name: "claude alias", pane: tmux.Pane{Type: tmux.AgentType("claude_code")}, want: true},
 		{name: "codex alias", pane: tmux.Pane{Type: tmux.AgentType("openai-codex")}, want: true},
 		{name: "gemini alias", pane: tmux.Pane{Type: tmux.AgentType("google-gemini")}, want: true},
+		{name: "grok alias", pane: tmux.Pane{Type: tmux.AgentType("xai-grok-build")}, want: true},
 		{name: "cursor", pane: tmux.Pane{Type: tmux.AgentCursor}, want: true},
 		{name: "windsurf alias", pane: tmux.Pane{Type: tmux.AgentType("ws")}, want: true},
 		{name: "aider", pane: tmux.Pane{Type: tmux.AgentAider}, want: true},

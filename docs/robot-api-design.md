@@ -156,6 +156,10 @@ Only use tool prefix for options unique to that tool:
 | `--xf-mode=semantic` | XF search mode | xf-specific |
 | `--bulk-strategy=S` | Bulk assign strategy | bulk-assign-specific |
 
+Grok Build phase one does not automate the authenticated fullscreen TUI. Robot
+send, retasking interrupt, restart, readiness waits, assignment, and restore-time
+relaunch return `NOT_IMPLEMENTED` before mutating a Grok pane.
+
 ### 2.3 Aliases for Backward Compatibility
 
 When standardizing flags, keep old prefixed versions as aliases:

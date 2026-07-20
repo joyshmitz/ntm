@@ -3,6 +3,7 @@ package handoff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,6 +38,73 @@ func TestGeneratorProjectDir(t *testing.T) {
 	g := NewGenerator("/tmp/myproject")
 	if g.ProjectDir() != "/tmp/myproject" {
 		t.Errorf("ProjectDir() = %s, want /tmp/myproject", g.ProjectDir())
+	}
+}
+
+func TestGeneratorPublicEntryPointsRejectNilAndCanceledContexts(t *testing.T) {
+	g := NewGenerator(t.TempDir())
+	h := New("test-session")
+	falseValue := false
+	opts := GenerateHandoffOptions{
+		SessionName:      "test-session",
+		IncludeBeads:     &falseValue,
+		IncludeAgentMail: &falseValue,
+		IncludeCASS:      &falseValue,
+	}
+
+	operations := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{
+			name: "GenerateFromOutput",
+			run: func(ctx context.Context) error {
+				_, err := g.GenerateFromOutput(ctx, "test-session", nil)
+				return err
+			},
+		},
+		{
+			name: "GenerateFromTranscript",
+			run: func(ctx context.Context) error {
+				_, err := g.GenerateFromTranscript(ctx, "test-session", "missing.jsonl")
+				return err
+			},
+		},
+		{
+			name: "GenerateAutoHandoff",
+			run: func(ctx context.Context) error {
+				_, err := g.GenerateAutoHandoff(ctx, "test-session", "cc", "%1", nil, 0, 0)
+				return err
+			},
+		},
+		{
+			name: "EnrichWithGitState",
+			run: func(ctx context.Context) error {
+				return g.EnrichWithGitState(ctx, h)
+			},
+		},
+		{
+			name: "GenerateHandoff",
+			run: func(ctx context.Context) error {
+				_, err := g.GenerateHandoff(ctx, opts)
+				return err
+			},
+		},
+	}
+
+	for _, operation := range operations {
+		t.Run(operation.name+" nil", func(t *testing.T) {
+			if err := operation.run(nil); err == nil || !strings.Contains(err.Error(), "context is required") {
+				t.Fatalf("nil context error = %v, want context requirement", err)
+			}
+		})
+		t.Run(operation.name+" canceled", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err := operation.run(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled context error = %v, want context.Canceled", err)
+			}
+		})
 	}
 }
 
@@ -230,7 +298,7 @@ func TestGenerateFromOutputBasic(t *testing.T) {
 
 	output := []byte("I've completed implementing the user authentication.\nNext: add unit tests for the login flow")
 
-	h, err := g.GenerateFromOutput("test-session", output)
+	h, err := g.GenerateFromOutput(t.Context(), "test-session", output)
 	if err != nil {
 		t.Fatalf("GenerateFromOutput failed: %v", err)
 	}
@@ -258,7 +326,7 @@ func TestGenerateFromOutputWithBlockers(t *testing.T) {
 
 	output := []byte("Error: could not connect to database\nBlocked by: missing credentials")
 
-	h, err := g.GenerateFromOutput("test-session", output)
+	h, err := g.GenerateFromOutput(t.Context(), "test-session", output)
 	if err != nil {
 		t.Fatalf("GenerateFromOutput failed: %v", err)
 	}
@@ -278,7 +346,7 @@ func TestGenerateFromOutputEmptyInput(t *testing.T) {
 	tmpDir := t.TempDir()
 	g := NewGenerator(tmpDir)
 
-	h, err := g.GenerateFromOutput("test-session", []byte(""))
+	h, err := g.GenerateFromOutput(t.Context(), "test-session", []byte(""))
 	if err != nil {
 		t.Fatalf("GenerateFromOutput failed: %v", err)
 	}
@@ -331,7 +399,7 @@ func TestGenerateFromTranscriptBasic(t *testing.T) {
 		t.Fatalf("failed to create transcript: %v", err)
 	}
 
-	h, err := g.GenerateFromTranscript("test-session", transcriptPath)
+	h, err := g.GenerateFromTranscript(t.Context(), "test-session", transcriptPath)
 	if err != nil {
 		t.Fatalf("GenerateFromTranscript failed: %v", err)
 	}
@@ -379,7 +447,7 @@ func TestGenerateFromTranscriptWithErrors(t *testing.T) {
 		t.Fatalf("failed to create transcript: %v", err)
 	}
 
-	h, err := g.GenerateFromTranscript("test-session", transcriptPath)
+	h, err := g.GenerateFromTranscript(t.Context(), "test-session", transcriptPath)
 	if err != nil {
 		t.Fatalf("GenerateFromTranscript failed: %v", err)
 	}
@@ -396,7 +464,7 @@ func TestGenerateFromTranscriptMissingFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	g := NewGenerator(tmpDir)
 
-	_, err := g.GenerateFromTranscript("test-session", "/nonexistent/path.jsonl")
+	_, err := g.GenerateFromTranscript(t.Context(), "test-session", "/nonexistent/path.jsonl")
 	if err == nil {
 		t.Error("expected error for missing file")
 	}
@@ -417,7 +485,7 @@ func TestGenerateFromTranscriptMalformedJSON(t *testing.T) {
 	}
 
 	// Should not fail - malformed lines are skipped
-	h, err := g.GenerateFromTranscript("test-session", transcriptPath)
+	h, err := g.GenerateFromTranscript(t.Context(), "test-session", transcriptPath)
 	if err != nil {
 		t.Fatalf("GenerateFromTranscript failed: %v", err)
 	}
@@ -446,7 +514,7 @@ func TestGenerateFromTranscriptLargeBuffer(t *testing.T) {
 	}
 
 	// Should handle large lines without error
-	h, err := g.GenerateFromTranscript("test-session", transcriptPath)
+	h, err := g.GenerateFromTranscript(t.Context(), "test-session", transcriptPath)
 	if err != nil {
 		t.Fatalf("GenerateFromTranscript failed: %v", err)
 	}
@@ -469,7 +537,7 @@ func TestEnrichWithGitState(t *testing.T) {
 	h := New("test-session").WithGoalAndNow("Goal", "Now")
 
 	// EnrichWithGitState may fail in temp dir without real git, but shouldn't panic
-	err := g.EnrichWithGitState(h)
+	err := g.EnrichWithGitState(t.Context(), h)
 	// We just verify it doesn't panic - error is expected in non-git dirs
 	_ = err
 }
@@ -484,7 +552,7 @@ func TestEnrichWithGitStateInGitRepo(t *testing.T) {
 	g := NewGenerator(projectDir)
 	h := New("test-session").WithGoalAndNow("Goal", "Now")
 
-	err := g.EnrichWithGitState(h)
+	err := g.EnrichWithGitState(t.Context(), h)
 	if err != nil {
 		t.Logf("EnrichWithGitState returned error (may be expected): %v", err)
 	}
@@ -499,13 +567,67 @@ func TestEnrichWithGitStateInGitRepo(t *testing.T) {
 	}
 }
 
+func TestEnrichWithGitStateCanceledProbeDoesNotPoisonLaterCall(t *testing.T) {
+	g := NewGenerator(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	probeCalls := 0
+	g.commandOutput = func(callCtx context.Context, _ string, _ time.Duration, name string, args ...string) ([]byte, error) {
+		if name != "git" {
+			t.Fatalf("command = %q, want git", name)
+		}
+		if len(args) >= 2 && args[0] == "rev-parse" {
+			probeCalls++
+			if probeCalls == 1 {
+				cancel()
+				return nil, callCtx.Err()
+			}
+			return []byte("true\n"), nil
+		}
+
+		switch args[0] {
+		case "diff":
+			return []byte("modified.go\n"), nil
+		case "ls-files":
+			return []byte("created.go\n"), nil
+		case "branch":
+			return []byte("main\n"), nil
+		case "log":
+			return []byte("abc1234 test commit\n"), nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return nil, nil
+		}
+	}
+
+	if err := g.EnrichWithGitState(ctx, New("first")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first enrichment error = %v, want context.Canceled", err)
+	}
+
+	h := New("second")
+	if err := g.EnrichWithGitState(t.Context(), h); err != nil {
+		t.Fatalf("live enrichment after cancellation failed: %v", err)
+	}
+	if probeCalls != 2 {
+		t.Fatalf("git probe calls = %d, want 2", probeCalls)
+	}
+	if len(h.Files.Modified) != 1 || h.Files.Modified[0] != "modified.go" {
+		t.Fatalf("modified files = %v, want [modified.go]", h.Files.Modified)
+	}
+	if len(h.Files.Created) != 1 || h.Files.Created[0] != "created.go" {
+		t.Fatalf("created files = %v, want [created.go]", h.Files.Created)
+	}
+	if h.Findings["git_branch"] != "main" {
+		t.Fatalf("git branch = %q, want main", h.Findings["git_branch"])
+	}
+}
+
 func TestGenerateAutoHandoff(t *testing.T) {
 	tmpDir := t.TempDir()
 	g := NewGenerator(tmpDir)
 
 	output := []byte("I've completed implementing the feature.\nNext: write tests")
 
-	h, err := g.GenerateAutoHandoff("test-session", "cc", "test__cc_1", output, 80000, 100000)
+	h, err := g.GenerateAutoHandoff(t.Context(), "test-session", "cc", "test__cc_1", output, 80000, 100000)
 	if err != nil {
 		t.Fatalf("GenerateAutoHandoff failed: %v", err)
 	}
@@ -1057,12 +1179,91 @@ func TestFetchAgentMailThreadsPrefersNewestUniqueThreadEntry(t *testing.T) {
 	}
 }
 
+func TestEnrichWithAgentMailPreservesMidflightCancellation(t *testing.T) {
+	tests := []struct {
+		name         string
+		cancelMethod string
+	}{
+		{name: "fetch inbox", cancelMethod: "fetch_inbox"},
+		{name: "file reservations", cancelMethod: "resources/read"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reached := make(chan struct{}, 1)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req agentmail.JSONRPCRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Errorf("decode request: %v", err)
+					return
+				}
+
+				method := req.Method
+				if req.Method == "tools/call" {
+					if params, ok := req.Params.(map[string]interface{}); ok {
+						if name, ok := params["name"].(string); ok {
+							method = name
+						}
+					}
+				}
+				if method == tt.cancelMethod {
+					select {
+					case reached <- struct{}{}:
+					default:
+					}
+					cancel()
+				}
+
+				var result json.RawMessage
+				switch method {
+				case "health_check":
+					result = json.RawMessage(`{"status":"ok"}`)
+				case "fetch_inbox":
+					result = json.RawMessage(`[]`)
+				case "resources/read":
+					result = json.RawMessage(`{"contents":[{"text":"[]"}]}`)
+				default:
+					t.Errorf("unexpected Agent Mail method %q", method)
+					result = json.RawMessage(`{}`)
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Result:  result,
+				})
+			}))
+			defer server.Close()
+
+			client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+			g := NewGenerator(t.TempDir())
+			err := g.enrichWithAgentMail(ctx, New("test-session"), GenerateHandoffOptions{
+				AgentName:       "BlackSeal",
+				ProjectKey:      t.TempDir(),
+				AgentMailClient: client,
+			})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("enrichWithAgentMail error = %v, want context.Canceled", err)
+			}
+			select {
+			case <-reached:
+			default:
+				t.Fatalf("Agent Mail phase %q was not reached", tt.cancelMethod)
+			}
+		})
+	}
+}
+
 func TestGetInProgressBeadsNoBeads(t *testing.T) {
 	tmpDir := t.TempDir()
 	g := NewGenerator(tmpDir)
 
 	// In temp dir with no beads, should return nil
-	beads, err := g.getInProgressBeads("")
+	beads, err := g.getInProgressBeads(t.Context(), "")
 	if err != nil {
 		t.Fatalf("getInProgressBeads failed: %v", err)
 	}
@@ -1073,10 +1274,31 @@ func TestGetInProgressBeadsNoBeads(t *testing.T) {
 	}
 }
 
+func TestGetInProgressBeadsPreservesMidflightCancellation(t *testing.T) {
+	g := NewGenerator(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	g.commandOutput = func(callCtx context.Context, _ string, _ time.Duration, name string, _ ...string) ([]byte, error) {
+		if name != "br" {
+			t.Fatalf("command = %q, want br", name)
+		}
+		cancel()
+		return nil, callCtx.Err()
+	}
+
+	beads, err := g.getInProgressBeads(ctx, "BlackSeal")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("getInProgressBeads error = %v, want context.Canceled", err)
+	}
+	if beads != nil {
+		t.Fatalf("beads = %v, want nil", beads)
+	}
+}
+
 type mockCASSSearcher struct {
 	installed bool
 	resp      *cass.SearchResponse
 	err       error
+	search    func(context.Context, cass.SearchOptions) (*cass.SearchResponse, error)
 	calls     int
 	lastOpts  cass.SearchOptions
 }
@@ -1085,9 +1307,12 @@ func (m *mockCASSSearcher) IsInstalled() bool {
 	return m.installed
 }
 
-func (m *mockCASSSearcher) Search(_ context.Context, opts cass.SearchOptions) (*cass.SearchResponse, error) {
+func (m *mockCASSSearcher) Search(ctx context.Context, opts cass.SearchOptions) (*cass.SearchResponse, error) {
 	m.calls++
 	m.lastOpts = opts
+	if m.search != nil {
+		return m.search(ctx, opts)
+	}
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -1209,6 +1434,40 @@ func TestGenerateHandoffCASSGracefulDegradation(t *testing.T) {
 	}
 }
 
+func TestGenerateHandoffPreservesCASSCancellation(t *testing.T) {
+	g := NewGenerator("")
+	ctx, cancel := context.WithCancel(context.Background())
+	includeBeads := false
+	includeAgentMail := false
+	includeCASS := true
+	client := &mockCASSSearcher{
+		installed: true,
+		search: func(callCtx context.Context, _ cass.SearchOptions) (*cass.SearchResponse, error) {
+			cancel()
+			return nil, callCtx.Err()
+		},
+	}
+
+	h, err := g.GenerateHandoff(ctx, GenerateHandoffOptions{
+		SessionName:      "test-session",
+		Goal:             "Preserve cancellation",
+		Now:              "Search prior context",
+		IncludeBeads:     &includeBeads,
+		IncludeAgentMail: &includeAgentMail,
+		IncludeCASS:      &includeCASS,
+		CASSClient:       client,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GenerateHandoff error = %v, want context.Canceled", err)
+	}
+	if h != nil {
+		t.Fatalf("handoff = %#v, want nil after cancellation", h)
+	}
+	if client.calls != 1 {
+		t.Fatalf("CASS calls = %d, want 1", client.calls)
+	}
+}
+
 func BenchmarkGenerateFromOutput(b *testing.B) {
 	tmpDir := b.TempDir()
 	g := NewGenerator(tmpDir)
@@ -1216,6 +1475,6 @@ func BenchmarkGenerateFromOutput(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = g.GenerateFromOutput("bench-session", output)
+		_, _ = g.GenerateFromOutput(context.Background(), "bench-session", output)
 	}
 }

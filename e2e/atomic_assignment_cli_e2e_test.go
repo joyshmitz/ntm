@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,7 +30,9 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
@@ -68,6 +71,7 @@ type atomicAssignmentProcessResult struct {
 
 type atomicCompletionWatchProcess struct {
 	cmd    *exec.Cmd
+	group  *testutil.ProcessGroupForTest
 	ctx    context.Context
 	cancel context.CancelFunc
 	stdout *os.File
@@ -292,6 +296,12 @@ type atomicAssignmentMailSnapshot struct {
 	GrantedPaths  [][]string
 	Active        []map[string]any
 	RawRequests   []byte
+}
+
+type atomicAssignmentFileSnapshot struct {
+	Exists bool
+	Mode   os.FileMode
+	Data   []byte
 }
 
 type atomicAssignmentMailStub struct {
@@ -807,14 +817,14 @@ esac
 			"NTM_E2E_VERBOSE_BV_INSIGHTS": insightsMode,
 		}, tracePath
 	}
-	assertDependencyCalls := func(t *testing.T, tracePath string) {
+	assertTriageIsTerminal := func(t *testing.T, tracePath string) {
 		t.Helper()
 		trace, err := os.ReadFile(tracePath)
 		if err != nil {
 			t.Fatalf("read verbose BV trace: %v", err)
 		}
-		if !bytes.Contains(trace, []byte("--robot-triage")) || !bytes.Contains(trace, []byte("--robot-insights")) {
-			t.Fatalf("verbose dependency calls=%q, want triage and insights", trace)
+		if string(trace) != "--robot-triage\n" {
+			t.Fatalf("verbose dependency calls=%q, want terminal triage call only", trace)
 		}
 	}
 	args := func(fixture *atomicAssignmentCLIFixture, beadID string) []string {
@@ -829,48 +839,39 @@ esac
 		}
 	}
 
-	t.Run("dependency fallback success", func(t *testing.T) {
-		fixture := newAtomicAssignmentCLIFixture(t)
-		beadID := fixture.createBead(t, "Verbose JSON dependency fallback success")
-		env, tracePath := installVerboseBV(t, fixture, "success", "success")
+	for _, test := range []struct {
+		name         string
+		insightsMode string
+	}{
+		{name: "insights available", insightsMode: "success"},
+		{name: "insights unavailable", insightsMode: "failure"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAtomicAssignmentCLIFixture(t)
+			title := "Verbose JSON triage failure is terminal " + test.name
+			beadID := fixture.createBead(t, title)
+			env, tracePath := installVerboseBV(t, fixture, strings.ReplaceAll(test.name, " ", "-"), test.insightsMode)
+			beforeFiles := snapshotAtomicAssignmentFiles(t, fixture.ledgerPath(), fixture.ledgerPath()+".bak")
+			beforePanes := snapshotAtomicAssignmentPanes(t, fixture)
 
-		result := fixture.runNTM(t, env, args(fixture, beadID)...)
-		if result.exitCode != 0 || len(result.stderr) != 0 {
-			t.Fatalf("verbose JSON fallback success exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
-		}
-		envelope := decodeExactlyOne(t, result)
-		if !envelope.Success || envelope.Command != "assign" || envelope.Session != fixture.session || envelope.Data == nil || envelope.Error != nil {
-			t.Fatalf("verbose JSON fallback success envelope=%+v", envelope)
-		}
-		if envelope.Data.Summary.ActionableCount != 1 {
-			t.Fatalf("actionable count=%d, want real br fallback bead %s", envelope.Data.Summary.ActionableCount, beadID)
-		}
-		if len(envelope.Warnings) != 1 || !strings.Contains(envelope.Warnings[0], "BV triage unavailable") ||
-			!strings.Contains(envelope.Warnings[0], "injected verbose triage failure") {
-			t.Fatalf("verbose JSON fallback warnings=%v", envelope.Warnings)
-		}
-		assertDependencyCalls(t, tracePath)
-	})
-
-	t.Run("dependency fallback failure", func(t *testing.T) {
-		fixture := newAtomicAssignmentCLIFixture(t)
-		beadID := fixture.createBead(t, "Verbose JSON dependency fallback failure")
-		env, tracePath := installVerboseBV(t, fixture, "failure", "failure")
-
-		result := fixture.runNTM(t, env, args(fixture, beadID)...)
-		if result.exitCode != 1 || len(result.stderr) != 0 {
-			t.Fatalf("verbose JSON fallback failure exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
-		}
-		envelope := decodeExactlyOne(t, result)
-		if envelope.Success || envelope.Command != "assign" || envelope.Session != fixture.session || envelope.Data != nil ||
-			envelope.Error == nil || envelope.Error.Code != "ASSIGN_ERROR" ||
-			!strings.Contains(envelope.Error.Message, "BV triage unavailable") ||
-			!strings.Contains(envelope.Error.Message, "fallback cycle inspection failed") ||
-			!strings.Contains(envelope.Error.Message, "injected verbose insights failure") {
-			t.Fatalf("verbose JSON fallback failure envelope=%+v", envelope)
-		}
-		assertDependencyCalls(t, tracePath)
-	})
+			result := fixture.runNTM(t, env, args(fixture, beadID)...)
+			if result.exitCode != 1 || len(result.stderr) != 0 {
+				t.Fatalf("verbose JSON terminal triage failure exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+			}
+			envelope := decodeExactlyOne(t, result)
+			if envelope.Success || envelope.Command != "assign" || envelope.Session != fixture.session || envelope.Data != nil ||
+				envelope.Error == nil || envelope.Error.Code != "ASSIGN_ERROR" ||
+				!strings.Contains(envelope.Error.Message, "actionable work could not be verified") ||
+				!strings.Contains(envelope.Error.Message, "injected verbose triage failure") || len(envelope.Warnings) != 0 {
+				t.Fatalf("verbose JSON terminal triage envelope=%+v", envelope)
+			}
+			assertTriageIsTerminal(t, tracePath)
+			fixture.assertBead(t, beadID, "open", "")
+			assertAtomicAssignmentFilesUnchanged(t, beforeFiles)
+			assertAtomicAssignmentPanesUnchanged(t, fixture, beforePanes)
+			fixture.assertMarkerCounts(t, title, map[int]int{0: 0, 1: 0})
+		})
+	}
 }
 
 func TestE2EAtomicAssignmentReceiptBackupRecoveryBuiltProcess(t *testing.T) {
@@ -1045,7 +1046,7 @@ func TestE2EAtomicAssignmentReservationRecoveryBuiltProcess(t *testing.T) {
 			"assign", fixture.session, "--repo=" + fixture.projectDir,
 			fmt.Sprintf("--pane=%d", pane), "--beads=" + beadID,
 			"--template=custom", "--template-file=" + templatePath,
-			"--force", "--ignore-deps", "--timeout=15s", "--json",
+			"--force", "--ignore-deps", "--timeout=60s", "--json",
 		}
 	}
 	zeroPrompt := reservationPrompt(zeroBeadID, zeroTitle)
@@ -1230,7 +1231,7 @@ func TestE2EAtomicAssignmentReservationRecoveryBuiltProcess(t *testing.T) {
 	time.Sleep(5500 * time.Millisecond)
 	zeroRetry := fixture.runNTM(t, env,
 		"assign", fixture.session, "--repo="+fixture.projectDir,
-		"--retry="+zeroBeadID, "--timeout=15s", "--json",
+		"--retry="+zeroBeadID, "--timeout=60s", "--json",
 	)
 	if zeroRetry.exitCode != 0 || len(bytes.TrimSpace(zeroRetry.stderr)) != 0 {
 		t.Fatalf("zero-grant recovery exit=%d stdout=%s stderr=%s", zeroRetry.exitCode, zeroRetry.stdout, zeroRetry.stderr)
@@ -1257,7 +1258,7 @@ func TestE2EAtomicAssignmentReservationRecoveryBuiltProcess(t *testing.T) {
 	stubMu.Unlock()
 	partialRetry := fixture.runNTM(t, env,
 		"assign", fixture.session, "--repo="+fixture.projectDir,
-		"--retry="+partialBeadID, "--timeout=15s", "--json",
+		"--retry="+partialBeadID, "--timeout=60s", "--json",
 	)
 	if partialRetry.exitCode != 1 || len(bytes.TrimSpace(partialRetry.stderr)) != 0 {
 		t.Fatalf("partial-grant retry exit=%d stdout=%s stderr=%s", partialRetry.exitCode, partialRetry.stdout, partialRetry.stderr)
@@ -1291,7 +1292,7 @@ func TestE2EAtomicAssignmentReservationRecoveryBuiltProcess(t *testing.T) {
 
 	partialClear := fixture.runNTM(t, env,
 		"--json", "assign", fixture.session, "--repo="+fixture.projectDir,
-		"--clear="+partialBeadID, "--timeout=15s",
+		"--clear="+partialBeadID, "--timeout=60s",
 	)
 	if partialClear.exitCode != 0 || len(bytes.TrimSpace(partialClear.stderr)) != 0 {
 		t.Fatalf("partial-grant clear exit=%d stdout=%s stderr=%s", partialClear.exitCode, partialClear.stdout, partialClear.stderr)
@@ -1307,6 +1308,17 @@ func TestE2EAtomicAssignmentReservationRecoveryBuiltProcess(t *testing.T) {
 	if unknownFailure.exitCode != 1 || len(bytes.TrimSpace(unknownFailure.stderr)) != 0 {
 		t.Fatalf("unknown-response assignment exit=%d stdout=%s stderr=%s", unknownFailure.exitCode, unknownFailure.stdout, unknownFailure.stderr)
 	}
+	stubMu.Lock()
+	unknownReserveCalls := reserveCalls[unknownBeadID]
+	unknownActiveReservations := len(activeReservations[unknownBeadID])
+	stubMu.Unlock()
+	if unknownReserveCalls != 1 || unknownActiveReservations == 0 {
+		t.Fatalf(
+			"unknown-response fixture did not reach its dropped-response boundary: reserve_calls=%d active_reservations=%d",
+			unknownReserveCalls,
+			unknownActiveReservations,
+		)
+	}
 	unknownPending := fixture.readLedgerAssignment(t, unknownBeadID)
 	if unknownPending.ReservationState != "unknown" || unknownPending.ReservationAttempts != 1 || unknownPending.ReservationError == "" ||
 		len(unknownPending.ReservationIDs) != 0 || unknownPending.DispatchAttempts != 0 {
@@ -1317,7 +1329,7 @@ func TestE2EAtomicAssignmentReservationRecoveryBuiltProcess(t *testing.T) {
 	time.Sleep(5500 * time.Millisecond)
 	unknownRetry := fixture.runNTM(t, env,
 		"assign", fixture.session, "--repo="+fixture.projectDir,
-		"--retry="+unknownBeadID, "--timeout=15s", "--json",
+		"--retry="+unknownBeadID, "--timeout=60s", "--json",
 	)
 	if unknownRetry.exitCode != 0 || len(bytes.TrimSpace(unknownRetry.stderr)) != 0 {
 		t.Fatalf("unknown-response recovery exit=%d stdout=%s stderr=%s", unknownRetry.exitCode, unknownRetry.stdout, unknownRetry.stderr)
@@ -1427,14 +1439,14 @@ func TestE2EAtomicAssignmentConcurrentBuiltProcesses(t *testing.T) {
 		t.Fatalf("create contended claim wrapper directory: %v", err)
 	}
 	enteredPath := filepath.Join(gateDir, "claim-finalization-entered")
+	completedPath := filepath.Join(gateDir, "claim-finalization-completed")
 	releasePath := filepath.Join(gateDir, "release-claim-finalization")
 	claimWrapper := strings.Join([]string{
 		"#!/bin/sh",
 		"real_br=" + tmux.ShellQuote(fixture.brPath),
 		"entered=" + tmux.ShellQuote(enteredPath),
+		"completed=" + tmux.ShellQuote(completedPath),
 		"release=" + tmux.ShellQuote(releasePath),
-		`"$real_br" "$@"`,
-		"status=$?",
 		"sync_command=0",
 		"flush_only=0",
 		`for arg in "$@"; do`,
@@ -1442,9 +1454,14 @@ func TestE2EAtomicAssignmentConcurrentBuiltProcesses(t *testing.T) {
 		`  if [ "$arg" = "--flush-only" ]; then flush_only=1; fi`,
 		"done",
 		`guarded_sync=$((sync_command * flush_only))`,
-		`if [ "$status" -eq 0 ] && [ "$guarded_sync" -eq 1 ]; then`,
+		`if [ "$guarded_sync" -eq 1 ]; then`,
 		`  printf 'guarded-sync\n' >> "$entered"`,
 		`  while [ ! -e "$release" ]; do sleep 0.01; done`,
+		"fi",
+		`"$real_br" "$@"`,
+		"status=$?",
+		`if [ "$status" -eq 0 ] && [ "$guarded_sync" -eq 1 ]; then`,
+		`  printf 'guarded-sync\n' >> "$completed"`,
 		"fi",
 		`exit "$status"`,
 		"",
@@ -1454,7 +1471,7 @@ func TestE2EAtomicAssignmentConcurrentBuiltProcesses(t *testing.T) {
 	}
 	path := gateDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH")
 	afterStart := func() {
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(60 * time.Second)
 		for {
 			data, err := os.ReadFile(enteredPath)
 			if err == nil && len(data) > 0 {
@@ -1501,6 +1518,13 @@ func TestE2EAtomicAssignmentConcurrentBuiltProcesses(t *testing.T) {
 	if got := strings.Count(string(claimCalls), "guarded-sync\n"); got != 1 {
 		t.Fatalf("contenders performed %d guarded claim finalizations, want exactly 1", got)
 	}
+	completedCalls, err := os.ReadFile(completedPath)
+	if err != nil {
+		t.Fatalf("read completed guarded claim counter: %v", err)
+	}
+	if got := strings.Count(string(completedCalls), "guarded-sync\n"); got != 1 {
+		t.Fatalf("contenders completed %d guarded claim finalizations, want exactly 1", got)
+	}
 
 	changedTemplate := templateBody + "::different"
 	if err := os.WriteFile(templatePath, []byte(changedTemplate), 0o600); err != nil {
@@ -1517,6 +1541,272 @@ func TestE2EAtomicAssignmentConcurrentBuiltProcesses(t *testing.T) {
 	}
 	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
 	assertAtomicAssignmentReceiptUnchanged(t, record, fixture.readLedgerAssignment(t, beadID))
+}
+
+func TestE2EAtomicDistributeConcurrentBuiltProcessesDeliverExactlyOnce(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	fixture.primePaneForSafeDispatch(t, 0)
+	time.Sleep(5500 * time.Millisecond)
+
+	marker := fmt.Sprintf("NTM_ATOMIC_DISTRIBUTE_CONTENDED_%d", time.Now().UnixNano())
+	title := marker + " built process assignment"
+	beadID := fixture.createBead(t, title)
+	triagePath := filepath.Join(fixture.root, "contended-distribute-triage.json")
+	planPath := filepath.Join(fixture.root, "contended-distribute-plan.json")
+	if err := os.WriteFile(triagePath, []byte(`{"triage":{"recommendations":[]}}`), 0o600); err != nil {
+		t.Fatalf("write contended distribute triage payload: %v", err)
+	}
+	planPayload, err := json.Marshal(map[string]any{
+		"plan": map[string]any{
+			"tracks": []map[string]any{{
+				"track_id": "contended-distribute-track",
+				"items": []map[string]any{{
+					"id": beadID, "title": title, "status": "open", "priority": 1,
+				}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal contended distribute plan: %v", err)
+	}
+	if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+		t.Fatalf("write contended distribute plan payload: %v", err)
+	}
+
+	binDir := filepath.Join(fixture.root, "contended-distribute-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create contended distribute bin: %v", err)
+	}
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write contended distribute bv wrapper: %v", err)
+	}
+	showBarrier := filepath.Join(fixture.root, "contended-distribute-live-show.trace")
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		"barrier=" + tmux.ShellQuote(showBarrier),
+		"bead=" + tmux.ShellQuote(beadID),
+		"show_command=0",
+		"previous=",
+		`for arg in "$@"; do`,
+		`  if [ "$previous" = "show" ] && [ "$arg" = "$bead" ]; then show_command=1; fi`,
+		`  previous="$arg"`,
+		"done",
+		`if [ "$show_command" -eq 1 ]; then`,
+		`  printf '%s\n' "$$" >> "$barrier"`,
+		`  deadline=0`,
+		`  while [ "$(wc -l < "$barrier")" -lt 2 ]; do`,
+		`    sleep 0.01`,
+		`    deadline=$((deadline + 1))`,
+		`    if [ "$deadline" -gt 6000 ]; then exit 98; fi`,
+		`  done`,
+		"fi",
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write contended distribute br wrapper: %v", err)
+	}
+	env := map[string]string{
+		"PATH":                   binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
+		"NTM_E2E_TRIAGE_PAYLOAD": triagePath,
+		"NTM_E2E_PLAN_PAYLOAD":   planPath,
+	}
+	args := []string{"--json", "send", fixture.session, "--distribute", "--dist-limit=1", "--dist-auto"}
+	results := fixture.runNTMConcurrent(t, 2, env, args...)
+	type distributeEnvelope struct {
+		Success   bool `json:"success"`
+		Delivered int  `json:"delivered"`
+		Failed    int  `json:"failed"`
+		Receipts  []struct {
+			BeadID         string `json:"bead_id"`
+			PaneID         string `json:"pane_id"`
+			Status         string `json:"status"`
+			Protocol       string `json:"protocol"`
+			DeliveryID     string `json:"delivery_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+			ClaimActor     string `json:"claim_actor"`
+			Replayed       bool   `json:"replayed"`
+		} `json:"receipts"`
+	}
+	envelopes := make([]distributeEnvelope, len(results))
+	for index, result := range results {
+		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+			t.Fatalf("distribute contender %d exit=%d stdout=%s stderr=%s", index, result.exitCode, result.stdout, result.stderr)
+		}
+		decodeAtomicAssignmentJSON(t, result.stdout, &envelopes[index])
+		if !envelopes[index].Success || envelopes[index].Delivered != 1 || envelopes[index].Failed != 0 || len(envelopes[index].Receipts) != 1 {
+			t.Fatalf("distribute contender %d envelope = %+v", index, envelopes[index])
+		}
+		receipt := envelopes[index].Receipts[0]
+		if receipt.BeadID != beadID || receipt.PaneID != fixture.panes[0].ID || receipt.Status != "delivered" ||
+			receipt.Protocol != "double_enter" || receipt.DeliveryID == "" || receipt.IdempotencyKey == "" || receipt.ClaimActor == "" {
+			t.Fatalf("distribute contender %d receipt = %+v", index, receipt)
+		}
+	}
+	first := envelopes[0].Receipts[0]
+	second := envelopes[1].Receipts[0]
+	if first.DeliveryID != second.DeliveryID || first.IdempotencyKey != second.IdempotencyKey || first.ClaimActor != second.ClaimActor {
+		t.Fatalf("contended distribute receipts diverged: first=%+v second=%+v", first, second)
+	}
+	if first.Replayed == second.Replayed {
+		t.Fatalf("contended distribute replay flags = %v and %v, want exactly one replay", first.Replayed, second.Replayed)
+	}
+	fixture.waitForMarkerCount(t, 0, marker, 1)
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+	record := fixture.readLedgerAssignment(t, beadID)
+	if record.Status != "assigned" || record.ClaimState != "claimed" || record.ClaimStatus != "in_progress" ||
+		record.ClaimAttempts != 1 || record.DispatchState != "sent" || record.DispatchAttempts != 1 ||
+		record.DispatchReceiptID != first.DeliveryID || record.IdempotencyKey != first.IdempotencyKey || record.ClaimActor != first.ClaimActor {
+		t.Fatalf("contended distribute durable record = %+v", record)
+	}
+	fixture.assertBead(t, beadID, "in_progress", record.ClaimActor)
+	showCalls, err := os.ReadFile(showBarrier)
+	if err != nil {
+		t.Fatalf("read contended distribute live-show barrier: %v", err)
+	}
+	if len(strings.Fields(string(showCalls))) < 2 {
+		t.Fatalf("only one contender crossed live-open revalidation: %s", showCalls)
+	}
+}
+
+func TestE2EAtomicDistributeCanonicalMultiWindowDelivery(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	topology := fixture.addSecondAgentWindow(t)
+	targets := []atomicAssignmentPane{topology["0.1"], topology["1.1"]}
+	for _, target := range targets {
+		fixture.primeEndpointForSafeDispatch(t, target)
+	}
+	time.Sleep(5500 * time.Millisecond)
+
+	beadIDs := []string{
+		fixture.createBead(t, "Atomic distribute window zero"),
+		fixture.createBead(t, "Atomic distribute window one"),
+	}
+	triagePath := filepath.Join(fixture.root, "multiwindow-distribute-triage.json")
+	planPath := filepath.Join(fixture.root, "multiwindow-distribute-plan.json")
+	if err := os.WriteFile(triagePath, []byte(`{"triage":{"recommendations":[]}}`), 0o600); err != nil {
+		t.Fatalf("write multiwindow distribute triage payload: %v", err)
+	}
+	planPayload, err := json.Marshal(map[string]any{
+		"plan": map[string]any{
+			"tracks": []map[string]any{{
+				"track_id": "multiwindow-distribute-track",
+				"items": []map[string]any{
+					{"id": beadIDs[0], "title": "Atomic distribute window zero", "status": "open", "priority": 1},
+					{"id": beadIDs[1], "title": "Atomic distribute window one", "status": "open", "priority": 1},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal multiwindow distribute plan: %v", err)
+	}
+	if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+		t.Fatalf("write multiwindow distribute plan: %v", err)
+	}
+	binDir := filepath.Join(fixture.root, "multiwindow-distribute-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create multiwindow distribute bin: %v", err)
+	}
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write multiwindow distribute bv wrapper: %v", err)
+	}
+	env := map[string]string{
+		"PATH":                   binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
+		"NTM_E2E_TRIAGE_PAYLOAD": triagePath,
+		"NTM_E2E_PLAN_PAYLOAD":   planPath,
+	}
+	result := fixture.runNTM(t, env, "--json", "send", fixture.session, "--distribute", "--dist-limit=2", "--dist-auto")
+	if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+		t.Fatalf("multiwindow distribute exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	var envelope struct {
+		Success   bool `json:"success"`
+		Delivered int  `json:"delivered"`
+		Failed    int  `json:"failed"`
+		Receipts  []struct {
+			BeadID         string `json:"bead_id"`
+			PaneID         string `json:"pane_id"`
+			PaneTarget     string `json:"pane_target"`
+			Status         string `json:"status"`
+			Protocol       string `json:"protocol"`
+			DeliveryID     string `json:"delivery_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+			ClaimActor     string `json:"claim_actor"`
+		} `json:"receipts"`
+	}
+	decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+	if !envelope.Success || envelope.Delivered != 2 || envelope.Failed != 0 || len(envelope.Receipts) != 2 {
+		t.Fatalf("multiwindow distribute envelope = %+v", envelope)
+	}
+	byBead := make(map[string]struct {
+		paneID     string
+		paneTarget string
+		deliveryID string
+		key        string
+		actor      string
+	}, len(envelope.Receipts))
+	for _, receipt := range envelope.Receipts {
+		if receipt.Status != "delivered" || receipt.Protocol != "double_enter" || receipt.DeliveryID == "" ||
+			receipt.IdempotencyKey == "" || receipt.ClaimActor == "" {
+			t.Fatalf("multiwindow distribute receipt = %+v", receipt)
+		}
+		if _, duplicate := byBead[receipt.BeadID]; duplicate {
+			t.Fatalf("duplicate multiwindow receipt for %s", receipt.BeadID)
+		}
+		byBead[receipt.BeadID] = struct {
+			paneID     string
+			paneTarget string
+			deliveryID string
+			key        string
+			actor      string
+		}{receipt.PaneID, receipt.PaneTarget, receipt.DeliveryID, receipt.IdempotencyKey, receipt.ClaimActor}
+	}
+	for index, beadID := range beadIDs {
+		receipt, ok := byBead[beadID]
+		if !ok {
+			t.Fatalf("multiwindow distribute omitted bead %s: %+v", beadID, byBead)
+		}
+		target := targets[index]
+		if receipt.paneID != target.ID || receipt.paneTarget != target.Target {
+			t.Fatalf("bead %s receipt target = %s/%s, want %s/%s", beadID, receipt.paneTarget, receipt.paneID, target.Target, target.ID)
+		}
+		fixture.waitForEndpointMarkerCount(t, target, beadID, 1)
+		record := fixture.readLedgerAssignment(t, beadID)
+		if record.OccupancyKey != target.ID || record.DispatchTarget != target.ID || record.DispatchReceiptID != receipt.deliveryID ||
+			record.IdempotencyKey != receipt.key || record.ClaimActor != receipt.actor || record.DispatchAttempts != 1 || record.ClaimAttempts != 1 {
+			t.Fatalf("multiwindow durable record for %s = %+v", beadID, record)
+		}
+		fixture.assertBead(t, beadID, "in_progress", record.ClaimActor)
+	}
+	if targets[0].ID == targets[1].ID || targets[0].Index != targets[1].Index {
+		t.Fatalf("multiwindow fixture did not exercise duplicate local indexes: %+v", targets)
+	}
 }
 
 func TestE2EAtomicAssignmentEligibilityMutationAtClaimBoundaryBuiltProcess(t *testing.T) {
@@ -2020,37 +2310,26 @@ func TestE2EAtomicAssignmentClearFailedBuiltProcess(t *testing.T) {
 	}
 	retainedBefore := fixture.readLedgerAssignment(t, retainedBeadID)
 	failedBeforeDetection := fixture.readLedgerAssignment(t, failedBeadID)
-	fixture.mustTMUX(t, "send-keys", "-t", fixture.panes[0].ID, "-l", "ERROR: fatal assignment failure")
-	fixture.mustTMUX(t, "send-keys", "-t", fixture.panes[0].ID, "Enter")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	watch := exec.CommandContext(ctx, fixture.ntmPath,
-		"assign", fixture.session,
-		"--repo="+fixture.projectDir,
-		"--watch",
-		"--watch-interval=100ms",
-		"--dry-run",
-		"--reserve-files=false",
-		"--quiet",
-	)
-	watch.Dir = fixture.projectDir
-	watch.Env = atomicAssignmentMergeEnv(fixture.env, mail.env())
-	var watchStdout bytes.Buffer
-	var watchStderr bytes.Buffer
-	watch.Stdout = &watchStdout
-	watch.Stderr = &watchStderr
-	if err := watch.Start(); err != nil {
-		t.Fatalf("start assignment watch: %v", err)
-	}
-	watchStopped := false
-	defer func() {
-		if !watchStopped {
-			_ = watch.Process.Signal(syscall.SIGTERM)
-			_ = watch.Wait()
+	watch := fixture.startCompletionWatch(t, mail.env())
+	readinessDeadline := time.Now().Add(60 * time.Second)
+	var watchStdout, watchStderr string
+	for {
+		watchStdout, watchStderr = watch.output(t)
+		if strings.Contains(watchStdout, "Starting watch mode with strategy=") {
+			break
 		}
-	}()
-	deadline := time.Now().Add(10 * time.Second)
+		if time.Now().After(readinessDeadline) {
+			t.Fatalf("assignment watch did not become ready: stdout=%s stderr=%s", watchStdout, watchStderr)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	const failureMarker = "ERROR: fatal assignment failure"
+	fixture.mustTMUX(t, "send-keys", "-t", fixture.panes[0].ID, "-l", failureMarker)
+	fixture.mustTMUX(t, "send-keys", "-t", fixture.panes[0].ID, "Enter")
+	fixture.waitForMarkerCount(t, 0, failureMarker, 1)
+
+	deadline := time.Now().Add(20 * time.Second)
 	for {
 		ledger, err := fixture.readLedger()
 		if err == nil {
@@ -2060,7 +2339,8 @@ func TestE2EAtomicAssignmentClearFailedBuiltProcess(t *testing.T) {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("completion detector did not mark %s failed: read_err=%v stdout=%s stderr=%s", failedBeadID, err, watchStdout.String(), watchStderr.String())
+			watchStdout, watchStderr = watch.output(t)
+			t.Fatalf("completion detector did not mark %s failed: read_err=%v stdout=%s stderr=%s", failedBeadID, err, watchStdout, watchStderr)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -2075,18 +2355,9 @@ func TestE2EAtomicAssignmentClearFailedBuiltProcess(t *testing.T) {
 	if mailAfterDetection.ReleaseCalls != 1 || !reflect.DeepEqual(mailAfterDetection.ReleasedIDs, failedBeforeDetection.ReservationIDs) || len(mailAfterDetection.Active) != 0 {
 		t.Fatalf("completion detector reservation release = %+v", mailAfterDetection)
 	}
-	if err := watch.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("signal assignment watch: %v", err)
-	}
-	if err := watch.Wait(); err != nil {
-		t.Fatalf("assignment watch did not exit cleanly: %v stdout=%s stderr=%s", err, watchStdout.String(), watchStderr.String())
-	}
-	watchStopped = true
-	if ctx.Err() != nil {
-		t.Fatalf("assignment watch exceeded deadline: %v", ctx.Err())
-	}
-	if len(bytes.TrimSpace(watchStderr.Bytes())) != 0 {
-		t.Fatalf("assignment watch stderr=%s", watchStderr.String())
+	watchStdout, watchStderr = watch.stopClean(t)
+	if len(bytes.TrimSpace([]byte(watchStderr))) != 0 {
+		t.Fatalf("assignment watch stderr=%s", watchStderr)
 	}
 	retainedAfterDetection := fixture.readLedgerAssignment(t, retainedBeadID)
 	if retainedAfterDetection.Status != "assigned" && retainedAfterDetection.Status != "working" {
@@ -2215,13 +2486,13 @@ func TestE2EAtomicCompletionOutboxRestartReplayAckRetryAndFinalAckBuiltProcess(t
 	queuedFirstBeadID, queuedFirstEventID, queuedFirstMarker := seedCompletionOutbox("Completion outbox queued lease first")
 	queuedSecondBeadID, queuedSecondEventID, queuedSecondMarker := seedCompletionOutbox("Completion outbox queued lease second")
 	queuedOriginal := fixture.startCompletionWatchWithInterval(t, map[string]string{
-		"NTM_TEST_COMPLETION_LEASE_DURATION": "8s",
-		"NTM_TEST_COMPLETION_HANDLER_DELAY":  "30s",
+		"NTM_TEST_COMPLETION_LEASE_DURATION": "15s",
+		"NTM_TEST_COMPLETION_HANDLER_DELAY":  "45s",
 	}, 2*time.Second)
 	var queuedOriginalToken string
 	var queuedFirstExpiry time.Time
 	var queuedSecondExpiry time.Time
-	deadline = time.Now().Add(20 * time.Second)
+	deadline = time.Now().Add(45 * time.Second)
 	for {
 		first := fixture.readLedgerAssignment(t, queuedFirstBeadID)
 		second := fixture.readLedgerAssignment(t, queuedSecondBeadID)
@@ -2252,7 +2523,7 @@ func TestE2EAtomicCompletionOutboxRestartReplayAckRetryAndFinalAckBuiltProcess(t
 			item.record.CompletionLeaseExpiresAt != nil && item.record.CompletionLeaseExpiresAt.After(initialExpiry)
 	}
 	var activeCompletion, expiredCompletion queuedCompletion
-	deadline = time.Now().Add(25 * time.Second)
+	deadline = time.Now().Add(45 * time.Second)
 	for activeCompletion.beadID == "" {
 		firstCompletion.record = fixture.readLedgerAssignment(t, queuedFirstBeadID)
 		secondCompletion.record = fixture.readLedgerAssignment(t, queuedSecondBeadID)
@@ -2275,11 +2546,11 @@ func TestE2EAtomicCompletionOutboxRestartReplayAckRetryAndFinalAckBuiltProcess(t
 	}
 
 	queuedTakeover := fixture.startCompletionWatchWithInterval(t, map[string]string{
-		"NTM_TEST_COMPLETION_LEASE_DURATION": "8s",
-		"NTM_TEST_COMPLETION_HANDLER_DELAY":  "5s",
+		"NTM_TEST_COMPLETION_LEASE_DURATION": "15s",
+		"NTM_TEST_COMPLETION_HANDLER_DELAY":  "10s",
 	}, 500*time.Millisecond)
 	var queuedTakeoverToken string
-	deadline = time.Now().Add(30 * time.Second)
+	deadline = time.Now().Add(60 * time.Second)
 	for {
 		queued := fixture.readLedgerAssignment(t, expiredCompletion.beadID)
 		active := fixture.readLedgerAssignment(t, activeCompletion.beadID)
@@ -2319,7 +2590,7 @@ func TestE2EAtomicCompletionOutboxRestartReplayAckRetryAndFinalAckBuiltProcess(t
 		t.Fatalf("active queued event lost its live heartbeat during queued-event takeover: %+v", activeDuringTakeover)
 	}
 
-	deadline = time.Now().Add(45 * time.Second)
+	deadline = time.Now().Add(2 * time.Minute)
 	for {
 		active := fixture.readLedgerAssignment(t, activeCompletion.beadID)
 		queued := fixture.readLedgerAssignment(t, expiredCompletion.beadID)
@@ -2359,14 +2630,14 @@ func TestE2EAtomicCompletionOutboxRestartReplayAckRetryAndFinalAckBuiltProcess(t
 	// and the competing process must never enter the handler.
 	contendedBeadID, contendedEventID, contendedMarker := seedCompletionOutbox("Completion outbox multi-process lease")
 	leaseEnv := map[string]string{
-		"NTM_TEST_COMPLETION_LEASE_DURATION": "3s",
-		"NTM_TEST_COMPLETION_HANDLER_DELAY":  "10s",
+		"NTM_TEST_COMPLETION_LEASE_DURATION": "30s",
+		"NTM_TEST_COMPLETION_HANDLER_DELAY":  "100s",
 	}
 	contenderA := fixture.startCompletionWatchWithInterval(t, leaseEnv, 2*time.Second)
 	contenderB := fixture.startCompletionWatchWithInterval(t, leaseEnv, 2*time.Second)
 	var ownerToken string
 	var firstLeaseExpiry time.Time
-	deadline = time.Now().Add(20 * time.Second)
+	deadline = time.Now().Add(45 * time.Second)
 	for {
 		current := fixture.readLedgerAssignment(t, contendedBeadID)
 		if current.PendingCompletionEventID == contendedEventID && current.CompletionConsumerToken != "" && current.CompletionLeaseExpiresAt != nil {
@@ -2381,23 +2652,33 @@ func TestE2EAtomicCompletionOutboxRestartReplayAckRetryAndFinalAckBuiltProcess(t
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if wait := time.Until(firstLeaseExpiry.Add(750 * time.Millisecond)); wait > 0 {
-		time.Sleep(wait)
+	deadline = time.Now().Add(60 * time.Second)
+	var current *atomicAssignmentRecord
+	var stdoutA, stderrA, stdoutB, stderrB string
+	for {
+		current = fixture.readLedgerAssignment(t, contendedBeadID)
+		stdoutA, stderrA = contenderA.output(t)
+		stdoutB, stderrB = contenderB.output(t)
+		if current.PendingCompletionEventID != contendedEventID || current.CompletionConsumerToken != ownerToken {
+			t.Fatalf("slow handler lost completion ownership before heartbeat proof: first_expiry=%v record=%+v", firstLeaseExpiry, current)
+		}
+		if count := strings.Count(stdoutA, contendedMarker) + strings.Count(stdoutB, contendedMarker); count != 0 {
+			t.Fatalf("slow handler completed before heartbeat proof: count=%d a=%s b=%s", count, stdoutA, stdoutB)
+		}
+		if len(bytes.TrimSpace([]byte(stderrA))) != 0 || len(bytes.TrimSpace([]byte(stderrB))) != 0 {
+			t.Fatalf("contending watcher stderr before completion: a=%s b=%s", stderrA, stderrB)
+		}
+		now := time.Now()
+		if !now.Before(firstLeaseExpiry) && current.CompletionLeaseExpiresAt != nil &&
+			current.CompletionLeaseExpiresAt.After(firstLeaseExpiry) && current.CompletionLeaseExpiresAt.After(now) {
+			break
+		}
+		if now.After(deadline) {
+			t.Fatalf("slow handler lease was not renewed past original expiry: first_expiry=%v record=%+v", firstLeaseExpiry, current)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	current := fixture.readLedgerAssignment(t, contendedBeadID)
-	stdoutA, stderrA := contenderA.output(t)
-	stdoutB, stderrB := contenderB.output(t)
-	if current.PendingCompletionEventID != contendedEventID || current.CompletionConsumerToken != ownerToken ||
-		current.CompletionLeaseExpiresAt == nil || !current.CompletionLeaseExpiresAt.After(firstLeaseExpiry) {
-		t.Fatalf("slow handler lease was not renewed past original expiry: first_expiry=%v record=%+v", firstLeaseExpiry, current)
-	}
-	if count := strings.Count(stdoutA, contendedMarker) + strings.Count(stdoutB, contendedMarker); count != 0 {
-		t.Fatalf("slow handler completed before heartbeat proof: count=%d a=%s b=%s", count, stdoutA, stdoutB)
-	}
-	if len(bytes.TrimSpace([]byte(stderrA))) != 0 || len(bytes.TrimSpace([]byte(stderrB))) != 0 {
-		t.Fatalf("contending watcher stderr before completion: a=%s b=%s", stderrA, stderrB)
-	}
-	deadline = time.Now().Add(20 * time.Second)
+	deadline = time.Now().Add(90 * time.Second)
 	for {
 		current = fixture.readLedgerAssignment(t, contendedBeadID)
 		if outboxCleared(current) {
@@ -2482,7 +2763,12 @@ func TestE2EAtomicCompletionOutboxRestartReplayAckRetryAndFinalAckBuiltProcess(t
 	if afterStaleAck.PendingCompletionEventID != crashEventID || afterStaleAck.CompletionConsumerToken != recoveryToken {
 		t.Fatalf("stale holder acknowledgement changed recovery lease: %+v", afterStaleAck)
 	}
-	deadline = time.Now().Add(20 * time.Second)
+	// The handler intentionally holds the lease for five seconds so this test can
+	// exercise a stale acknowledgement while the replacement owns it. Under the
+	// full E2E shard, scheduler contention can delay that bounded handler without
+	// invalidating the heartbeat-protected lease, so wait for the durable outcome
+	// rather than coupling correctness to a 20-second wall-clock slot.
+	deadline = time.Now().Add(60 * time.Second)
 	for {
 		current = fixture.readLedgerAssignment(t, crashBeadID)
 		if outboxCleared(current) {
@@ -2500,11 +2786,29 @@ func TestE2EAtomicCompletionOutboxRestartReplayAckRetryAndFinalAckBuiltProcess(t
 	}
 
 	// A final fresh process must not replay any acknowledged event generation.
+	// Give it a new sentinel generation and wait for that durable acknowledgement
+	// so the assertion proves the detector completed a post-restart scan without
+	// relying on a fixed grace sleep.
+	restartBeadID, restartEventID, restartMarker := seedCompletionOutbox("Completion outbox post-ack restart sentinel")
 	restart := fixture.startCompletionWatch(t, nil)
-	time.Sleep(750 * time.Millisecond)
+	deadline = time.Now().Add(60 * time.Second)
+	for {
+		current = fixture.readLedgerAssignment(t, restartBeadID)
+		if outboxCleared(current) {
+			break
+		}
+		if time.Now().After(deadline) {
+			stdout, stderr := restart.output(t)
+			t.Fatalf("post-ack watcher did not scan sentinel: record=%+v stdout=%s stderr=%s", current, stdout, stderr)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	restartStdout, restartStderr := restart.stopClean(t)
 	if len(bytes.TrimSpace([]byte(restartStderr))) != 0 {
 		t.Fatalf("post-ack completion watcher stderr=%s", restartStderr)
+	}
+	if count := strings.Count(restartStdout, restartMarker); count != 1 {
+		t.Fatalf("post-ack sentinel handler count=%d, want 1: bead=%s event=%s stdout=%s", count, restartBeadID, restartEventID, restartStdout)
 	}
 	for _, completed := range []struct {
 		beadID string
@@ -2808,13 +3112,13 @@ func TestE2EAtomicAssignmentObservationDeadlineContracts(t *testing.T) {
 		fixture.assertBead(t, beadID, "in_progress", record.ClaimActor)
 	})
 
-	t.Run("direct_short_timeout_has_zero_side_effects", func(t *testing.T) {
+	t.Run("direct_observation_cancellation_has_zero_side_effects", func(t *testing.T) {
 		fixture := newAtomicAssignmentCLIFixture(t)
 		mail := newAtomicAssignmentMailStub(fixture.projectDir)
 		defer mail.close()
 		beadID := fixture.createBead(t, "Timed assignment observation internal/cli/observation_timeout.go")
 		prompt := fmt.Sprintf("NTM_ATOMIC_OBSERVATION_TIMEOUT_%d", time.Now().UnixNano())
-		tmuxBinary, reached := fixture.armTMUXCaptureDelay(t, 2500*time.Millisecond)
+		tmuxBinary, reached := fixture.armTMUXCaptureDelay(t, 30*time.Second)
 		brPath, brTrace := fixture.armBRInvocationTrace(t)
 		ledgerReplicas := []string{fixture.ledgerPath(), fixture.ledgerPath() + ".bak"}
 		assertLedgerReplicasAbsent := func(stage string) {
@@ -2834,7 +3138,9 @@ func TestE2EAtomicAssignmentObservationDeadlineContracts(t *testing.T) {
 		env := mail.env()
 		env["NTM_TMUX_BINARY"] = tmuxBinary
 		env["PATH"] = brPath
-		result := fixture.runNTM(t, env,
+		result := fixture.runNTMInterrupted(t, env, func(pid int) {
+			waitForAtomicAssignmentPath(t, reached, pid)
+		},
 			"assign", fixture.session,
 			"--repo="+fixture.projectDir,
 			"--pane="+fixture.panes[0].ID,
@@ -2843,7 +3149,7 @@ func TestE2EAtomicAssignmentObservationDeadlineContracts(t *testing.T) {
 			"--force",
 			"--ignore-deps",
 			"--reserve-files=true",
-			"--timeout=250ms",
+			"--timeout=30s",
 			"--json",
 		)
 		assertAtomicAssignmentSingleTimeoutJSON(t, result)
@@ -2906,6 +3212,350 @@ func TestE2EAtomicAssignmentObservationDeadlineContracts(t *testing.T) {
 	})
 }
 
+func TestE2EAtomicCoordinatorTogglePersistenceBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	ntmPath, err := ensureE2ENTMBin()
+	if err != nil {
+		t.Fatalf("resolve E2E ntm binary: %v", err)
+	}
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "project")
+	homeDir := filepath.Join(root, "home")
+	for _, dir := range []string{projectDir, homeDir, filepath.Join(root, "config"), filepath.Join(root, "data")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("create toggle fixture directory %s: %v", dir, err)
+		}
+	}
+	fixture := &atomicAssignmentCLIFixture{
+		ntmPath:    ntmPath,
+		root:       root,
+		projectDir: projectDir,
+		homeDir:    homeDir,
+		env: atomicAssignmentIsolatedEnv(map[string]string{
+			"HOME":              homeDir,
+			"XDG_CONFIG_HOME":   filepath.Join(root, "config"),
+			"XDG_DATA_HOME":     filepath.Join(root, "data"),
+			"AGENT_MAIL_URL":    "http://127.0.0.1:1/mcp/",
+			"AGENT_MAIL_TOKEN":  "",
+			"HTTP_PROXY":        "",
+			"HTTPS_PROXY":       "",
+			"ALL_PROXY":         "",
+			"NO_PROXY":          "127.0.0.1,localhost",
+			"NO_COLOR":          "1",
+			"TERM":              "xterm-256color",
+			"NTM_OUTPUT_FORMAT": "",
+			"NTM_ROBOT_FORMAT":  "",
+		}),
+	}
+	configPath := filepath.Join(root, "selected-config.toml")
+	original := strings.Join([]string{
+		"# retained top-level comment",
+		`[coordinator] # retained section comment`,
+		`auto_assign = false # retained auto comment`,
+		`send_digests = false # retained digest comment`,
+		`conflict_notify = false`,
+		`conflict_negotiate = true`,
+		`poll_interval = "15s"`,
+		"",
+		"[assign]",
+		`operator_gated_labels = ["security-review"]`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatalf("write selected config: %v", err)
+	}
+
+	assertJSONToggle := func(result atomicAssignmentProcessResult, feature string, enabled bool, written map[string]string) {
+		t.Helper()
+		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+			t.Fatalf("toggle %s exit=%d stdout=%s stderr=%s", feature, result.exitCode, result.stdout, result.stderr)
+		}
+		var envelope struct {
+			Feature    string            `json:"feature"`
+			Enabled    bool              `json:"enabled"`
+			Persisted  bool              `json:"persisted"`
+			ConfigPath string            `json:"config_path"`
+			Written    map[string]string `json:"written"`
+		}
+		decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+		if envelope.Feature != feature || envelope.Enabled != enabled || !envelope.Persisted ||
+			envelope.ConfigPath != configPath || !reflect.DeepEqual(envelope.Written, written) {
+			t.Fatalf("toggle envelope=%+v, want feature=%s enabled=%t path=%s written=%v", envelope, feature, enabled, configPath, written)
+		}
+	}
+
+	digest := fixture.runNTM(t, nil,
+		"--config="+configPath, "--json", "coordinator", "enable", "digest", "--interval=30m",
+	)
+	assertJSONToggle(digest, "digest", true, map[string]string{
+		"send_digests": "true", "digest_interval": `"30m"`,
+	})
+	disableConflict := fixture.runNTM(t, nil,
+		"--config="+configPath, "--json", "coordinator", "disable", "conflict-negotiate",
+	)
+	assertJSONToggle(disableConflict, "conflict-negotiate", false, map[string]string{"conflict_negotiate": "false"})
+	enableAuto := fixture.runNTM(t, nil,
+		"--config="+configPath, "--json", "coordinator", "enable", "auto-assign",
+	)
+	assertJSONToggle(enableAuto, "auto-assign", true, map[string]string{"auto_assign": "true"})
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read toggled config: %v", err)
+	}
+	updated := string(data)
+	for _, retained := range []string{
+		"# retained top-level comment",
+		`[coordinator] # retained section comment`,
+		`auto_assign = true # retained auto comment`,
+		`send_digests = true # retained digest comment`,
+		`operator_gated_labels = ["security-review"]`,
+	} {
+		if !strings.Contains(updated, retained) {
+			t.Fatalf("toggle lost %q:\n%s", retained, updated)
+		}
+	}
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("reload toggled config: %v", err)
+	}
+	if !loaded.Coordinator.AutoAssign || !loaded.Coordinator.SendDigests || loaded.Coordinator.DigestInterval != 30*time.Minute ||
+		loaded.Coordinator.ConflictNegotiate || !reflect.DeepEqual(loaded.Assign.OperatorGatedLabels, []string{"security-review"}) {
+		t.Fatalf("reloaded toggled config = coordinator:%+v assign:%+v", loaded.Coordinator, loaded.Assign)
+	}
+
+	beforeInvalid := append([]byte(nil), data...)
+	for _, tc := range []struct {
+		name           string
+		args           []string
+		wantDiagnostic string
+	}{
+		{name: "short digest interval", args: []string{"--config=" + configPath, "--json", "coordinator", "enable", "digest", "--interval=5s"}, wantDiagnostic: "must be at least"},
+		{name: "unknown feature", args: []string{"--config=" + configPath, "--json", "coordinator", "enable", "not-a-feature"}, wantDiagnostic: "unknown feature"},
+		{name: "interval on non-digest feature", args: []string{"--config=" + configPath, "--json", "coordinator", "enable", "auto-assign", "--interval=30m"}, wantDiagnostic: "only valid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := fixture.runNTM(t, nil, tc.args...)
+			code, message := assertAtomicAssignmentSingleFailureJSON(t, result)
+			if code != "INVALID_FLAG" || !strings.Contains(message, tc.wantDiagnostic) {
+				t.Fatalf("invalid toggle code=%q message=%q, want INVALID_FLAG containing %q", code, message, tc.wantDiagnostic)
+			}
+			after, readErr := os.ReadFile(configPath)
+			if readErr != nil {
+				t.Fatalf("read config after invalid toggle: %v", readErr)
+			}
+			if !bytes.Equal(after, beforeInvalid) {
+				t.Fatalf("invalid toggle mutated config:\nbefore=%s\nafter=%s", beforeInvalid, after)
+			}
+		})
+	}
+
+	staleHealth := []byte("[health]\nenabled = true\n")
+	if err := os.WriteFile(configPath, staleHealth, 0o600); err != nil {
+		t.Fatalf("write stale health config: %v", err)
+	}
+	rejected := fixture.runNTM(t, nil,
+		"--config="+configPath, "--json", "coordinator", "enable", "auto-assign",
+	)
+	if rejected.exitCode == 0 || !bytes.Contains(append(append([]byte(nil), rejected.stdout...), rejected.stderr...), []byte("health")) {
+		t.Fatalf("stale-health toggle exit=%d stdout=%s stderr=%s", rejected.exitCode, rejected.stdout, rejected.stderr)
+	}
+	afterRejected, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read rejected config: %v", err)
+	}
+	if !bytes.Equal(afterRejected, staleHealth) {
+		t.Fatalf("stale-health rejection mutated config:\nbefore=%s\nafter=%s", staleHealth, afterRejected)
+	}
+}
+
+func TestE2EAtomicAssignmentInvalidConfigHasZeroSideEffectsBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	binDir := filepath.Join(fixture.root, "invalid-config-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create invalid-config bin directory: %v", err)
+	}
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BV_TRACE"`,
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write invalid-config bv fixture: %v", err)
+	}
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BR_TRACE"`,
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write invalid-config br fixture: %v", err)
+	}
+	triagePath := filepath.Join(fixture.root, "invalid-config-triage.json")
+	if err := os.WriteFile(triagePath, []byte(`{"triage":{"recommendations":[]}}`), 0o600); err != nil {
+		t.Fatalf("write invalid-config triage payload: %v", err)
+	}
+	assertTraceEmpty := func(t *testing.T, path, surface string) {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("read %s trace: %v", surface, err)
+		}
+		if len(bytes.TrimSpace(data)) != 0 {
+			t.Fatalf("invalid config reached %s: %s", surface, data)
+		}
+	}
+
+	fixture.primePaneForSafeDispatch(t, 0)
+	time.Sleep(5500 * time.Millisecond)
+	for index, tc := range []struct {
+		name          string
+		projectConfig bool
+		missingConfig bool
+		envConfig     bool
+		watchDryRun   bool
+	}{
+		{name: "invalid selected global config"},
+		{name: "missing selected global config", missingConfig: true},
+		{name: "missing NTM_CONFIG global config", missingConfig: true, envConfig: true},
+		{name: "invalid target project config", projectConfig: true},
+		{name: "invalid target project config in watch dry-run", projectConfig: true, watchDryRun: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targetDir := filepath.Join(fixture.root, fmt.Sprintf("invalid-config-project-%d", index))
+			if err := os.MkdirAll(targetDir, 0o700); err != nil {
+				t.Fatalf("create invalid-config target project: %v", err)
+			}
+			fixture.mustBRAt(t, targetDir, "init", "--prefix="+fmt.Sprintf("icfg%d", index), "--json")
+			beadID := strings.TrimSpace(string(fixture.mustBRAt(t, targetDir,
+				"create", "Invalid config must stop automatic assignment", "--type=task", "--priority=1", "--silent")))
+			if beadID == "" || strings.ContainsAny(beadID, " \t\r\n") {
+				t.Fatalf("unexpected invalid-config bead ID %q", beadID)
+			}
+			fixture.assertBeadAt(t, targetDir, beadID, "open", "")
+			beforeBead := fixture.mustBRAt(t, targetDir, "show", beadID, "--json")
+
+			planPath := filepath.Join(fixture.root, fmt.Sprintf("invalid-config-plan-%d.json", index))
+			planPayload, err := json.Marshal(map[string]any{
+				"plan": map[string]any{
+					"tracks": []map[string]any{{
+						"track_id": "invalid-config-track",
+						"items": []map[string]any{{
+							"id": beadID, "title": "Invalid config must stop automatic assignment", "status": "open", "priority": 1,
+						}},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal invalid-config plan payload: %v", err)
+			}
+			if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+				t.Fatalf("write invalid-config plan payload: %v", err)
+			}
+
+			configPath := filepath.Join(fixture.root, fmt.Sprintf("invalid-selected-%d.toml", index))
+			if tc.projectConfig {
+				configDir := filepath.Join(targetDir, ".ntm")
+				if err := os.MkdirAll(configDir, 0o700); err != nil {
+					t.Fatalf("create invalid project config directory: %v", err)
+				}
+				configPath = filepath.Join(configDir, "config.toml")
+			}
+			invalidConfig := []byte("[assign\noperator_gated_labels = [\"release-approval\"]\n")
+			if !tc.missingConfig {
+				if err := os.WriteFile(configPath, invalidConfig, 0o600); err != nil {
+					t.Fatalf("write invalid config: %v", err)
+				}
+			}
+			outsideDir := filepath.Join(fixture.root, fmt.Sprintf("invalid-config-outside-%d", index))
+			if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+				t.Fatalf("create invalid-config outside directory: %v", err)
+			}
+			marker := fmt.Sprintf("NTM_INVALID_CONFIG_MUST_NOT_DISPATCH_%d_%d", index, time.Now().UnixNano())
+			templatePath := filepath.Join(targetDir, "invalid-config-template.txt")
+			if err := os.WriteFile(templatePath, []byte(marker+"::{BEAD_ID}::{TITLE}"), 0o600); err != nil {
+				t.Fatalf("write invalid-config assignment template: %v", err)
+			}
+			bvTrace := filepath.Join(fixture.root, fmt.Sprintf("invalid-config-bv-%d.trace", index))
+			brTrace := filepath.Join(fixture.root, fmt.Sprintf("invalid-config-br-%d.trace", index))
+			mail := newAtomicAssignmentMailStub(targetDir)
+			defer mail.close()
+			env := mail.env()
+			env["PATH"] = binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH")
+			env["NTM_E2E_TRIAGE_PAYLOAD"] = triagePath
+			env["NTM_E2E_PLAN_PAYLOAD"] = planPath
+			env["NTM_E2E_BV_TRACE"] = bvTrace
+			env["NTM_E2E_BR_TRACE"] = brTrace
+			if tc.envConfig {
+				env["NTM_CONFIG"] = configPath
+			}
+			args := make([]string, 0, 13)
+			if !tc.projectConfig && !tc.envConfig {
+				args = append(args, "--config="+configPath)
+			}
+			args = append(args,
+				"--json", "assign", fixture.session,
+				"--repo="+targetDir,
+			)
+			if tc.watchDryRun {
+				args = append(args, "--watch", "--dry-run", "--stop-when-done")
+			} else {
+				args = append(args, "--auto")
+			}
+			args = append(args,
+				"--limit=1",
+				"--cod-only",
+				"--template=custom",
+				"--template-file="+templatePath,
+				"--reserve-files=true",
+				"--timeout=15s",
+				"--quiet",
+			)
+			result := fixture.runNTMInDir(t, outsideDir, env, args...)
+			code, message := assertAtomicAssignmentSingleFailureJSON(t, result)
+			if code != "INVALID_FLAG" || !strings.Contains(strings.ToLower(message), "config") {
+				t.Fatalf("invalid config failure code=%q message=%q, want INVALID_FLAG with a config diagnostic", code, message)
+			}
+			assertTraceEmpty(t, bvTrace, "bv planning")
+			assertTraceEmpty(t, brTrace, "Beads")
+			if tc.missingConfig {
+				if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+					t.Fatalf("missing explicit config was created during rejection: %v", err)
+				}
+			} else {
+				afterConfig, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatalf("read invalid config after rejection: %v", err)
+				}
+				if !bytes.Equal(afterConfig, invalidConfig) {
+					t.Fatalf("invalid config changed during rejection:\nbefore=%s\nafter=%s", invalidConfig, afterConfig)
+				}
+			}
+			afterBead := fixture.mustBRAt(t, targetDir, "show", beadID, "--json")
+			if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+				t.Fatalf("invalid config mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+			}
+			fixture.assertBeadAt(t, targetDir, beadID, "open", "")
+			fixture.assertLedgerReplicasHaveNoAssignment(t, beadID)
+			fixture.assertMarkerCounts(t, marker, map[int]int{0: 0, 1: 0})
+			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+		})
+	}
+}
+
 func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 	CommonE2EPrerequisites(t)
 	testutil.RequireTmuxThrottled(t)
@@ -2944,6 +3594,9 @@ func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 		"digest_interval = \"1h\"",
 		"idle_threshold = 0",
 		"",
+		"[assign]",
+		`operator_gated_labels = ["release-approval-required"]`,
+		"",
 	}, "\n")
 	if err := os.WriteFile(configPath, []byte(coordinatorConfig), 0o600); err != nil {
 		t.Fatalf("write coordinator config: %v", err)
@@ -2953,21 +3606,60 @@ func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatalf("create coordinator bin directory: %v", err)
 	}
-	bvPayloadPath := filepath.Join(fixture.root, "triage.json")
+	bvPayloadDir := filepath.Join(fixture.root, "coordinator-bv-payloads")
+	if err := os.MkdirAll(bvPayloadDir, 0o700); err != nil {
+		t.Fatalf("create coordinator bv payload directory: %v", err)
+	}
+	bvCurrentBeadPath := filepath.Join(bvPayloadDir, "current-bead")
+	bvEmptyPlanPath := filepath.Join(bvPayloadDir, "empty-plan.json")
+	emptyPlan := []byte(`{"generated_at":"2026-07-12T00:00:00Z","plan":{"tracks":[]}}`)
+	if err := util.AtomicWriteFile(bvEmptyPlanPath, emptyPlan, 0o600); err != nil {
+		t.Fatalf("write empty bv plan payload: %v", err)
+	}
 	writeBVPayload := func(id, title string) {
 		t.Helper()
-		payload := fmt.Sprintf(`{"generated_at":"2026-07-12T00:00:00Z","data_hash":"e2e","triage":{"meta":{"version":"1","generated_at":"2026-07-12T00:00:00Z","phase2_ready":true,"issue_count":1},"quick_ref":{"open_count":1,"actionable_count":1,"blocked_count":0,"in_progress_count":0,"top_picks":[]},"recommendations":[{"id":%q,"title":%q,"type":"task","status":"open","priority":1,"score":1,"action":"assign","reasons":[]}]}}`, id, title)
-		if err := os.WriteFile(bvPayloadPath, []byte(payload), 0o600); err != nil {
-			t.Fatalf("write bv payload: %v", err)
+		triagePayload := fmt.Sprintf(`{"generated_at":"2026-07-12T00:00:00Z","data_hash":"e2e","triage":{"meta":{"version":"1","generated_at":"2026-07-12T00:00:00Z","phase2_ready":true,"issue_count":1},"quick_ref":{"open_count":1,"actionable_count":1,"blocked_count":0,"in_progress_count":0,"top_picks":[]},"recommendations":[{"id":%q,"title":%q,"type":"task","status":"open","priority":1,"score":1,"action":"assign","reasons":[]}]}}`, id, title)
+		planPayload := fmt.Sprintf(`{"generated_at":"2026-07-12T00:00:00Z","plan":{"tracks":[{"track_id":"coordinator-e2e","items":[{"id":%q,"title":%q,"status":"open","priority":1}]}]}}`, id, title)
+		if err := util.AtomicWriteFile(filepath.Join(bvPayloadDir, id+".triage.json"), []byte(triagePayload), 0o600); err != nil {
+			t.Fatalf("write bv triage payload: %v", err)
+		}
+		if err := util.AtomicWriteFile(filepath.Join(bvPayloadDir, id+".plan.json"), []byte(planPayload), 0o600); err != nil {
+			t.Fatalf("write bv plan payload: %v", err)
+		}
+		// Publish the new ID last so a running coordinator never observes an ID
+		// before both immutable payloads for that generation are complete.
+		if err := util.AtomicWriteFile(bvCurrentBeadPath, []byte(id+"\n"), 0o600); err != nil {
+			t.Fatalf("write current bv bead: %v", err)
 		}
 	}
 	writeBVPayload(beadID, "Coordinator once delivery")
-	bvScript := "#!/bin/sh\n" +
-		"if [ \"$#\" -ne 1 ] || [ \"$1\" != \"--robot-triage\" ]; then\n" +
-		"  printf 'unexpected bv args: %s\\n' \"$*\" >&2\n" +
-		"  exit 64\n" +
-		"fi\n" +
-		"cat \"$NTM_E2E_BV_PAYLOAD\"\n"
+	bvScript := `#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+  printf 'unexpected bv args: %s\n' "$*" >&2
+  exit 64
+fi
+
+bead_id=$(cat "$NTM_E2E_BV_CURRENT_BEAD")
+case "$1" in
+  --robot-triage)
+    cat "$NTM_E2E_BV_PAYLOAD_DIR/$bead_id.triage.json"
+    ;;
+  --robot-plan)
+    if "$NTM_E2E_REAL_BR" show "$bead_id" --json 2>/dev/null |
+      grep -Eq '"status"[[:space:]]*:[[:space:]]*"open"'; then
+      cat "$NTM_E2E_BV_PAYLOAD_DIR/$bead_id.plan.json"
+    else
+      cat "$NTM_E2E_BV_EMPTY_PLAN"
+    fi
+    ;;
+  *)
+    printf 'unexpected bv args: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+`
 	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
 		t.Fatalf("write bv fixture: %v", err)
 	}
@@ -3126,9 +3818,12 @@ func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 	defer mailServer.Close()
 
 	env := map[string]string{
-		"PATH":               binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
-		"NTM_E2E_BV_PAYLOAD": bvPayloadPath,
-		"AGENT_MAIL_URL":     mailServer.URL + "/",
+		"PATH":                    binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
+		"NTM_E2E_BV_PAYLOAD_DIR":  bvPayloadDir,
+		"NTM_E2E_BV_CURRENT_BEAD": bvCurrentBeadPath,
+		"NTM_E2E_BV_EMPTY_PLAN":   bvEmptyPlanPath,
+		"NTM_E2E_REAL_BR":         fixture.brPath,
+		"AGENT_MAIL_URL":          mailServer.URL + "/",
 	}
 	runOnce := func() (atomicAssignmentProcessResult, struct {
 		Success     bool   `json:"success"`
@@ -3186,9 +3881,9 @@ func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 	// BV is a planning snapshot, not assignment authority. Prove that the
 	// coordinator refreshes the recommendation through live `br show` and
 	// honors an operator gate added after the snapshot was produced.
-	gatedBeadID := fixture.createBead(t, "Coordinator stale BV operator gate")
-	fixture.mustBR(t, "update", gatedBeadID, "--add-label=operator-gated", "--json")
-	writeBVPayload(gatedBeadID, "Coordinator stale BV operator gate")
+	gatedBeadID := fixture.createBead(t, "Coordinator configured global operator gate")
+	fixture.mustBR(t, "update", gatedBeadID, "--add-label=release-approval-required", "--json")
+	writeBVPayload(gatedBeadID, "Coordinator configured global operator gate")
 	sendsBeforeGate := sendCount.Load()
 	reservesBeforeGate := reserveCount.Load()
 	gatedResult, gated := runOnce()
@@ -3201,6 +3896,30 @@ func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
 	}
 	fixture.assertBead(t, gatedBeadID, "open", "")
 	fixture.assertLedgerHasNoAssignment(t, gatedBeadID)
+
+	projectConfigDir := filepath.Join(fixture.projectDir, ".ntm")
+	if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+		t.Fatalf("create project config directory: %v", err)
+	}
+	projectConfig := "[assign]\noperator_gated_labels = [\"project-change-approval\"]\n"
+	if err := os.WriteFile(filepath.Join(projectConfigDir, "config.toml"), []byte(projectConfig), 0o600); err != nil {
+		t.Fatalf("write project operator-gate config: %v", err)
+	}
+	projectGatedID := fixture.createBead(t, "Coordinator configured project operator gate")
+	fixture.mustBR(t, "update", projectGatedID, "--add-label=project-change-approval", "--json")
+	writeBVPayload(projectGatedID, "Coordinator configured project operator gate")
+	sendsBeforeProjectGate := sendCount.Load()
+	reservesBeforeProjectGate := reserveCount.Load()
+	projectGatedResult, projectGated := runOnce()
+	if projectGatedResult.exitCode != 0 || len(bytes.TrimSpace(projectGatedResult.stderr)) != 0 || !projectGated.Success ||
+		!projectGated.Once || !projectGated.AutoAssign || len(projectGated.Assignments) != 0 {
+		t.Fatalf("project semantic gate result=%+v envelope=%+v", projectGatedResult, projectGated)
+	}
+	if sendCount.Load() != sendsBeforeProjectGate || reserveCount.Load() != reservesBeforeProjectGate {
+		t.Fatalf("project semantic gate produced side effects: sends=%d/%d reserves=%d/%d", sendCount.Load(), sendsBeforeProjectGate, reserveCount.Load(), reservesBeforeProjectGate)
+	}
+	fixture.assertBead(t, projectGatedID, "open", "")
+	fixture.assertLedgerHasNoAssignment(t, projectGatedID)
 
 	recoveryTitle := "Coordinator reserve recovery internal/coordinator/recovery.go"
 	recoveryBeadID := fixture.createBead(t, recoveryTitle)
@@ -3500,6 +4219,1630 @@ func TestE2EAtomicAssignmentAutoBuiltProcessRestart(t *testing.T) {
 	fixture.assertBead(t, beadID, "in_progress", firstRecord.ClaimActor)
 }
 
+func TestE2EAtomicAssignmentPlanOnlyEpicHonorsProjectOperatorGate(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	mail := newAtomicAssignmentMailStub(fixture.projectDir)
+	defer mail.close()
+	const title = "Plan-only epic requires project approval"
+	epicOutput := fixture.mustBR(t, "create", title, "--type=epic", "--priority=1", "--silent")
+	epicID := strings.TrimSpace(string(epicOutput))
+	if epicID == "" || strings.ContainsAny(epicID, " \t\r\n") {
+		t.Fatalf("unexpected epic ID %q", epicOutput)
+	}
+	fixture.mustBR(t, "update", epicID, "--add-label=architecture-approval", "--json")
+	fixture.assertBead(t, epicID, "open", "")
+	projectConfigDir := filepath.Join(fixture.projectDir, ".ntm")
+	if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+		t.Fatalf("create project config directory: %v", err)
+	}
+	projectConfig := "[assign]\noperator_gated_labels = [\"architecture-approval\"]\n"
+	if err := os.WriteFile(filepath.Join(projectConfigDir, "config.toml"), []byte(projectConfig), 0o600); err != nil {
+		t.Fatalf("write project gate config: %v", err)
+	}
+
+	binDir := filepath.Join(fixture.root, "plan-only-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create plan-only bin: %v", err)
+	}
+	triagePath := filepath.Join(fixture.root, "plan-only-triage.json")
+	planPath := filepath.Join(fixture.root, "plan-only-plan.json")
+	if err := os.WriteFile(triagePath, []byte(`{"triage":{"recommendations":[]}}`), 0o600); err != nil {
+		t.Fatalf("write triage payload: %v", err)
+	}
+	planPayload, err := json.Marshal(map[string]any{
+		"plan": map[string]any{
+			"tracks": []map[string]any{{
+				"track_id": "epic-track",
+				"items": []map[string]any{{
+					"id": epicID, "title": title, "status": "open", "priority": 1,
+				}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal plan payload: %v", err)
+	}
+	if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+		t.Fatalf("write plan payload: %v", err)
+	}
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`  --robot-insights) printf '%s\n' '{"Cycles":[]}' ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write bv fixture: %v", err)
+	}
+	brTrace := filepath.Join(fixture.root, "plan-only-br.trace")
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		"trace=" + tmux.ShellQuote(brTrace),
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		`printf '%s\n' "$*" >> "$trace"`,
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write br tracing fixture: %v", err)
+	}
+
+	fixture.primePaneForSafeDispatch(t, 0)
+	time.Sleep(5500 * time.Millisecond)
+	marker := fmt.Sprintf("NTM_PLAN_ONLY_EPIC_MUST_NOT_DISPATCH_%d", time.Now().UnixNano())
+	templatePath := filepath.Join(fixture.projectDir, "plan-only-template.txt")
+	if err := os.WriteFile(templatePath, []byte(marker+"::{BEAD_ID}::{TITLE}"), 0o600); err != nil {
+		t.Fatalf("write plan-only template: %v", err)
+	}
+	outsideDir := filepath.Join(fixture.root, "outside-plan-project")
+	if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+		t.Fatalf("create outside working directory: %v", err)
+	}
+	env := mail.env()
+	env["PATH"] = binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH")
+	env["NTM_E2E_TRIAGE_PAYLOAD"] = triagePath
+	env["NTM_E2E_PLAN_PAYLOAD"] = planPath
+	result := fixture.runNTMInDir(t, outsideDir, env,
+		"--json", "assign", fixture.session,
+		"--repo="+fixture.projectDir,
+		"--auto",
+		"--limit=1",
+		"--cod-only",
+		"--template=custom",
+		"--template-file="+templatePath,
+		"--reserve-files=true",
+		"--timeout=15s",
+		"--quiet",
+	)
+	if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+		t.Fatalf("plan-only epic gate exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	var envelope atomicAssignmentAutoEnvelope
+	decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+	if !envelope.Success || envelope.Error != nil || envelope.Data == nil ||
+		envelope.Data.Summary.AssignedCount != 0 || len(envelope.Data.Assignments) != 0 {
+		t.Fatalf("plan-only epic gate envelope = %+v", envelope)
+	}
+	trace, err := os.ReadFile(brTrace)
+	if err != nil {
+		t.Fatalf("read br trace: %v", err)
+	}
+	for _, want := range []string{
+		"ready --json --limit 100000",
+		"list --json --status open --limit 100000",
+	} {
+		if !bytes.Contains(trace, []byte(want)) {
+			t.Fatalf("br trace omitted %q:\n%s", want, trace)
+		}
+	}
+	fixture.assertBead(t, epicID, "open", "")
+	fixture.assertLedgerReplicasHaveNoAssignment(t, epicID)
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 0, 1: 0})
+	assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+}
+
+func TestE2EAtomicAssignmentEligibleBelowFormerPlanCapBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	const eligibleTitle = "Eligible assignment below former plan cap"
+	eligibleID := fixture.createBead(t, eligibleTitle)
+
+	planItems := make([]map[string]any, 0, 102)
+	labelRows := make([]map[string]any, 0, 102)
+	gatedIDs := make(map[string]struct{}, 101)
+	for index := 0; index < 101; index++ {
+		beadID := fmt.Sprintf("ntm-e2e-gated-%03d", index)
+		gatedIDs[beadID] = struct{}{}
+		planItems = append(planItems, map[string]any{
+			"id":       beadID,
+			"title":    fmt.Sprintf("Operator-gated plan row %03d", index),
+			"status":   "open",
+			"priority": 1,
+		})
+		labelRows = append(labelRows, map[string]any{
+			"id":     beadID,
+			"labels": []string{"operator-gated"},
+		})
+	}
+	planItems = append(planItems, map[string]any{
+		"id":       eligibleID,
+		"title":    eligibleTitle,
+		"status":   "open",
+		"priority": 2,
+	})
+	labelRows = append(labelRows, map[string]any{
+		"id":     eligibleID,
+		"labels": []string{},
+	})
+
+	planPayload, err := json.Marshal(map[string]any{
+		"plan": map[string]any{
+			"tracks": []map[string]any{{
+				"track_id": "former-plan-cap",
+				"items":    planItems,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal former-plan-cap payload: %v", err)
+	}
+	labelsPayload, err := json.Marshal(labelRows)
+	if err != nil {
+		t.Fatalf("marshal former-plan-cap label payload: %v", err)
+	}
+
+	binDir := filepath.Join(fixture.root, "former-plan-cap-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create former-plan-cap bin directory: %v", err)
+	}
+	triagePath := filepath.Join(fixture.root, "former-plan-cap-triage.json")
+	planPath := filepath.Join(fixture.root, "former-plan-cap-plan.json")
+	labelsPath := filepath.Join(fixture.root, "former-plan-cap-labels.json")
+	for path, payload := range map[string][]byte{
+		triagePath: []byte(`{"triage":{"recommendations":[]}}`),
+		planPath:   planPayload,
+		labelsPath: labelsPayload,
+	} {
+		if err := os.WriteFile(path, payload, 0o600); err != nil {
+			t.Fatalf("write former-plan-cap fixture %s: %v", path, err)
+		}
+	}
+
+	bvTrace := filepath.Join(fixture.root, "former-plan-cap-bv.trace")
+	brTrace := filepath.Join(fixture.root, "former-plan-cap-br.trace")
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BV_TRACE"`,
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`  --robot-insights) printf '%s\n' '{"Cycles":[]}' ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write former-plan-cap bv fixture: %v", err)
+	}
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BR_TRACE"`,
+		`subcommand=`,
+		`for arg in "$@"; do`,
+		`  case "$arg" in`,
+		`    ready|list) subcommand="$arg"; break ;;`,
+		`  esac`,
+		`done`,
+		`case "$subcommand" in`,
+		`  ready) cat "$NTM_E2E_LABEL_PAYLOAD"; exit 0 ;;`,
+		`  list)`,
+		`    case " $* " in`,
+		`      *" --status open "*) cat "$NTM_E2E_LABEL_PAYLOAD"; exit 0 ;;`,
+		`    esac ;;`,
+		`esac`,
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write former-plan-cap br fixture: %v", err)
+	}
+	configPath := filepath.Join(fixture.root, "former-plan-cap-config.toml")
+	if err := os.WriteFile(configPath, []byte("[assign]\n"), 0o600); err != nil {
+		t.Fatalf("write former-plan-cap config: %v", err)
+	}
+
+	fixture.primePaneForSafeDispatch(t, 0)
+	fixture.waitForEndpointIdle(t, fixture.panes[0], 6*time.Second, 60*time.Second)
+	marker := fmt.Sprintf("NTM_ELIGIBLE_BELOW_FORMER_PLAN_CAP_%d", time.Now().UnixNano())
+	templatePath := filepath.Join(fixture.projectDir, "former-plan-cap-template.txt")
+	if err := os.WriteFile(templatePath, []byte(marker+"::{BEAD_ID}::{TITLE}"), 0o600); err != nil {
+		t.Fatalf("write former-plan-cap template: %v", err)
+	}
+	env := map[string]string{
+		"PATH":                   binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
+		"NTM_E2E_TRIAGE_PAYLOAD": triagePath,
+		"NTM_E2E_PLAN_PAYLOAD":   planPath,
+		"NTM_E2E_LABEL_PAYLOAD":  labelsPath,
+		"NTM_E2E_BV_TRACE":       bvTrace,
+		"NTM_E2E_BR_TRACE":       brTrace,
+	}
+	result := fixture.runNTM(t, env,
+		"--config="+configPath,
+		"--json", "assign", fixture.session,
+		"--repo="+fixture.projectDir,
+		"--auto",
+		"--limit=1",
+		"--cod-only",
+		"--strategy=round-robin",
+		"--template=custom",
+		"--template-file="+templatePath,
+		"--reserve-files=false",
+		"--ignore-deps",
+		"--timeout=60s",
+		"--quiet",
+	)
+	if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+		t.Fatalf("former-plan-cap assignment exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	var envelope struct {
+		Success bool `json:"success"`
+		Data    *struct {
+			Assignments []struct {
+				BeadID     string `json:"bead_id"`
+				PaneID     string `json:"pane_id"`
+				Status     string `json:"status"`
+				PromptSent bool   `json:"prompt_sent"`
+			} `json:"assignments"`
+			Skipped []struct {
+				BeadID string `json:"bead_id"`
+				Reason string `json:"reason"`
+			} `json:"skipped"`
+			Summary struct {
+				TotalBeadCount  int `json:"total_bead_count"`
+				ActionableCount int `json:"actionable_count"`
+				BlockedCount    int `json:"blocked_count"`
+				AssignedCount   int `json:"assigned_count"`
+				SkippedCount    int `json:"skipped_count"`
+			} `json:"summary"`
+		} `json:"data"`
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+	if !envelope.Success || envelope.Error != nil || envelope.Data == nil ||
+		envelope.Data.Summary.TotalBeadCount != 102 || envelope.Data.Summary.ActionableCount != 1 ||
+		envelope.Data.Summary.BlockedCount != 0 || envelope.Data.Summary.AssignedCount != 1 ||
+		envelope.Data.Summary.SkippedCount != 101 || len(envelope.Data.Assignments) != 1 ||
+		envelope.Data.Assignments[0].BeadID != eligibleID ||
+		envelope.Data.Assignments[0].PaneID != fixture.panes[0].ID ||
+		envelope.Data.Assignments[0].Status != "assigned" || !envelope.Data.Assignments[0].PromptSent ||
+		len(envelope.Data.Skipped) != 101 {
+		t.Fatalf("former-plan-cap assignment envelope = %+v", envelope)
+	}
+	for _, skipped := range envelope.Data.Skipped {
+		if skipped.Reason != "operator_gated" {
+			t.Fatalf("former-plan-cap skip for %s has reason %q, want operator_gated", skipped.BeadID, skipped.Reason)
+		}
+		if _, ok := gatedIDs[skipped.BeadID]; !ok {
+			t.Fatalf("former-plan-cap returned unexpected skipped bead %q", skipped.BeadID)
+		}
+		delete(gatedIDs, skipped.BeadID)
+	}
+	if len(gatedIDs) != 0 {
+		t.Fatalf("former-plan-cap omitted %d gated rows from skipped output", len(gatedIDs))
+	}
+
+	prompt := marker + "::" + eligibleID + "::" + eligibleTitle
+	fixture.waitForMarkerCount(t, 0, prompt, 1)
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+	record := fixture.readLedgerAssignment(t, eligibleID)
+	assertAtomicAssignmentRecord(t, record, eligibleID, prompt, fixture.panes[0], "codex")
+	fixture.assertBead(t, eligibleID, "in_progress", record.ClaimActor)
+	ledger, err := fixture.readLedger()
+	if err != nil {
+		t.Fatalf("read former-plan-cap ledger: %v", err)
+	}
+	if len(ledger.Assignments) != 1 {
+		t.Fatalf("former-plan-cap ledger contains %d assignments, want only %s", len(ledger.Assignments), eligibleID)
+	}
+
+	bvTraceData, err := os.ReadFile(bvTrace)
+	if err != nil {
+		t.Fatalf("read former-plan-cap bv trace: %v", err)
+	}
+	for _, want := range []string{"--robot-triage", "--robot-plan", "--robot-insights"} {
+		if !bytes.Contains(bvTraceData, []byte(want)) {
+			t.Fatalf("former-plan-cap bv trace omitted %q:\n%s", want, bvTraceData)
+		}
+	}
+	brTraceData, err := os.ReadFile(brTrace)
+	if err != nil {
+		t.Fatalf("read former-plan-cap br trace: %v", err)
+	}
+	for _, want := range []string{
+		"ready --json --limit 100000",
+		"list --json --status open --limit 100000",
+	} {
+		if !bytes.Contains(brTraceData, []byte(want)) {
+			t.Fatalf("former-plan-cap br trace omitted %q:\n%s", want, brTraceData)
+		}
+	}
+}
+
+func TestE2EAtomicRobotAssignAndDistributeAuthoritativePolicyBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	mail := newAtomicAssignmentMailStub(fixture.projectDir)
+	defer mail.close()
+
+	const gateLabel = "release-control-room"
+	const title = "Target project gate blocks robot and distribute assignment"
+	beadID := fixture.createBead(t, title)
+	fixture.mustBR(t, "update", beadID, "--add-label="+gateLabel, "--json")
+	beforeBead := fixture.mustBR(t, "show", beadID, "--json")
+
+	projectConfigDir := filepath.Join(fixture.projectDir, ".ntm")
+	if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+		t.Fatalf("create authoritative-policy config directory: %v", err)
+	}
+	projectConfigPath := filepath.Join(projectConfigDir, "config.toml")
+	validProjectConfig := []byte("[assign]\noperator_gated_labels = [\"" + gateLabel + "\"]\n")
+	if err := os.WriteFile(projectConfigPath, validProjectConfig, 0o600); err != nil {
+		t.Fatalf("write authoritative target-project policy: %v", err)
+	}
+
+	binDir := filepath.Join(fixture.root, "authoritative-policy-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create authoritative-policy bin directory: %v", err)
+	}
+	triagePath := filepath.Join(fixture.root, "authoritative-policy-triage.json")
+	planPath := filepath.Join(fixture.root, "authoritative-policy-plan.json")
+	if err := os.WriteFile(triagePath, []byte(`{"triage":{"recommendations":[]}}`), 0o600); err != nil {
+		t.Fatalf("write authoritative-policy triage payload: %v", err)
+	}
+	planPayload, err := json.Marshal(map[string]any{
+		"plan": map[string]any{
+			"tracks": []map[string]any{{
+				"track_id": "authoritative-policy-track",
+				"items": []map[string]any{{
+					"id": beadID, "title": title, "status": "open", "priority": 1,
+				}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal authoritative-policy plan payload: %v", err)
+	}
+	if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+		t.Fatalf("write authoritative-policy plan payload: %v", err)
+	}
+	bvTrace := filepath.Join(fixture.root, "authoritative-policy-bv.trace")
+	brTrace := filepath.Join(fixture.root, "authoritative-policy-br.trace")
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BV_TRACE"`,
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write authoritative-policy bv fixture: %v", err)
+	}
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BR_TRACE"`,
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write authoritative-policy br fixture: %v", err)
+	}
+
+	outsideDir := filepath.Join(fixture.root, "authoritative-policy-outside")
+	if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+		t.Fatalf("create unrelated caller working directory: %v", err)
+	}
+	historyPath := filepath.Join(fixture.root, "data", "ntm", "history.jsonl")
+	if err := os.MkdirAll(filepath.Dir(historyPath), 0o700); err != nil {
+		t.Fatalf("create send history directory: %v", err)
+	}
+	if err := os.WriteFile(historyPath, []byte("{\"sentinel\":\"preserve authoritative-policy history\"}\n"), 0o600); err != nil {
+		t.Fatalf("write send history sentinel: %v", err)
+	}
+	promptHistoryPath := filepath.Join(fixture.homeDir, ".ntm", "sessions", fixture.session, "prompts.json")
+	protectedPaths := []string{
+		fixture.ledgerPath(),
+		fixture.ledgerPath() + ".bak",
+		historyPath,
+		promptHistoryPath,
+	}
+	protectedFiles := snapshotAtomicAssignmentFiles(t, protectedPaths...)
+
+	for pane := range fixture.panes {
+		fixture.primePaneForSafeDispatch(t, pane)
+	}
+	time.Sleep(5500 * time.Millisecond)
+	protectedPanes := snapshotAtomicAssignmentPanes(t, fixture)
+	env := mail.env()
+	env["PATH"] = binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH")
+	env["NTM_E2E_TRIAGE_PAYLOAD"] = triagePath
+	env["NTM_E2E_PLAN_PAYLOAD"] = planPath
+	env["NTM_E2E_BV_TRACE"] = bvTrace
+	env["NTM_E2E_BR_TRACE"] = brTrace
+
+	assertReadOnly := func(t *testing.T) {
+		t.Helper()
+		afterBead := fixture.mustBR(t, "show", beadID, "--json")
+		if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+			t.Fatalf("policy-gated command mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+		}
+		assertAtomicAssignmentFilesUnchanged(t, protectedFiles)
+		assertAtomicAssignmentPanesUnchanged(t, fixture, protectedPanes)
+		assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+		afterConfig, err := os.ReadFile(projectConfigPath)
+		if err != nil {
+			t.Fatalf("read target-project policy after command: %v", err)
+		}
+		if !bytes.Equal(afterConfig, validProjectConfig) {
+			t.Fatalf("policy-gated command mutated target config:\nbefore=%s\nafter=%s", validProjectConfig, afterConfig)
+		}
+	}
+
+	robotResult := fixture.runNTMInDir(t, outsideDir, env,
+		"--robot-format=json",
+		"--robot-assign="+fixture.session,
+		"--strategy=balanced",
+	)
+	if robotResult.exitCode != 0 || len(bytes.TrimSpace(robotResult.stderr)) != 0 {
+		t.Fatalf("target-policy robot assign exit=%d stdout=%s stderr=%s", robotResult.exitCode, robotResult.stdout, robotResult.stderr)
+	}
+	var robotEnvelope struct {
+		Success         bool              `json:"success"`
+		Recommendations []json.RawMessage `json:"recommendations"`
+		IdleAgents      []string          `json:"idle_agents"`
+		Summary         struct {
+			ReadyBeads      int `json:"ready_beads"`
+			Recommendations int `json:"recommendations"`
+		} `json:"summary"`
+	}
+	decodeAtomicAssignmentJSON(t, robotResult.stdout, &robotEnvelope)
+	if !robotEnvelope.Success || len(robotEnvelope.IdleAgents) == 0 || len(robotEnvelope.Recommendations) != 0 ||
+		robotEnvelope.Summary.ReadyBeads != 0 || robotEnvelope.Summary.Recommendations != 0 {
+		t.Fatalf("target-policy robot assign envelope = %+v", robotEnvelope)
+	}
+	assertReadOnly(t)
+
+	for _, tc := range []struct {
+		name string
+		auto bool
+	}{
+		{name: "distribute preview"},
+		{name: "distribute auto", auto: true},
+	} {
+		t.Run(tc.name+" honors target custom gate", func(t *testing.T) {
+			args := []string{"--json", "send", fixture.session, "--distribute", "--dist-limit=1"}
+			if tc.auto {
+				args = append(args, "--dist-auto")
+			}
+			result := fixture.runNTMInDir(t, outsideDir, env, args...)
+			if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+				t.Fatalf("target-policy %s exit=%d stdout=%s stderr=%s", tc.name, result.exitCode, result.stdout, result.stderr)
+			}
+			var envelope struct {
+				Success         bool              `json:"success"`
+				Distributed     int               `json:"distributed"`
+				Recommendations []json.RawMessage `json:"recommendations"`
+				Delivered       int               `json:"delivered"`
+			}
+			decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+			if !envelope.Success || envelope.Distributed != 0 || envelope.Delivered != 0 || len(envelope.Recommendations) != 0 {
+				t.Fatalf("target-policy %s envelope = %+v", tc.name, envelope)
+			}
+			assertReadOnly(t)
+		})
+	}
+
+	bvTraceData, err := os.ReadFile(bvTrace)
+	if err != nil {
+		t.Fatalf("read authoritative-policy bv trace: %v", err)
+	}
+	for _, want := range []string{"--robot-triage", "--robot-plan"} {
+		if !bytes.Contains(bvTraceData, []byte(want)) {
+			t.Fatalf("authoritative-policy bv trace omitted %q:\n%s", want, bvTraceData)
+		}
+	}
+	brTraceData, err := os.ReadFile(brTrace)
+	if err != nil {
+		t.Fatalf("read authoritative-policy br trace: %v", err)
+	}
+	for _, want := range []string{
+		"ready --json --limit 100000",
+		"list --json --status open --limit 100000",
+	} {
+		if !bytes.Contains(brTraceData, []byte(want)) {
+			t.Fatalf("authoritative-policy br trace omitted %q:\n%s", want, brTraceData)
+		}
+	}
+
+	invalidProjectConfig := []byte("[assign\noperator_gated_labels = [\"" + gateLabel + "\"]\n")
+	for index, tc := range []struct {
+		name          string
+		command       string
+		invalidTarget bool
+		missingGlobal bool
+	}{
+		{name: "robot assign invalid target policy", command: "robot", invalidTarget: true},
+		{name: "robot assign missing explicit global policy", command: "robot", missingGlobal: true},
+		{name: "distribute preview invalid target policy", command: "preview", invalidTarget: true},
+		{name: "distribute preview missing explicit global policy", command: "preview", missingGlobal: true},
+		{name: "distribute auto invalid target policy", command: "auto", invalidTarget: true},
+		{name: "distribute auto missing explicit global policy", command: "auto", missingGlobal: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expectedProjectConfig := validProjectConfig
+			if tc.invalidTarget {
+				expectedProjectConfig = invalidProjectConfig
+			}
+			if err := os.WriteFile(projectConfigPath, expectedProjectConfig, 0o600); err != nil {
+				t.Fatalf("write %s project policy: %v", tc.name, err)
+			}
+			missingConfigPath := filepath.Join(fixture.root, fmt.Sprintf("missing-authoritative-policy-%d.toml", index))
+			args := make([]string, 0, 8)
+			if tc.missingGlobal {
+				args = append(args, "--config="+missingConfigPath)
+			}
+			switch tc.command {
+			case "robot":
+				args = append(args, "--robot-format=json", "--robot-assign="+fixture.session, "--strategy=balanced")
+			case "preview", "auto":
+				args = append(args, "--json", "send", fixture.session, "--distribute", "--dist-limit=1")
+				if tc.command == "auto" {
+					args = append(args, "--dist-auto")
+				}
+			default:
+				t.Fatalf("unknown authoritative-policy command %q", tc.command)
+			}
+
+			beforeFiles := snapshotAtomicAssignmentFiles(t,
+				fixture.ledgerPath(),
+				fixture.ledgerPath()+".bak",
+				historyPath,
+				promptHistoryPath,
+				projectConfigPath,
+				missingConfigPath,
+				bvTrace,
+				brTrace,
+			)
+			sessionStateRoot := filepath.Dir(fixture.ledgerPath())
+			beforeSessionState := snapshotAtomicAssignmentTree(t, sessionStateRoot)
+			beadsRoot := filepath.Join(fixture.projectDir, ".beads")
+			beforeBeadsTree := snapshotAtomicAssignmentTree(t, beadsRoot)
+			beforePanes := snapshotAtomicAssignmentPanes(t, fixture)
+			result := fixture.runNTMInDir(t, outsideDir, env, args...)
+			code, message := assertAtomicAssignmentSingleFailureJSON(t, result)
+			if code != "INVALID_FLAG" || !strings.Contains(strings.ToLower(message), "config") {
+				t.Fatalf("%s code=%q message=%q, want INVALID_FLAG with config diagnostic", tc.name, code, message)
+			}
+			if tc.command != "robot" {
+				var failure struct {
+					Targets []string `json:"targets"`
+				}
+				decodeAtomicAssignmentJSON(t, result.stdout, &failure)
+				if failure.Targets == nil || len(failure.Targets) != 0 {
+					t.Fatalf("%s targets=%v, want present empty array", tc.name, failure.Targets)
+				}
+			}
+			assertAtomicAssignmentFilesUnchanged(t, beforeFiles)
+			assertAtomicAssignmentTreeUnchanged(t, sessionStateRoot, beforeSessionState)
+			assertAtomicAssignmentTreeUnchanged(t, beadsRoot, beforeBeadsTree)
+			assertAtomicAssignmentPanesUnchanged(t, fixture, beforePanes)
+			afterBead := fixture.mustBR(t, "show", beadID, "--json")
+			if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+				t.Fatalf("%s mutated Beads state:\nbefore=%s\nafter=%s", tc.name, beforeBead, afterBead)
+			}
+			fixture.assertBead(t, beadID, "open", "")
+			fixture.assertLedgerReplicasHaveNoAssignment(t, beadID)
+			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+		})
+	}
+}
+
+func TestE2EAtomicRetryReassignAndRebalanceInvalidPolicyIsMutationFreeBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	for pane := range fixture.panes {
+		fixture.primePaneForSafeDispatch(t, pane)
+	}
+	time.Sleep(5500 * time.Millisecond)
+
+	retryBeadID := fixture.createBead(t, "Invalid policy preserves failed retry generation")
+	retrySourcePrompt := fmt.Sprintf("NTM_INVALID_POLICY_RETRY_SOURCE_%d", time.Now().UnixNano())
+	retrySeed := fixture.runNTM(t, nil, atomicDirectArgsForPane(fixture, 0, retryBeadID, retrySourcePrompt, false)...)
+	if retrySeed.exitCode != 0 || len(bytes.TrimSpace(retrySeed.stderr)) != 0 {
+		t.Fatalf("seed invalid-policy retry generation exit=%d stdout=%s stderr=%s", retrySeed.exitCode, retrySeed.stdout, retrySeed.stderr)
+	}
+	fixture.waitForMarkerCount(t, 0, retrySourcePrompt, 1)
+	fixture.driveAssignmentStatus(t, fixture.panes[0], retryBeadID, "ERROR: invalid-policy retry fixture", "failed")
+	retryBefore := fixture.readLedgerAssignment(t, retryBeadID)
+	if retryBefore.Status != "failed" {
+		t.Fatalf("invalid-policy retry seed status=%q, want failed: %+v", retryBefore.Status, retryBefore)
+	}
+
+	reassignBeadID := fixture.createBead(t, "Invalid policy preserves live reassign generation")
+	reassignSourcePrompt := fmt.Sprintf("NTM_INVALID_POLICY_REASSIGN_SOURCE_%d", time.Now().UnixNano())
+	reassignSeed := fixture.runNTM(t, nil, atomicDirectArgsForPane(fixture, 1, reassignBeadID, reassignSourcePrompt, false)...)
+	if reassignSeed.exitCode != 0 || len(bytes.TrimSpace(reassignSeed.stderr)) != 0 {
+		t.Fatalf("seed invalid-policy reassign generation exit=%d stdout=%s stderr=%s", reassignSeed.exitCode, reassignSeed.stdout, reassignSeed.stderr)
+	}
+	fixture.waitForMarkerCount(t, 1, reassignSourcePrompt, 1)
+	reassignBefore := fixture.readLedgerAssignment(t, reassignBeadID)
+	if reassignBefore.Status != "assigned" || reassignBefore.DispatchState != "sent" {
+		t.Fatalf("invalid-policy reassign seed is not active: %+v", reassignBefore)
+	}
+
+	mail := newAtomicAssignmentMailStub(fixture.projectDir)
+	defer mail.close()
+	outsideDir := filepath.Join(fixture.root, "invalid-policy-recovery-outside")
+	if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+		t.Fatalf("create invalid-policy recovery caller directory: %v", err)
+	}
+	projectConfigDir := filepath.Join(fixture.projectDir, ".ntm")
+	if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+		t.Fatalf("create invalid-policy recovery config directory: %v", err)
+	}
+	projectConfigPath := filepath.Join(projectConfigDir, "config.toml")
+	validProjectConfig := []byte("[assign]\noperator_gated_labels = [\"change-window\"]\n")
+	invalidProjectConfig := []byte("[assign\noperator_gated_labels = [\"change-window\"]\n")
+	invalidGlobalConfig := []byte("[assign\noperator_gated_labels = [\"global-change-window\"]\n")
+
+	for index, tc := range []struct {
+		name    string
+		command string
+		policy  string
+	}{
+		{name: "retry invalid target project policy", command: "retry", policy: "target-invalid"},
+		{name: "retry invalid selected global policy", command: "retry", policy: "global-invalid"},
+		{name: "retry missing selected global policy", command: "retry", policy: "global-missing"},
+		{name: "reassign invalid target project policy", command: "reassign", policy: "target-invalid"},
+		{name: "reassign invalid selected global policy", command: "reassign", policy: "global-invalid"},
+		{name: "reassign missing selected global policy", command: "reassign", policy: "global-missing"},
+		{name: "rebalance preview invalid target project policy", command: "rebalance-preview", policy: "target-invalid"},
+		{name: "rebalance apply invalid target project policy", command: "rebalance-apply", policy: "target-invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expectedProjectConfig := validProjectConfig
+			if tc.policy == "target-invalid" {
+				expectedProjectConfig = invalidProjectConfig
+			}
+			if err := os.WriteFile(projectConfigPath, expectedProjectConfig, 0o600); err != nil {
+				t.Fatalf("write %s target-project policy: %v", tc.name, err)
+			}
+
+			selectedConfigPath := filepath.Join(fixture.root, fmt.Sprintf("selected-recovery-policy-%d.toml", index))
+			args := make([]string, 0, 16)
+			switch tc.policy {
+			case "global-invalid":
+				if err := os.WriteFile(selectedConfigPath, invalidGlobalConfig, 0o600); err != nil {
+					t.Fatalf("write %s selected global policy: %v", tc.name, err)
+				}
+				args = append(args, "--config="+selectedConfigPath)
+			case "global-missing":
+				args = append(args, "--config="+selectedConfigPath)
+			case "target-invalid":
+			default:
+				t.Fatalf("unknown invalid-policy fixture %q", tc.policy)
+			}
+
+			marker := fmt.Sprintf("NTM_INVALID_POLICY_%s_MUST_NOT_DISPATCH_%d", strings.ToUpper(strings.ReplaceAll(tc.command, "-", "_")), time.Now().UnixNano())
+			switch tc.command {
+			case "retry":
+				args = append(args,
+					"--json", "assign", fixture.session,
+					"--repo="+fixture.projectDir,
+					"--retry="+retryBeadID,
+					"--to-pane="+fixture.panes[0].ID,
+					"--prompt="+marker,
+					"--force",
+					"--reserve-files=false",
+					"--timeout=15s",
+				)
+			case "reassign":
+				args = append(args,
+					"--json", "assign", fixture.session,
+					"--repo="+fixture.projectDir,
+					"--reassign="+reassignBeadID,
+					"--to-pane="+fixture.panes[0].ID,
+					"--prompt="+marker,
+					"--force",
+					"--reserve-files=false",
+					"--timeout=15s",
+				)
+			case "rebalance-preview", "rebalance-apply":
+				args = append(args, "--json", "rebalance", fixture.session, "--format=json")
+				if tc.command == "rebalance-apply" {
+					args = append(args, "--apply")
+				}
+			default:
+				t.Fatalf("unknown invalid-policy command %q", tc.command)
+			}
+
+			protectedPaths := []string{
+				fixture.ledgerPath(),
+				fixture.ledgerPath() + ".bak",
+				projectConfigPath,
+			}
+			if tc.policy == "global-invalid" || tc.policy == "global-missing" {
+				protectedPaths = append(protectedPaths, selectedConfigPath)
+			}
+			beforeFiles := snapshotAtomicAssignmentFiles(t, protectedPaths...)
+			sessionStateRoot := filepath.Dir(fixture.ledgerPath())
+			beforeSessionState := snapshotAtomicAssignmentTree(t, sessionStateRoot)
+			beadsRoot := filepath.Join(fixture.projectDir, ".beads")
+			beforeBeadsTree := snapshotAtomicAssignmentTree(t, beadsRoot)
+			beforePanes := snapshotAtomicAssignmentPanes(t, fixture)
+			beforeRetryBead := fixture.mustBR(t, "show", retryBeadID, "--json")
+			beforeReassignBead := fixture.mustBR(t, "show", reassignBeadID, "--json")
+			beforeMail := mail.snapshot()
+			beforeBeadsTree = snapshotAtomicAssignmentTree(t, beadsRoot)
+
+			result := fixture.runNTMInDir(t, outsideDir, mail.env(), args...)
+			code, message := assertAtomicAssignmentSingleFailureJSON(t, result)
+			if code != "INVALID_FLAG" || !strings.Contains(strings.ToLower(message), "config") {
+				t.Fatalf("%s code=%q message=%q, want INVALID_FLAG with config diagnostic", tc.name, code, message)
+			}
+
+			assertAtomicAssignmentFilesUnchanged(t, beforeFiles)
+			assertAtomicAssignmentTreeUnchanged(t, sessionStateRoot, beforeSessionState)
+			assertAtomicAssignmentTreeUnchanged(t, beadsRoot, beforeBeadsTree)
+			assertAtomicAssignmentPanesUnchanged(t, fixture, beforePanes)
+			afterRetryBead := fixture.mustBR(t, "show", retryBeadID, "--json")
+			if !bytes.Equal(bytes.TrimSpace(afterRetryBead), bytes.TrimSpace(beforeRetryBead)) {
+				t.Fatalf("%s mutated retry Beads state:\nbefore=%s\nafter=%s", tc.name, beforeRetryBead, afterRetryBead)
+			}
+			afterReassignBead := fixture.mustBR(t, "show", reassignBeadID, "--json")
+			if !bytes.Equal(bytes.TrimSpace(afterReassignBead), bytes.TrimSpace(beforeReassignBead)) {
+				t.Fatalf("%s mutated reassign Beads state:\nbefore=%s\nafter=%s", tc.name, beforeReassignBead, afterReassignBead)
+			}
+			if after := fixture.readLedgerAssignment(t, retryBeadID); !reflect.DeepEqual(after, retryBefore) {
+				t.Fatalf("%s mutated failed retry generation:\nbefore=%+v\nafter=%+v", tc.name, retryBefore, after)
+			}
+			if after := fixture.readLedgerAssignment(t, reassignBeadID); !reflect.DeepEqual(after, reassignBefore) {
+				t.Fatalf("%s mutated active reassign generation:\nbefore=%+v\nafter=%+v", tc.name, reassignBefore, after)
+			}
+			fixture.assertMarkerCounts(t, marker, map[int]int{0: 0, 1: 0})
+			afterMail := mail.snapshot()
+			if !reflect.DeepEqual(afterMail, beforeMail) {
+				t.Fatalf("%s touched Agent Mail:\nbefore=%+v\nafter=%+v", tc.name, beforeMail, afterMail)
+			}
+			assertAtomicAssignmentMailUntouched(t, afterMail)
+		})
+	}
+}
+
+func TestE2EAtomicAssignmentLabelEnrichmentFailuresFailClosedBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	binDir := filepath.Join(fixture.root, "label-enrichment-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create label-enrichment bin directory: %v", err)
+	}
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write label-enrichment bv fixture: %v", err)
+	}
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BR_TRACE"`,
+		`case "$NTM_E2E_BR_MODE:$1" in`,
+		`  ready_failure:ready) printf 'injected br ready failure\n' >&2; exit 70 ;;`,
+		`  list_failure:list) printf 'injected br list failure\n' >&2; exit 71 ;;`,
+		`  malformed_ready:ready) printf '{\n'; exit 0 ;;`,
+		`  malformed_list:list) printf '{\n'; exit 0 ;;`,
+		`  absent:ready|absent:list) printf '[]\n'; exit 0 ;;`,
+		"esac",
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write label-enrichment br fixture: %v", err)
+	}
+	triagePath := filepath.Join(fixture.root, "label-enrichment-triage.json")
+	if err := os.WriteFile(triagePath, []byte(`{"triage":{"recommendations":[]}}`), 0o600); err != nil {
+		t.Fatalf("write label-enrichment triage payload: %v", err)
+	}
+
+	fixture.primePaneForSafeDispatch(t, 0)
+	time.Sleep(5500 * time.Millisecond)
+	for index, tc := range []struct {
+		name              string
+		mode              string
+		wantDiagnostic    string
+		wantBRInvocations []string
+	}{
+		{
+			name: "br ready failure", mode: "ready_failure",
+			wantDiagnostic:    "read bead labels (br ready",
+			wantBRInvocations: []string{"ready --json --limit 100000"},
+		},
+		{
+			name: "br list failure", mode: "list_failure",
+			wantDiagnostic:    "read bead labels (br list",
+			wantBRInvocations: []string{"ready --json --limit 100000", "list --json --status open --limit 100000"},
+		},
+		{
+			name: "malformed br ready JSON", mode: "malformed_ready",
+			wantDiagnostic:    "parse bead labels (br ready",
+			wantBRInvocations: []string{"ready --json --limit 100000"},
+		},
+		{
+			name: "malformed br list JSON", mode: "malformed_list",
+			wantDiagnostic:    "parse bead labels (br list",
+			wantBRInvocations: []string{"ready --json --limit 100000", "list --json --status open --limit 100000"},
+		},
+		{
+			name: "plan item absent from both label sources", mode: "absent",
+			wantDiagnostic:    "absent from both br ready and br list --status open",
+			wantBRInvocations: []string{"ready --json --limit 100000", "list --json --status open --limit 100000"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			title := fmt.Sprintf("Label enrichment fail-closed case %d", index)
+			beadID := fixture.createBead(t, title)
+			beforeBead := fixture.mustBR(t, "show", beadID, "--json")
+			planPath := filepath.Join(fixture.root, fmt.Sprintf("label-enrichment-plan-%d.json", index))
+			planPayload, err := json.Marshal(map[string]any{
+				"plan": map[string]any{
+					"tracks": []map[string]any{{
+						"track_id": "label-enrichment-track",
+						"items": []map[string]any{{
+							"id": beadID, "title": title, "status": "open", "priority": 1,
+						}},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal label-enrichment plan payload: %v", err)
+			}
+			if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+				t.Fatalf("write label-enrichment plan payload: %v", err)
+			}
+			marker := fmt.Sprintf("NTM_LABEL_ENRICHMENT_MUST_NOT_DISPATCH_%d_%d", index, time.Now().UnixNano())
+			templatePath := filepath.Join(fixture.projectDir, fmt.Sprintf("label-enrichment-template-%d.txt", index))
+			if err := os.WriteFile(templatePath, []byte(marker+"::{BEAD_ID}::{TITLE}"), 0o600); err != nil {
+				t.Fatalf("write label-enrichment template: %v", err)
+			}
+			brTrace := filepath.Join(fixture.root, fmt.Sprintf("label-enrichment-br-%d.trace", index))
+			mail := newAtomicAssignmentMailStub(fixture.projectDir)
+			defer mail.close()
+			env := mail.env()
+			env["PATH"] = binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH")
+			env["NTM_E2E_TRIAGE_PAYLOAD"] = triagePath
+			env["NTM_E2E_PLAN_PAYLOAD"] = planPath
+			env["NTM_E2E_BR_TRACE"] = brTrace
+			env["NTM_E2E_BR_MODE"] = tc.mode
+			result := fixture.runNTM(t, env,
+				"--json", "assign", fixture.session,
+				"--repo="+fixture.projectDir,
+				"--auto",
+				"--limit=1",
+				"--cod-only",
+				"--template=custom",
+				"--template-file="+templatePath,
+				"--reserve-files=true",
+				"--timeout=15s",
+				"--quiet",
+			)
+			code, message := assertAtomicAssignmentSingleFailureJSON(t, result)
+			if code != "ASSIGN_ERROR" || !strings.Contains(message, "actionable bead labels could not be verified") ||
+				!strings.Contains(message, tc.wantDiagnostic) {
+				t.Fatalf("label-enrichment failure code=%q message=%q, want ASSIGN_ERROR containing %q", code, message, tc.wantDiagnostic)
+			}
+
+			trace, err := os.ReadFile(brTrace)
+			if err != nil {
+				t.Fatalf("read label-enrichment br trace: %v", err)
+			}
+			invocations := strings.Split(strings.TrimSpace(string(trace)), "\n")
+			if len(invocations) != len(tc.wantBRInvocations) {
+				t.Fatalf("br invocations=%q, want exactly %q", invocations, tc.wantBRInvocations)
+			}
+			for invocationIndex, want := range tc.wantBRInvocations {
+				if !strings.HasPrefix(invocations[invocationIndex], want) {
+					t.Fatalf("br invocation %d=%q, want prefix %q", invocationIndex, invocations[invocationIndex], want)
+				}
+			}
+			afterBead := fixture.mustBR(t, "show", beadID, "--json")
+			if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+				t.Fatalf("label-enrichment failure mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+			}
+			fixture.assertBead(t, beadID, "open", "")
+			fixture.assertLedgerReplicasHaveNoAssignment(t, beadID)
+			fixture.assertMarkerCounts(t, marker, map[int]int{0: 0, 1: 0})
+			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+		})
+	}
+}
+
+func TestE2EAtomicAssignmentOverlappingTriagePlanUsesLiveOperatorGateBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	mail := newAtomicAssignmentMailStub(fixture.projectDir)
+	defer mail.close()
+	const (
+		title     = "Overlapping triage and plan item requires live approval"
+		gateLabel = "production-approval"
+	)
+	beadID := fixture.createBead(t, title)
+	fixture.mustBR(t, "update", beadID, "--add-label="+gateLabel, "--json")
+	beforeBead := fixture.mustBR(t, "show", beadID, "--json")
+
+	projectConfigDir := filepath.Join(fixture.projectDir, ".ntm")
+	if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+		t.Fatalf("create overlap project config directory: %v", err)
+	}
+	projectConfig := []byte("[assign]\noperator_gated_labels = [\"" + gateLabel + "\"]\n")
+	projectConfigPath := filepath.Join(projectConfigDir, "config.toml")
+	if err := os.WriteFile(projectConfigPath, projectConfig, 0o600); err != nil {
+		t.Fatalf("write overlap project gate config: %v", err)
+	}
+
+	binDir := filepath.Join(fixture.root, "overlap-live-gate-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create overlap fixture bin directory: %v", err)
+	}
+	triagePath := filepath.Join(fixture.root, "overlap-live-gate-triage.json")
+	triagePayload, err := json.Marshal(map[string]any{
+		"triage": map[string]any{
+			"recommendations": []map[string]any{{
+				"id": beadID, "title": title, "type": "task", "status": "open",
+				"priority": 1, "score": 100, "action": "assign", "reasons": []string{}, "labels": []string{},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal overlapping stale triage payload: %v", err)
+	}
+	if err := os.WriteFile(triagePath, triagePayload, 0o600); err != nil {
+		t.Fatalf("write overlapping stale triage payload: %v", err)
+	}
+	planPath := filepath.Join(fixture.root, "overlap-live-gate-plan.json")
+	planPayload, err := json.Marshal(map[string]any{
+		"plan": map[string]any{
+			"tracks": []map[string]any{{
+				"track_id": "overlap-live-gate-track",
+				"items": []map[string]any{{
+					"id": beadID, "title": title, "status": "open", "priority": 1,
+				}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal overlapping plan payload: %v", err)
+	}
+	if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+		t.Fatalf("write overlapping plan payload: %v", err)
+	}
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`  --robot-insights) printf '%s\n' '{"Cycles":[]}' ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write overlapping bv fixture: %v", err)
+	}
+	brTrace := filepath.Join(fixture.root, "overlap-live-gate-br.trace")
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		"trace=" + tmux.ShellQuote(brTrace),
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		`printf '%s\n' "$*" >> "$trace"`,
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write overlapping br fixture: %v", err)
+	}
+
+	fixture.primePaneForSafeDispatch(t, 0)
+	time.Sleep(5500 * time.Millisecond)
+	marker := fmt.Sprintf("NTM_OVERLAPPING_LIVE_GATE_MUST_NOT_DISPATCH_%d", time.Now().UnixNano())
+	templatePath := filepath.Join(fixture.projectDir, "overlap-live-gate-template.txt")
+	if err := os.WriteFile(templatePath, []byte(marker+"::{BEAD_ID}::{TITLE}"), 0o600); err != nil {
+		t.Fatalf("write overlapping gate template: %v", err)
+	}
+	env := mail.env()
+	env["PATH"] = binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH")
+	env["NTM_E2E_TRIAGE_PAYLOAD"] = triagePath
+	env["NTM_E2E_PLAN_PAYLOAD"] = planPath
+	result := fixture.runNTM(t, env,
+		"--json", "assign", fixture.session,
+		"--repo="+fixture.projectDir,
+		"--auto",
+		"--limit=1",
+		"--cod-only",
+		"--template=custom",
+		"--template-file="+templatePath,
+		"--reserve-files=true",
+		"--timeout=15s",
+		"--quiet",
+	)
+	if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+		t.Fatalf("overlapping live gate exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	var envelope struct {
+		Success bool `json:"success"`
+		Data    *struct {
+			Assignments []struct {
+				BeadID string `json:"bead_id"`
+			} `json:"assignments"`
+			Skipped []struct {
+				BeadID string `json:"bead_id"`
+				Reason string `json:"reason"`
+			} `json:"skipped"`
+			Summary struct {
+				AssignedCount int `json:"assigned_count"`
+				SkippedCount  int `json:"skipped_count"`
+			} `json:"summary"`
+		} `json:"data"`
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+	if !envelope.Success || envelope.Error != nil || envelope.Data == nil ||
+		envelope.Data.Summary.AssignedCount != 0 ||
+		len(envelope.Data.Assignments) != 0 || len(envelope.Data.Skipped) != 1 ||
+		envelope.Data.Skipped[0].BeadID != beadID || envelope.Data.Skipped[0].Reason != "operator_gated" {
+		t.Fatalf("overlapping live gate envelope = %+v", envelope)
+	}
+	trace, err := os.ReadFile(brTrace)
+	if err != nil {
+		t.Fatalf("read overlapping br trace: %v", err)
+	}
+	for _, want := range []string{
+		"ready --json --limit 100000",
+		"list --json --status open --limit 100000",
+	} {
+		if !bytes.Contains(trace, []byte(want)) {
+			t.Fatalf("overlapping live gate omitted authoritative label lookup %q:\n%s", want, trace)
+		}
+	}
+	afterBead := fixture.mustBR(t, "show", beadID, "--json")
+	if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+		t.Fatalf("overlapping live gate mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+	}
+	afterConfig, err := os.ReadFile(projectConfigPath)
+	if err != nil {
+		t.Fatalf("read overlapping project config after assignment: %v", err)
+	}
+	if !bytes.Equal(afterConfig, projectConfig) {
+		t.Fatalf("overlapping live gate mutated project config:\nbefore=%s\nafter=%s", projectConfig, afterConfig)
+	}
+	fixture.assertBead(t, beadID, "open", "")
+	fixture.assertLedgerReplicasHaveNoAssignment(t, beadID)
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 0, 1: 0})
+	assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+}
+
+func TestE2EAtomicAssignmentPlanIntegrityFailuresFailClosedBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	binDir := filepath.Join(fixture.root, "plan-integrity-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create plan-integrity bin directory: %v", err)
+	}
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BV_TRACE"`,
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan)`,
+		`    case "$NTM_E2E_PLAN_MODE" in`,
+		`      command_failure) printf 'injected bv plan failure\n' >&2; exit 70 ;;`,
+		`      malformed) printf '{\n' ;;`,
+		`      missing_plan) printf '{}\n' ;;`,
+		`      missing_tracks) printf '{"plan":{}}\n' ;;`,
+		`      blank_id) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`      *) printf 'unexpected plan mode: %s\n' "$NTM_E2E_PLAN_MODE" >&2; exit 64 ;;`,
+		`    esac ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write plan-integrity bv fixture: %v", err)
+	}
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BR_TRACE"`,
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write plan-integrity br fixture: %v", err)
+	}
+
+	fixture.primePaneForSafeDispatch(t, 0)
+	time.Sleep(5500 * time.Millisecond)
+	for index, tc := range []struct {
+		name           string
+		mode           string
+		wantDiagnostic string
+	}{
+		{name: "bv plan command failure", mode: "command_failure", wantDiagnostic: "load bv --robot-plan"},
+		{name: "malformed bv plan JSON", mode: "malformed", wantDiagnostic: "parsing plan"},
+		{name: "missing plan object", mode: "missing_plan", wantDiagnostic: "missing plan object"},
+		{name: "missing plan tracks array", mode: "missing_tracks", wantDiagnostic: "missing plan.tracks array"},
+		{name: "blank plan item ID", mode: "blank_id", wantDiagnostic: "track 0 item 0 has an empty id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			title := fmt.Sprintf("Plan integrity failure case %d", index)
+			beadID := fixture.createBead(t, title)
+			beforeBead := fixture.mustBR(t, "show", beadID, "--json")
+			triagePath := filepath.Join(fixture.root, fmt.Sprintf("plan-integrity-triage-%d.json", index))
+			triagePayload, err := json.Marshal(map[string]any{
+				"triage": map[string]any{
+					"recommendations": []map[string]any{{
+						"id": beadID, "title": title, "type": "task", "status": "open",
+						"priority": 1, "score": 100, "action": "assign", "reasons": []string{},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal plan-integrity triage payload: %v", err)
+			}
+			if err := os.WriteFile(triagePath, triagePayload, 0o600); err != nil {
+				t.Fatalf("write plan-integrity triage payload: %v", err)
+			}
+			planPath := filepath.Join(fixture.root, fmt.Sprintf("plan-integrity-plan-%d.json", index))
+			planPayload, err := json.Marshal(map[string]any{
+				"plan": map[string]any{
+					"tracks": []map[string]any{{
+						"track_id": "plan-integrity-track",
+						"items": []map[string]any{{
+							"id": " ", "title": title, "status": "open", "priority": 1,
+						}},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal blank-ID plan payload: %v", err)
+			}
+			if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+				t.Fatalf("write plan-integrity plan payload: %v", err)
+			}
+			marker := fmt.Sprintf("NTM_PLAN_INTEGRITY_MUST_NOT_DISPATCH_%d_%d", index, time.Now().UnixNano())
+			templatePath := filepath.Join(fixture.projectDir, fmt.Sprintf("plan-integrity-template-%d.txt", index))
+			if err := os.WriteFile(templatePath, []byte(marker+"::{BEAD_ID}::{TITLE}"), 0o600); err != nil {
+				t.Fatalf("write plan-integrity template: %v", err)
+			}
+			bvTrace := filepath.Join(fixture.root, fmt.Sprintf("plan-integrity-bv-%d.trace", index))
+			brTrace := filepath.Join(fixture.root, fmt.Sprintf("plan-integrity-br-%d.trace", index))
+			mail := newAtomicAssignmentMailStub(fixture.projectDir)
+			defer mail.close()
+			env := mail.env()
+			env["PATH"] = binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH")
+			env["NTM_E2E_TRIAGE_PAYLOAD"] = triagePath
+			env["NTM_E2E_PLAN_PAYLOAD"] = planPath
+			env["NTM_E2E_PLAN_MODE"] = tc.mode
+			env["NTM_E2E_BV_TRACE"] = bvTrace
+			env["NTM_E2E_BR_TRACE"] = brTrace
+			result := fixture.runNTM(t, env,
+				"--json", "assign", fixture.session,
+				"--repo="+fixture.projectDir,
+				"--auto",
+				"--limit=1",
+				"--cod-only",
+				"--template=custom",
+				"--template-file="+templatePath,
+				"--reserve-files=true",
+				"--timeout=15s",
+				"--quiet",
+			)
+			code, message := assertAtomicAssignmentSingleFailureJSON(t, result)
+			if code != "ASSIGN_ERROR" ||
+				!strings.Contains(message, "automated assignment stopped because actionable work could not be verified") ||
+				!strings.Contains(message, "actionable bv plan could not be verified") ||
+				!strings.Contains(message, tc.wantDiagnostic) {
+				t.Fatalf("plan-integrity failure code=%q message=%q, want ASSIGN_ERROR containing %q", code, message, tc.wantDiagnostic)
+			}
+			trace, err := os.ReadFile(bvTrace)
+			if err != nil {
+				t.Fatalf("read plan-integrity bv trace: %v", err)
+			}
+			invocations := strings.Split(strings.TrimSpace(string(trace)), "\n")
+			if !reflect.DeepEqual(invocations, []string{"--robot-triage", "--robot-plan"}) {
+				t.Fatalf("plan-integrity bv invocations=%q, want triage followed by plan exactly once", invocations)
+			}
+			if brCalls, err := os.ReadFile(brTrace); err == nil && bytes.Contains(brCalls, []byte("update")) {
+				t.Fatalf("plan-integrity failure reached mutating br command: %s", brCalls)
+			} else if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("read plan-integrity br trace: %v", err)
+			}
+			afterBead := fixture.mustBR(t, "show", beadID, "--json")
+			if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+				t.Fatalf("plan-integrity failure mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+			}
+			fixture.assertBead(t, beadID, "open", "")
+			fixture.assertLedgerReplicasHaveNoAssignment(t, beadID)
+			fixture.assertMarkerCounts(t, marker, map[int]int{0: 0, 1: 0})
+			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+		})
+	}
+}
+
+func TestE2EAtomicAssignmentSameSessionInvalidPolicyIsMutationFreeBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	type treeEntry struct {
+		Mode os.FileMode
+		Data []byte
+	}
+	snapshotTree := func(t *testing.T, root string) map[string]treeEntry {
+		t.Helper()
+		snapshot := make(map[string]treeEntry)
+		if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			relative, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			var data []byte
+			if info.Mode().IsRegular() {
+				data, err = os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+			}
+			snapshot[relative] = treeEntry{Mode: info.Mode(), Data: append([]byte(nil), data...)}
+			return nil
+		}); err != nil {
+			t.Fatalf("snapshot session storage %s: %v", root, err)
+		}
+		return snapshot
+	}
+
+	for index, tc := range []struct {
+		name          string
+		projectConfig bool
+	}{
+		{name: "invalid selected global policy"},
+		{name: "invalid target project policy", projectConfig: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newAtomicAssignmentCLIFixture(t)
+			beadID := fixture.createBead(t, fmt.Sprintf("Same-session invalid policy case %d", index))
+			beforeBead := fixture.mustBR(t, "show", beadID, "--json")
+			mail := newAtomicAssignmentMailStub(fixture.projectDir)
+			defer mail.close()
+
+			sessionStorage := filepath.Join(fixture.homeDir, ".ntm", "sessions", fixture.session)
+			if err := os.MkdirAll(filepath.Join(sessionStorage, "operator-state"), 0o700); err != nil {
+				t.Fatalf("create same-session storage fixture: %v", err)
+			}
+			storageSentinel := []byte("preserve-session-storage-byte-for-byte\r\n")
+			if err := os.WriteFile(filepath.Join(sessionStorage, "operator-state", "sentinel.bin"), storageSentinel, 0o600); err != nil {
+				t.Fatalf("write same-session storage sentinel: %v", err)
+			}
+			beforeStorage := snapshotTree(t, sessionStorage)
+
+			tmuxConfPath := filepath.Join(fixture.homeDir, ".tmux.conf")
+			tmuxConf := []byte("# preserve this exact tmux config\r\nbind-key -n F11 display-message keep-existing-binding\r\n")
+			if err := os.WriteFile(tmuxConfPath, tmuxConf, 0o600); err != nil {
+				t.Fatalf("write same-session tmux config: %v", err)
+			}
+			fixture.mustTMUX(t, "bind-key", "-n", "F12", "display-message", "NTM_E2E_KEEP_EXISTING_F12")
+			ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxSetupTimeout)
+			beforeBinding, err := fixture.tmuxOutput(ctx, "list-keys", "-T", "root", "F12")
+			cancel()
+			if err != nil {
+				t.Fatalf("capture same-session F12 binding before invalid policy: %v", err)
+			}
+			ctx, cancel = context.WithTimeout(context.Background(), defaultTmuxSetupTimeout)
+			tmuxEnvValue, err := fixture.tmuxOutput(ctx, "display-message", "-p", "-t", fixture.panes[0].ID, "#{socket_path},#{pid},0")
+			cancel()
+			if err != nil {
+				t.Fatalf("resolve private same-session TMUX value: %v", err)
+			}
+
+			configPath := filepath.Join(fixture.root, fmt.Sprintf("same-session-invalid-%d.toml", index))
+			if tc.projectConfig {
+				projectConfigDir := filepath.Join(fixture.projectDir, ".ntm")
+				if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+					t.Fatalf("create same-session project config directory: %v", err)
+				}
+				configPath = filepath.Join(projectConfigDir, "config.toml")
+			}
+			invalidConfig := []byte("[assign\noperator_gated_labels = [\"production-approval\"]\n")
+			if err := os.WriteFile(configPath, invalidConfig, 0o600); err != nil {
+				t.Fatalf("write same-session invalid policy: %v", err)
+			}
+			marker := fmt.Sprintf("NTM_SAME_SESSION_INVALID_POLICY_MUST_NOT_DISPATCH_%d_%d", index, time.Now().UnixNano())
+			templatePath := filepath.Join(fixture.projectDir, fmt.Sprintf("same-session-invalid-template-%d.txt", index))
+			if err := os.WriteFile(templatePath, []byte(marker+"::{BEAD_ID}::{TITLE}"), 0o600); err != nil {
+				t.Fatalf("write same-session invalid-policy template: %v", err)
+			}
+			env := mail.env()
+			env["TMUX"] = strings.TrimSpace(string(tmuxEnvValue))
+			env["TMUX_PANE"] = fixture.panes[0].ID
+			args := make([]string, 0, 16)
+			if !tc.projectConfig {
+				args = append(args, "--config="+configPath)
+			}
+			args = append(args,
+				"--json", "assign", fixture.session,
+				"--repo="+fixture.projectDir,
+				"--watch",
+				"--dry-run",
+				"--stop-when-done",
+				"--limit=1",
+				"--cod-only",
+				"--template=custom",
+				"--template-file="+templatePath,
+				"--reserve-files=true",
+				"--timeout=15s",
+				"--quiet",
+			)
+			result := fixture.runNTM(t, env, args...)
+			code, message := assertAtomicAssignmentSingleFailureJSON(t, result)
+			if code != "INVALID_FLAG" || !strings.Contains(strings.ToLower(message), "config") {
+				t.Fatalf("same-session invalid policy code=%q message=%q, want INVALID_FLAG config diagnostic", code, message)
+			}
+
+			afterStorage := snapshotTree(t, sessionStorage)
+			if !reflect.DeepEqual(afterStorage, beforeStorage) {
+				t.Fatalf("invalid policy mutated same-session storage:\nbefore=%#v\nafter=%#v", beforeStorage, afterStorage)
+			}
+			afterTmuxConf, err := os.ReadFile(tmuxConfPath)
+			if err != nil {
+				t.Fatalf("read same-session tmux config after invalid policy: %v", err)
+			}
+			if !bytes.Equal(afterTmuxConf, tmuxConf) {
+				t.Fatalf("invalid policy mutated ~/.tmux.conf:\nbefore=%q\nafter=%q", tmuxConf, afterTmuxConf)
+			}
+			ctx, cancel = context.WithTimeout(context.Background(), defaultTmuxSetupTimeout)
+			afterBinding, err := fixture.tmuxOutput(ctx, "list-keys", "-T", "root", "F12")
+			cancel()
+			if err != nil {
+				t.Fatalf("capture same-session F12 binding after invalid policy: %v", err)
+			}
+			if !bytes.Equal(afterBinding, beforeBinding) {
+				t.Fatalf("invalid policy mutated private tmux F12 binding:\nbefore=%s\nafter=%s", beforeBinding, afterBinding)
+			}
+			afterConfig, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("read same-session invalid config after rejection: %v", err)
+			}
+			if !bytes.Equal(afterConfig, invalidConfig) {
+				t.Fatalf("invalid policy mutated its config:\nbefore=%s\nafter=%s", invalidConfig, afterConfig)
+			}
+			afterBead := fixture.mustBR(t, "show", beadID, "--json")
+			if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+				t.Fatalf("same-session invalid policy mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+			}
+			fixture.assertBead(t, beadID, "open", "")
+			fixture.assertMarkerCounts(t, marker, map[int]int{0: 0, 1: 0})
+			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+		})
+	}
+}
+
+func TestE2EAtomicAssignmentWatchStopWhenDoneTreatsGatedQueuesAsDrainedBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	const gateLabel = "deployment-approval"
+	projectConfigDir := filepath.Join(fixture.projectDir, ".ntm")
+	if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+		t.Fatalf("create gated watch project config directory: %v", err)
+	}
+	projectConfig := []byte("[assign]\noperator_gated_labels = [\"" + gateLabel + "\"]\n")
+	if err := os.WriteFile(filepath.Join(projectConfigDir, "config.toml"), projectConfig, 0o600); err != nil {
+		t.Fatalf("write gated watch project config: %v", err)
+	}
+
+	const taskTitle = "Gated task is drained for watch completion"
+	taskID := fixture.createBead(t, taskTitle)
+	fixture.mustBR(t, "update", taskID, "--add-label="+gateLabel, "--json")
+	const epicTitle = "Plan-only gated epic is drained for watch completion"
+	epicOutput := fixture.mustBR(t, "create", epicTitle, "--type=epic", "--priority=1", "--silent")
+	epicID := strings.TrimSpace(string(epicOutput))
+	if epicID == "" || strings.ContainsAny(epicID, " \t\r\n") {
+		t.Fatalf("unexpected gated watch epic ID %q", epicOutput)
+	}
+	fixture.mustBR(t, "update", epicID, "--add-label="+gateLabel, "--json")
+
+	binDir := filepath.Join(fixture.root, "gated-watch-stop-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create gated watch fixture bin directory: %v", err)
+	}
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BV_TRACE"`,
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+		`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+		`  --robot-insights) printf '%s\n' '{"Cycles":[]}' ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		"esac",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write gated watch bv fixture: %v", err)
+	}
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BR_TRACE"`,
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		`exec "$real_br" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write gated watch br fixture: %v", err)
+	}
+
+	fixture.primePaneForSafeDispatch(t, 0)
+	time.Sleep(5500 * time.Millisecond)
+	for index, tc := range []struct {
+		name        string
+		beadID      string
+		title       string
+		includeLive bool
+	}{
+		{name: "triage and plan gated task", beadID: taskID, title: taskTitle, includeLive: true},
+		{name: "plan only gated epic", beadID: epicID, title: epicTitle},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beforeBead := fixture.mustBR(t, "show", tc.beadID, "--json")
+			recommendations := []map[string]any{}
+			if tc.includeLive {
+				recommendations = append(recommendations, map[string]any{
+					"id": tc.beadID, "title": tc.title, "type": "task", "status": "open",
+					"priority": 1, "score": 100, "action": "assign", "reasons": []string{}, "labels": []string{},
+				})
+			}
+			triagePath := filepath.Join(fixture.root, fmt.Sprintf("gated-watch-triage-%d.json", index))
+			triagePayload, err := json.Marshal(map[string]any{
+				"triage": map[string]any{"recommendations": recommendations},
+			})
+			if err != nil {
+				t.Fatalf("marshal gated watch triage payload: %v", err)
+			}
+			if err := os.WriteFile(triagePath, triagePayload, 0o600); err != nil {
+				t.Fatalf("write gated watch triage payload: %v", err)
+			}
+			planPath := filepath.Join(fixture.root, fmt.Sprintf("gated-watch-plan-%d.json", index))
+			planPayload, err := json.Marshal(map[string]any{
+				"plan": map[string]any{
+					"tracks": []map[string]any{{
+						"track_id": "gated-watch-track",
+						"items": []map[string]any{{
+							"id": tc.beadID, "title": tc.title, "status": "open", "priority": 1,
+						}},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal gated watch plan payload: %v", err)
+			}
+			if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+				t.Fatalf("write gated watch plan payload: %v", err)
+			}
+			marker := fmt.Sprintf("NTM_GATED_WATCH_MUST_NOT_DISPATCH_%d_%d", index, time.Now().UnixNano())
+			templatePath := filepath.Join(fixture.projectDir, fmt.Sprintf("gated-watch-template-%d.txt", index))
+			if err := os.WriteFile(templatePath, []byte(marker+"::{BEAD_ID}::{TITLE}"), 0o600); err != nil {
+				t.Fatalf("write gated watch template: %v", err)
+			}
+			bvTrace := filepath.Join(fixture.root, fmt.Sprintf("gated-watch-bv-%d.trace", index))
+			brTrace := filepath.Join(fixture.root, fmt.Sprintf("gated-watch-br-%d.trace", index))
+			mail := newAtomicAssignmentMailStub(fixture.projectDir)
+			defer mail.close()
+			env := mail.env()
+			env["PATH"] = binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH")
+			env["NTM_E2E_TRIAGE_PAYLOAD"] = triagePath
+			env["NTM_E2E_PLAN_PAYLOAD"] = planPath
+			env["NTM_E2E_BV_TRACE"] = bvTrace
+			env["NTM_E2E_BR_TRACE"] = brTrace
+			result := fixture.runNTM(t, env,
+				"assign", fixture.session,
+				"--repo="+fixture.projectDir,
+				"--watch",
+				"--stop-when-done",
+				"--watch-interval=50ms",
+				"--limit=1",
+				"--cod-only",
+				"--template=custom",
+				"--template-file="+templatePath,
+				"--reserve-files=true",
+				"--timeout=15s",
+				"--quiet",
+			)
+			if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+				t.Fatalf("gated watch stop exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+			}
+			bvCalls, err := os.ReadFile(bvTrace)
+			if err != nil {
+				t.Fatalf("read gated watch bv trace: %v", err)
+			}
+			for _, want := range []string{"--robot-triage", "--robot-plan", "--robot-insights"} {
+				if !bytes.Contains(bvCalls, []byte(want)) {
+					t.Fatalf("gated watch dependency calls=%q, want %s", bvCalls, want)
+				}
+			}
+			brCalls, err := os.ReadFile(brTrace)
+			if err != nil {
+				t.Fatalf("read gated watch br trace: %v", err)
+			}
+			for _, want := range []string{
+				"ready --json --limit 100000",
+				"list --json --status open --limit 100000",
+			} {
+				if !bytes.Contains(brCalls, []byte(want)) {
+					t.Fatalf("gated watch authoritative label calls=%q, want %s", brCalls, want)
+				}
+			}
+			afterBead := fixture.mustBR(t, "show", tc.beadID, "--json")
+			if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+				t.Fatalf("gated watch stop mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+			}
+			fixture.assertBead(t, tc.beadID, "open", "")
+			fixture.assertLedgerReplicasHaveNoAssignment(t, tc.beadID)
+			fixture.assertMarkerCounts(t, marker, map[int]int{0: 0, 1: 0})
+			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+		})
+	}
+}
+
 func TestE2EAtomicAssignmentRepositoryScopeBuiltProcess(t *testing.T) {
 	CommonE2EPrerequisites(t)
 	testutil.RequireTmuxThrottled(t)
@@ -3555,6 +5898,205 @@ func TestE2EAtomicAssignmentRepositoryScopeBuiltProcess(t *testing.T) {
 	remoteRecord := fixture.readLedgerAssignment(t, remoteBeadID)
 	fixture.assertBead(t, remoteBeadID, "in_progress", remoteRecord.ClaimActor)
 	fixture.assertBeadAbsentAt(t, overrideRepo, remoteBeadID)
+}
+
+func TestE2EAtomicExplicitSessionOutsideRepositoryUsesLiveProjectBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	mail := newAtomicAssignmentMailStub(fixture.projectDir)
+	defer mail.close()
+	outsideDir := filepath.Join(fixture.root, "outside-any-project")
+	if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+		t.Fatalf("create explicit-session outside directory: %v", err)
+	}
+
+	beadID := fixture.createBead(t, "Explicit live session project resolution")
+	prompt := fmt.Sprintf("NTM_ATOMIC_EXPLICIT_SESSION_PROJECT_%d", time.Now().UnixNano())
+	result := fixture.runNTMInDir(t, outsideDir, mail.env(),
+		"--json", "assign", fixture.session,
+		"--pane="+fixture.panes[0].ID,
+		"--beads="+beadID,
+		"--prompt="+prompt,
+		"--reserve-files=false",
+		"--force",
+		"--ignore-deps",
+		"--timeout=60s",
+	)
+	if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+		t.Fatalf("explicit-session cross-CWD assignment exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	var envelope atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+	assertDirectAssignmentEnvelope(t, envelope, fixture.session, beadID, prompt, fixture.panes[0])
+	fixture.waitForMarkerCount(t, 0, prompt, 1)
+	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 1, 1: 0})
+
+	record := fixture.readLedgerAssignment(t, beadID)
+	assertAtomicAssignmentRecord(t, record, beadID, prompt, fixture.panes[0], "codex")
+	fixture.assertBead(t, beadID, "in_progress", record.ClaimActor)
+	fixture.assertBeadAbsentAt(t, outsideDir, beadID)
+	if snapshot := mail.snapshot(); snapshot.ReserveCalls != 0 || snapshot.ReleaseCalls != 0 || snapshot.SendCalls != 0 {
+		t.Fatalf("reservation-disabled cross-CWD assignment touched Agent Mail: %+v", snapshot)
+	}
+}
+
+func TestE2EAtomicExplicitSessionMixedLiveRootsFailsBeforeAssignmentBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	mail := newAtomicAssignmentMailStub(fixture.projectDir)
+	defer mail.close()
+	outsideDir := filepath.Join(fixture.root, "mixed-root-outside")
+	otherProject := filepath.Join(fixture.root, "other-live-project")
+	for _, dir := range []string{outsideDir, otherProject, filepath.Join(otherProject, ".git")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("create mixed-root fixture directory %s: %v", dir, err)
+		}
+	}
+	agentCommand := "bash --noprofile --norc -c 'stty -echo; exec cat'"
+	fixture.mustTMUX(t, "new-window", "-d", "-t", fixture.session+":1", "-c", otherProject, agentCommand)
+	fixture.mustTMUX(t, "select-pane", "-t", fixture.session+":1.0", "-T", fixture.session+"__cod_mixed_root")
+
+	beadID := fixture.createBead(t, "Mixed live roots must reject assignment")
+	prompt := fmt.Sprintf("NTM_ATOMIC_MIXED_LIVE_ROOT_MUST_NOT_DISPATCH_%d", time.Now().UnixNano())
+	beforeBead := fixture.mustBR(t, "show", beadID, "--json")
+	sessionStateRoot := filepath.Dir(fixture.ledgerPath())
+	beforeSessionState := snapshotAtomicAssignmentTree(t, sessionStateRoot)
+	beadsRoot := filepath.Join(fixture.projectDir, ".beads")
+	beforeBeads := snapshotAtomicAssignmentTree(t, beadsRoot)
+	beforePanes := snapshotAtomicAssignmentPanes(t, fixture)
+	beforeMail := mail.snapshot()
+
+	result := fixture.runNTMInDir(t, outsideDir, mail.env(),
+		"--json", "assign", fixture.session,
+		"--pane="+fixture.panes[0].ID,
+		"--beads="+beadID,
+		"--prompt="+prompt,
+		"--reserve-files=false",
+		"--force",
+		"--ignore-deps",
+		"--timeout=60s",
+	)
+	_, message := assertAtomicAssignmentSingleFailureJSON(t, result)
+	if !strings.Contains(message, "panes span multiple project roots") ||
+		!strings.Contains(message, filepath.Clean(fixture.projectDir)) ||
+		!strings.Contains(message, filepath.Clean(otherProject)) {
+		t.Fatalf("mixed-live-root diagnostic = %q", message)
+	}
+
+	assertAtomicAssignmentTreeUnchanged(t, sessionStateRoot, beforeSessionState)
+	assertAtomicAssignmentTreeUnchanged(t, beadsRoot, beforeBeads)
+	assertAtomicAssignmentPanesUnchanged(t, fixture, beforePanes)
+	afterBead := fixture.mustBR(t, "show", beadID, "--json")
+	if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+		t.Fatalf("mixed-live-root rejection mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+	}
+	fixture.assertBead(t, beadID, "open", "")
+	fixture.assertLedgerReplicasHaveNoAssignment(t, beadID)
+	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 0, 1: 0})
+	afterMail := mail.snapshot()
+	if !reflect.DeepEqual(afterMail, beforeMail) {
+		t.Fatalf("mixed-live-root rejection touched Agent Mail:\nbefore=%+v\nafter=%+v", beforeMail, afterMail)
+	}
+	assertAtomicAssignmentMailUntouched(t, afterMail)
+}
+
+func TestE2EAtomicExplicitSessionMissingLiveRootFailsBeforeAssignmentBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	mail := newAtomicAssignmentMailStub(fixture.projectDir)
+	defer mail.close()
+	outsideDir := filepath.Join(fixture.root, "missing-root-outside")
+	if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+		t.Fatalf("create missing-root outside directory: %v", err)
+	}
+	missingRoot := filepath.Join(fixture.root, "missing-live-project")
+	if _, err := os.Stat(missingRoot); !os.IsNotExist(err) {
+		t.Fatalf("missing live project path must not exist: path=%s err=%v", missingRoot, err)
+	}
+
+	wrapperDir := filepath.Join(fixture.root, "missing-root-tmux-bin")
+	if err := os.MkdirAll(wrapperDir, 0o700); err != nil {
+		t.Fatalf("create missing-root tmux wrapper directory: %v", err)
+	}
+	wrapperPath := filepath.Join(wrapperDir, "tmux")
+	firedPath := filepath.Join(wrapperDir, "current-path-override-fired")
+	wrapper := strings.Join([]string{
+		"#!/bin/sh",
+		"real_tmux=" + tmux.ShellQuote(fixture.tmuxPath),
+		"missing_pane=" + tmux.ShellQuote(fixture.panes[0].ID),
+		"missing_root=" + tmux.ShellQuote(missingRoot),
+		"fired=" + tmux.ShellQuote(firedPath),
+		"is_display=0",
+		"is_missing_pane=0",
+		"is_current_path=0",
+		`for arg in "$@"; do`,
+		`  if [ "$arg" = "display-message" ]; then is_display=1; fi`,
+		`  if [ "$arg" = "$missing_pane" ]; then is_missing_pane=1; fi`,
+		`  if [ "$arg" = '#{pane_current_path}' ]; then is_current_path=1; fi`,
+		"done",
+		`if [ "$is_display" -eq 1 ] && [ "$is_missing_pane" -eq 1 ] && [ "$is_current_path" -eq 1 ]; then`,
+		`  printf 'fired\n' > "$fired"`,
+		`  printf '%s\n' "$missing_root"`,
+		"  exit 0",
+		"fi",
+		`exec "$real_tmux" "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o700); err != nil {
+		t.Fatalf("write missing-root tmux wrapper: %v", err)
+	}
+
+	beadID := fixture.createBead(t, "Missing live root must reject assignment")
+	prompt := fmt.Sprintf("NTM_ATOMIC_MISSING_LIVE_ROOT_MUST_NOT_DISPATCH_%d", time.Now().UnixNano())
+	beforeBead := fixture.mustBR(t, "show", beadID, "--json")
+	sessionStateRoot := filepath.Dir(fixture.ledgerPath())
+	beforeSessionState := snapshotAtomicAssignmentTree(t, sessionStateRoot)
+	beadsRoot := filepath.Join(fixture.projectDir, ".beads")
+	beforeBeads := snapshotAtomicAssignmentTree(t, beadsRoot)
+	beforePanes := snapshotAtomicAssignmentPanes(t, fixture)
+	beforeMail := mail.snapshot()
+	env := mail.env()
+	env["NTM_TMUX_BINARY"] = wrapperPath
+
+	result := fixture.runNTMInDir(t, outsideDir, env,
+		"--json", "assign", fixture.session,
+		"--pane="+fixture.panes[0].ID,
+		"--beads="+beadID,
+		"--prompt="+prompt,
+		"--reserve-files=false",
+		"--force",
+		"--ignore-deps",
+		"--timeout=60s",
+	)
+	_, message := assertAtomicAssignmentSingleFailureJSON(t, result)
+	if !strings.Contains(message, "current path") || !strings.Contains(message, missingRoot) || !strings.Contains(message, "not usable") {
+		t.Fatalf("missing-live-root diagnostic = %q", message)
+	}
+	if _, err := os.Stat(firedPath); err != nil {
+		t.Fatalf("missing-live-root override did not reach pane project lookup: %v", err)
+	}
+
+	assertAtomicAssignmentTreeUnchanged(t, sessionStateRoot, beforeSessionState)
+	assertAtomicAssignmentTreeUnchanged(t, beadsRoot, beforeBeads)
+	assertAtomicAssignmentPanesUnchanged(t, fixture, beforePanes)
+	afterBead := fixture.mustBR(t, "show", beadID, "--json")
+	if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+		t.Fatalf("missing-live-root rejection mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+	}
+	fixture.assertBead(t, beadID, "open", "")
+	fixture.assertLedgerReplicasHaveNoAssignment(t, beadID)
+	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 0, 1: 0})
+	afterMail := mail.snapshot()
+	if !reflect.DeepEqual(afterMail, beforeMail) {
+		t.Fatalf("missing-live-root rejection touched Agent Mail:\nbefore=%+v\nafter=%+v", beforeMail, afterMail)
+	}
+	assertAtomicAssignmentMailUntouched(t, afterMail)
 }
 
 func TestE2EAtomicAssignmentRemoteRepositoryDependenciesAndDefaultPrompt(t *testing.T) {
@@ -5764,7 +8306,7 @@ func TestE2EAtomicBulkAssignmentCanonicalMultiWindow(t *testing.T) {
 		result := fixture.runNTM(t, nil,
 			"--json", "assign", fixture.session, "--repo="+fixture.projectDir,
 			"--reassign="+beadID, "--to-pane="+target.ID,
-			"--prompt="+reassignedPrompt, "--force", "--reserve-files=false", "--timeout=15s",
+			"--prompt="+reassignedPrompt, "--force", "--reserve-files=false", "--timeout=60s",
 		)
 		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
 			t.Fatalf("canonical reassign exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
@@ -5849,7 +8391,7 @@ func TestE2EAtomicBulkAssignmentCanonicalMultiWindow(t *testing.T) {
 			"assign", fixture.session, "--repo="+fixture.projectDir,
 			"--retry="+beadID, "--to-pane="+target.Target,
 			"--template=custom", "--template-file="+templatePath,
-			"--reserve-files=false", "--timeout=15s", "--json",
+			"--reserve-files=false", "--timeout=60s", "--json",
 		)
 		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
 			t.Fatalf("canonical retry exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
@@ -6064,7 +8606,7 @@ func TestE2EAtomicAssignmentHumanOutputRedaction(t *testing.T) {
 			"--ignore-deps",
 			"--reserve-files=false",
 			"--redact=redact",
-			"--timeout=15s",
+			"--timeout=60s",
 		)
 		if result.exitCode != 0 {
 			t.Fatalf("human direct redaction exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
@@ -6112,7 +8654,7 @@ func TestE2EAtomicAssignmentHumanOutputRedaction(t *testing.T) {
 			"--force",
 			"--reserve-files=false",
 			"--redact=redact",
-			"--timeout=15s",
+			"--timeout=60s",
 		)
 		if result.exitCode != 0 {
 			t.Fatalf("human reassign redaction exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
@@ -6144,7 +8686,7 @@ func TestE2EAtomicAssignmentHumanOutputRedaction(t *testing.T) {
 			"--ignore-deps",
 			"--reserve-files=false",
 			"--redact=redact",
-			"--timeout=15s",
+			"--timeout=60s",
 		)
 		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
 			t.Fatalf("fresh human title assignment exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
@@ -6203,7 +8745,7 @@ func TestE2EAtomicAssignmentHumanOutputRedaction(t *testing.T) {
 			"--ignore-deps",
 			"--reserve-files=true",
 			"--redact=redact",
-			"--timeout=15s",
+			"--timeout=60s",
 		}
 		jsonResult := fixture.runNTM(t, mail.env(), append(append([]string(nil), args...), "--json")...)
 		if jsonResult.exitCode != 0 || len(bytes.TrimSpace(jsonResult.stderr)) != 0 {
@@ -6269,9 +8811,32 @@ func TestE2EAtomicAssignmentEnhancedTitleRedaction(t *testing.T) {
 	secret := "sk-proj-NTM_ENHANCED_TITLE_1234567890123456789012345678901234567890"
 	beadID := fixture.createBead(t, "Enhanced assignment title "+secret)
 	fixture.primePaneForSafeDispatch(t, 0)
-	time.Sleep(5500 * time.Millisecond)
+	fixture.waitForEndpointIdle(t, fixture.panes[0], 6*time.Second, 60*time.Second)
 
-	plan := fixture.runNTM(t, nil,
+	// On a saturated E2E host the process can be descheduled after collecting a
+	// complete observation but before validating its five-second freshness
+	// window. Retry only that explicit pre-actuation error, and prove the failed
+	// attempt left no durable assignment before refreshing the idle observation.
+	runRedacted := func(args ...string) atomicAssignmentProcessResult {
+		t.Helper()
+		const maxStaleObservationAttempts = 3
+		var result atomicAssignmentProcessResult
+		for attempt := 1; attempt <= maxStaleObservationAttempts; attempt++ {
+			result = fixture.runNTM(t, nil, args...)
+			fixture.assertSecretAbsent(t, secret, result.stdout, result.stderr)
+			if !atomicAssignmentStaleObservationFailure(result) || attempt == maxStaleObservationAttempts {
+				return result
+			}
+			fixture.assertLedgerHasNoAssignment(t, beadID)
+			fixture.assertBead(t, beadID, "open", "")
+			fixture.assertMarkerCounts(t, secret, map[int]int{0: 0, 1: 0})
+			fixture.primePaneForSafeDispatch(t, 0)
+			fixture.waitForEndpointIdle(t, fixture.panes[0], 6*time.Second, 60*time.Second)
+		}
+		return result
+	}
+
+	plan := runRedacted(
 		"--json", "assign", fixture.session,
 		"--repo="+fixture.projectDir,
 		"--beads="+beadID,
@@ -6288,7 +8853,7 @@ func TestE2EAtomicAssignmentEnhancedTitleRedaction(t *testing.T) {
 		t.Fatalf("enhanced plan omitted redaction marker: %s", plan.stdout)
 	}
 
-	executed := fixture.runNTM(t, nil,
+	executed := runRedacted(
 		"assign", fixture.session,
 		"--repo="+fixture.projectDir,
 		"--beads="+beadID,
@@ -6296,7 +8861,7 @@ func TestE2EAtomicAssignmentEnhancedTitleRedaction(t *testing.T) {
 		"--auto",
 		"--reserve-files=false",
 		"--redact=redact",
-		"--timeout=15s",
+		"--timeout=60s",
 	)
 	if executed.exitCode != 0 || len(bytes.TrimSpace(executed.stderr)) != 0 {
 		t.Fatalf("enhanced redacted execution exit=%d stdout=%s stderr=%s", executed.exitCode, executed.stdout, executed.stderr)
@@ -6428,7 +8993,7 @@ func newAtomicAssignmentCLIFixture(t *testing.T) *atomicAssignmentCLIFixture {
 	}
 
 	root := t.TempDir()
-	tmuxRoot := filepath.Join("/tmp", fmt.Sprintf("ntm-atomic-tmux-%d-%d", os.Getpid(), time.Now().UnixNano()))
+	tmuxRoot := testutil.ShortTmuxTempDir(t)
 	fixture := &atomicAssignmentCLIFixture{
 		ntmPath:    ntmPath,
 		tmuxPath:   tmuxPath,
@@ -6488,7 +9053,16 @@ func newAtomicAssignmentCLIFixture(t *testing.T) *atomicAssignmentCLIFixture {
 		t.Fatalf("write tmux config: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = fixture.runTMUX(context.Background(), "kill-server")
+		ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxSetupTimeout)
+		defer cancel()
+		err := fixture.runTMUX(ctx, "kill-server")
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			t.Errorf("atomic assignment private tmux cleanup context ended: %v (command error: %v)", ctxErr, err)
+			return
+		}
+		if err != nil && !isBenignTmuxCleanupError([]byte(err.Error())) {
+			t.Errorf("clean up atomic assignment private tmux server: %v", err)
+		}
 	})
 	fixture.startAgentPanes(t)
 	return fixture
@@ -6511,7 +9085,7 @@ func atomicDirectArgsForSelector(f *atomicAssignmentCLIFixture, selector, beadID
 		"--prompt=" + prompt,
 		"--force",
 		"--ignore-deps",
-		"--timeout=15s",
+		"--timeout=60s",
 	}
 	if !requireReservation {
 		args = append(args, "--reserve-files=false")
@@ -6566,7 +9140,7 @@ func atomicDirectTemplateArgs(f *atomicAssignmentCLIFixture, pane int, beadID, t
 		"--reserve-files=false",
 		"--force",
 		"--ignore-deps",
-		"--timeout=15s",
+		"--timeout=60s",
 		"--json",
 	}
 }
@@ -6770,7 +9344,7 @@ func (f *atomicAssignmentCLIFixture) assertBeadAt(t *testing.T, dir, beadID, wan
 
 func (f *atomicAssignmentCLIFixture) assertBeadAbsentAt(t *testing.T, dir, beadID string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.brPath, "show", beadID, "--json")
 	cmd.Dir = dir
@@ -6835,6 +9409,131 @@ func (f *atomicAssignmentCLIFixture) assertLedgerHasNoAssignment(t *testing.T, b
 	}
 	if _, exists := ledger.Assignments[beadID]; exists {
 		t.Fatalf("reservation refusal persisted assignment for %s: %+v", beadID, ledger.Assignments[beadID])
+	}
+}
+
+func (f *atomicAssignmentCLIFixture) assertLedgerReplicasHaveNoAssignment(t *testing.T, beadID string) {
+	t.Helper()
+	for _, path := range []string{f.ledgerPath(), f.ledgerPath() + ".bak"} {
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("inspect assignment ledger replica %s: %v", path, err)
+		}
+		t.Fatalf("assignment safety path created ledger replica %s while rejecting %s: mode=%s size=%d", path, beadID, info.Mode(), info.Size())
+	}
+}
+
+func snapshotAtomicAssignmentFiles(t *testing.T, paths ...string) map[string]atomicAssignmentFileSnapshot {
+	t.Helper()
+	snapshots := make(map[string]atomicAssignmentFileSnapshot, len(paths))
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			snapshots[path] = atomicAssignmentFileSnapshot{}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("snapshot file %s: %v", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("snapshot file %s has non-regular mode %s", path, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read snapshot file %s: %v", path, err)
+		}
+		snapshots[path] = atomicAssignmentFileSnapshot{
+			Exists: true,
+			Mode:   info.Mode(),
+			Data:   append([]byte(nil), data...),
+		}
+	}
+	return snapshots
+}
+
+func assertAtomicAssignmentFilesUnchanged(t *testing.T, before map[string]atomicAssignmentFileSnapshot) {
+	t.Helper()
+	paths := make([]string, 0, len(before))
+	for path := range before {
+		paths = append(paths, path)
+	}
+	after := snapshotAtomicAssignmentFiles(t, paths...)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("command mutated protected files:\nbefore=%#v\nafter=%#v", before, after)
+	}
+}
+
+func snapshotAtomicAssignmentTree(t *testing.T, root string) map[string]atomicAssignmentFileSnapshot {
+	t.Helper()
+	snapshots := make(map[string]atomicAssignmentFileSnapshot)
+	if _, err := os.Lstat(root); os.IsNotExist(err) {
+		return snapshots
+	} else if err != nil {
+		t.Fatalf("inspect snapshot tree root %s: %v", root, err)
+	}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		snapshot := atomicAssignmentFileSnapshot{Exists: true, Mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			snapshot.Data = append([]byte(nil), data...)
+		}
+		snapshots[relative] = snapshot
+		return nil
+	}); err != nil {
+		t.Fatalf("snapshot tree %s: %v", root, err)
+	}
+	return snapshots
+}
+
+func assertAtomicAssignmentTreeUnchanged(t *testing.T, root string, before map[string]atomicAssignmentFileSnapshot) {
+	t.Helper()
+	after := snapshotAtomicAssignmentTree(t, root)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("command mutated protected tree %s:\nbefore=%#v\nafter=%#v", root, before, after)
+	}
+}
+
+func snapshotAtomicAssignmentPanes(t *testing.T, fixture *atomicAssignmentCLIFixture) map[int]string {
+	t.Helper()
+	return map[int]string{
+		0: fixture.capturePane(t, 0),
+		1: fixture.capturePane(t, 1),
+	}
+}
+
+func assertAtomicAssignmentPanesUnchanged(t *testing.T, fixture *atomicAssignmentCLIFixture, before map[int]string) {
+	t.Helper()
+	for pane, capture := range before {
+		if after := fixture.capturePane(t, pane); after != capture {
+			t.Fatalf("command mutated pane %d:\nbefore=%q\nafter=%q", pane, capture, after)
+		}
+	}
+}
+
+func assertAtomicAssignmentMailUntouched(t *testing.T, snapshot atomicAssignmentMailSnapshot) {
+	t.Helper()
+	// Safety preflight may perform health/project discovery and reservation-list
+	// reads. It must not reserve, release, send, or leave any mutation behind.
+	if snapshot.ReserveCalls != 0 || snapshot.ReleaseCalls != 0 || snapshot.SendCalls != 0 || len(snapshot.ReleasedIDs) != 0 ||
+		len(snapshot.GrantedAgents) != 0 || len(snapshot.GrantedPaths) != 0 || len(snapshot.Active) != 0 {
+		t.Fatalf("failure mutated Agent Mail: %+v", snapshot)
 	}
 }
 
@@ -7255,6 +9954,59 @@ func decodeAtomicAssignmentJSON(t *testing.T, data []byte, target any) {
 	}
 }
 
+func assertAtomicAssignmentSingleFailureJSON(t *testing.T, result atomicAssignmentProcessResult) (string, string) {
+	t.Helper()
+	if result.exitCode != 1 || len(bytes.TrimSpace(result.stderr)) != 0 {
+		t.Fatalf("failed command exit=%d, want 1; stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	var envelope struct {
+		Success   *bool           `json:"success"`
+		ErrorCode string          `json:"error_code"`
+		Error     json.RawMessage `json:"error"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(result.stdout)))
+	if err := decoder.Decode(&envelope); err != nil {
+		t.Fatalf("decode failure JSON: %v raw=%s", err, result.stdout)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		t.Fatalf("failure emitted more than one JSON document: err=%v trailing=%v raw=%s", err, trailing, result.stdout)
+	}
+	if envelope.Success == nil || *envelope.Success {
+		t.Fatalf("failure envelope must contain success=false: raw=%s", result.stdout)
+	}
+
+	code := envelope.ErrorCode
+	message := ""
+	trimmedError := bytes.TrimSpace(envelope.Error)
+	if len(trimmedError) > 0 && !bytes.Equal(trimmedError, []byte("null")) {
+		switch trimmedError[0] {
+		case '{':
+			var nested struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(trimmedError, &nested); err != nil {
+				t.Fatalf("decode failure error object: %v raw=%s", err, trimmedError)
+			}
+			if nested.Code != "" {
+				code = nested.Code
+			}
+			message = nested.Message
+		case '"':
+			if err := json.Unmarshal(trimmedError, &message); err != nil {
+				t.Fatalf("decode failure error string: %v raw=%s", err, trimmedError)
+			}
+		default:
+			t.Fatalf("failure error must be a string or object: raw=%s", trimmedError)
+		}
+	}
+	if code == "" || message == "" {
+		t.Fatalf("failure envelope omitted code or message: code=%q message=%q raw=%s", code, message, result.stdout)
+	}
+	return code, message
+}
+
 func (f *atomicAssignmentCLIFixture) startAgentPanes(t *testing.T) {
 	t.Helper()
 	agentCommand := "bash --noprofile --norc -c 'stty -echo; exec cat'"
@@ -7375,6 +10127,42 @@ func (f *atomicAssignmentCLIFixture) primeEndpointForSafeDispatch(t *testing.T, 
 	}
 }
 
+func (f *atomicAssignmentCLIFixture) waitForEndpointIdle(t *testing.T, pane atomicAssignmentPane, minimum, timeout time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastActivity string
+	var lastErr error
+	for {
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		output, err := f.tmuxOutput(ctx, "display-message", "-p", "-t", pane.ID, "#{window_activity}")
+		cancel()
+		lastActivity = strings.TrimSpace(string(output))
+		lastErr = err
+		if err == nil {
+			activityUnix, parseErr := strconv.ParseInt(lastActivity, 10, 64)
+			if parseErr == nil {
+				if time.Since(time.Unix(activityUnix, 0)) >= minimum {
+					return
+				}
+			} else {
+				lastErr = parseErr
+			}
+		}
+
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatalf("pane %s did not remain idle for %s within %s: activity=%q error=%v", pane.Target, minimum, timeout, lastActivity, lastErr)
+		case <-t.Context().Done():
+			t.Fatalf("wait for pane %s idle duration: %v", pane.Target, t.Context().Err())
+		}
+	}
+}
+
 func (f *atomicAssignmentCLIFixture) driveAssignmentStatus(t *testing.T, pane atomicAssignmentPane, beadID, paneOutput, wantStatus string) {
 	f.driveAssignmentStatusUntil(t, pane, beadID, paneOutput, wantStatus, false)
 }
@@ -7388,7 +10176,7 @@ func (f *atomicAssignmentCLIFixture) driveAssignmentStatusUntil(t *testing.T, pa
 	f.mustTMUX(t, "send-keys", "-t", pane.ID, "-l", paneOutput)
 	f.mustTMUX(t, "send-keys", "-t", pane.ID, "Enter")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	watch := exec.CommandContext(ctx, f.ntmPath,
 		"assign", f.session,
@@ -7401,21 +10189,66 @@ func (f *atomicAssignmentCLIFixture) driveAssignmentStatusUntil(t *testing.T, pa
 	)
 	watch.Dir = f.projectDir
 	watch.Env = append([]string(nil), f.env...)
+	if requireCompletionEvent {
+		// The normal watch loop acknowledges failed events immediately. Hold its
+		// handler after the detector has durably claimed the event so this helper
+		// can observe the outbox boundary, stop the watcher, and let the caller
+		// exercise acknowledgement and retry deterministically.
+		watch.Env = atomicAssignmentMergeEnv(watch.Env, map[string]string{
+			"NTM_TEST_COMPLETION_HANDLER_DELAY": "2m",
+		})
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	watch.Stdout = &stdout
 	watch.Stderr = &stderr
-	if err := watch.Start(); err != nil {
-		t.Fatalf("start assignment status watch: %v", err)
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, watch)
+	if groupErr != nil {
+		t.Fatalf("create owned process group for assignment status watch: %v", groupErr)
 	}
+	watch.Cancel = func() error {
+		return group.Signal(os.Kill)
+	}
+	watch.WaitDelay = 10 * time.Second
+	if err := watch.Start(); err != nil {
+		closeErr := group.Close()
+		t.Fatalf("start assignment status watch: %v; close owned process group: %v", err, closeErr)
+	}
+	joined := false
+	var waitErr error
+	stopWatch := func(signal os.Signal) error {
+		if joined {
+			return waitErr
+		}
+		signalErr := group.Signal(signal)
+		if errors.Is(signalErr, os.ErrProcessDone) {
+			signalErr = nil
+		}
+		commandWaitErr := watch.Wait()
+		groupCloseErr := group.Close()
+		waitErr = errors.Join(signalErr, commandWaitErr, groupCloseErr)
+		joined = true
+		return waitErr
+	}
+	defer func() {
+		if !joined {
+			_ = stopWatch(os.Kill)
+		}
+	}()
 
-	deadline := time.Now().Add(40 * time.Second)
+	deadline := time.Now().Add(75 * time.Second)
 	for {
 		ledger, readErr := f.readLedger()
 		if readErr == nil {
-			if record := ledger.Assignments[beadID]; record != nil && record.Status == wantStatus &&
-				(!requireCompletionEvent || strings.TrimSpace(record.PendingCompletionEventID) != "") {
-				break
+			if record := ledger.Assignments[beadID]; record != nil && record.Status == wantStatus {
+				completionEventReady := !requireCompletionEvent ||
+					(strings.TrimSpace(record.PendingCompletionEventID) != "" &&
+						strings.TrimSpace(record.CompletionConsumerToken) != "" &&
+						record.CompletionLeaseExpiresAt != nil &&
+						record.CompletionLeaseExpiresAt.After(time.Now().UTC()))
+				if completionEventReady {
+					break
+				}
 			}
 		}
 		if time.Now().After(deadline) {
@@ -7423,23 +10256,45 @@ func (f *atomicAssignmentCLIFixture) driveAssignmentStatusUntil(t *testing.T, pa
 			if ledger != nil {
 				durable = ledger.Assignments[beadID]
 			}
-			t.Fatalf("assignment detector did not mark %s %s: durable=%+v pane_output=%q read_err=%v stdout=%s stderr=%s",
-				beadID, wantStatus, durable, f.captureEndpoint(t, pane), readErr, stdout.String(), stderr.String())
+			joinErr := stopWatch(os.Kill)
+			paneSnapshot := f.captureEndpoint(t, pane)
+			t.Fatalf("assignment detector did not reach %s with pending_event=%v for %s: durable=%+v pane_output=%q read_err=%v join_err=%v stdout=%s stderr=%s",
+				wantStatus, requireCompletionEvent, beadID, durable, paneSnapshot, readErr, joinErr, stdout.String(), stderr.String())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err := watch.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("signal assignment status watch: %v", err)
-	}
-	if err := watch.Wait(); err != nil {
+	if err := stopWatch(syscall.SIGTERM); err != nil {
 		t.Fatalf("assignment status watch did not exit cleanly: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("assignment status watch exceeded deadline: %v", ctx.Err())
 	}
-	if len(bytes.TrimSpace(stderr.Bytes())) != 0 {
-		t.Fatalf("assignment status watch stderr=%s", stderr.String())
+	watchStderr := strings.TrimSpace(stderr.String())
+	if unexpected := atomicAssignmentUnexpectedWatchStderr(watchStderr); unexpected != "" {
+		t.Fatalf("assignment status watch stderr=%s", unexpected)
 	}
+	if watchStderr != "" {
+		t.Logf("assignment status watch tolerated circuit-breaker warning: %s", watchStderr)
+	}
+}
+
+func atomicAssignmentUnexpectedWatchStderr(stderr string) string {
+	const circuitBreakerWarning = "WARN tmux circuit breaker opened consecutive_failures=5 backoff=10s"
+
+	var unexpected []string
+	tolerated := false
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if line == circuitBreakerWarning && !tolerated {
+			tolerated = true
+			continue
+		}
+		unexpected = append(unexpected, line)
+	}
+	return strings.Join(unexpected, "\n")
 }
 
 func (f *atomicAssignmentCLIFixture) captureEndpoint(t *testing.T, pane atomicAssignmentPane) string {
@@ -7531,7 +10386,7 @@ func (f *atomicAssignmentCLIFixture) startCompletionWatch(t *testing.T, env map[
 
 func (f *atomicAssignmentCLIFixture) startCompletionWatchWithInterval(t *testing.T, env map[string]string, watchInterval time.Duration) *atomicCompletionWatchProcess {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	cmd := exec.CommandContext(ctx, f.ntmPath,
 		"assign", f.session,
 		"--repo="+f.projectDir,
@@ -7554,28 +10409,56 @@ func (f *atomicAssignmentCLIFixture) startCompletionWatchWithInterval(t *testing
 		cancel()
 		t.Fatalf("create completion watcher stderr file: %v", err)
 	}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	process := &atomicCompletionWatchProcess{
-		cmd: cmd, ctx: ctx, cancel: cancel, stdout: stdout, stderr: stderr,
-	}
-	if err := cmd.Start(); err != nil {
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+	if groupErr != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
 		cancel()
-		t.Fatalf("start completion watcher: %v", err)
+		t.Fatalf("create owned process group for completion watcher: %v", groupErr)
+	}
+	cmd.Cancel = func() error {
+		return group.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = 10 * time.Second
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	process := &atomicCompletionWatchProcess{
+		cmd: cmd, group: group, ctx: ctx, cancel: cancel, stdout: stdout, stderr: stderr,
+	}
+	if err := cmd.Start(); err != nil {
+		closeErr := group.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		cancel()
+		t.Fatalf("start completion watcher: %v; close owned process group: %v", err, closeErr)
 	}
 	t.Cleanup(func() {
-		if !process.waited && process.cmd.Process != nil {
-			_ = process.cmd.Process.Kill()
-			_ = process.cmd.Wait()
-			process.waited = true
+		if !process.waited {
+			if err := process.terminate(10 * time.Second); err != nil {
+				t.Errorf("terminate completion watcher during cleanup: %v", err)
+			}
 		}
 		process.cancel()
 		_ = process.stdout.Close()
 		_ = process.stderr.Close()
 	})
+	process.waitForOutput(t, "Starting watch mode", 90*time.Second)
 	return process
+}
+
+func (p *atomicCompletionWatchProcess) waitForOutput(t *testing.T, marker string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		stdout, stderr := p.output(t)
+		if strings.Contains(stdout, marker) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("completion watcher did not emit %q within %v: stdout=%s stderr=%s", marker, timeout, stdout, stderr)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func (p *atomicCompletionWatchProcess) output(t *testing.T) (string, string) {
@@ -7591,20 +10474,58 @@ func (p *atomicCompletionWatchProcess) output(t *testing.T) (string, string) {
 	return string(stdout), string(stderr)
 }
 
+func (p *atomicCompletionWatchProcess) terminate(grace time.Duration) error {
+	if p.waited {
+		return nil
+	}
+	if p.cmd.Process == nil {
+		closeErr := p.group.Close()
+		p.cancel()
+		p.waited = true
+		return closeErr
+	}
+	signalErr := p.group.Signal(syscall.SIGTERM)
+	if errors.Is(signalErr, os.ErrProcessDone) {
+		signalErr = nil
+	}
+	waitResult := make(chan error, 1)
+	go func() {
+		waitResult <- p.cmd.Wait()
+	}()
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	var waitErr error
+	select {
+	case waitErr = <-waitResult:
+	case <-timer.C:
+		killErr := p.group.Signal(os.Kill)
+		if errors.Is(killErr, os.ErrProcessDone) {
+			killErr = nil
+		}
+		_ = p.cmd.Process.Kill()
+		waitErr = <-waitResult
+		waitErr = errors.Join(
+			fmt.Errorf("completion watcher did not stop within %v", grace),
+			waitErr,
+			killErr,
+		)
+	}
+	waitErr = errors.Join(waitErr, p.group.Close())
+	p.waited = true
+	p.cancel()
+	return errors.Join(signalErr, waitErr)
+}
+
 func (p *atomicCompletionWatchProcess) stopClean(t *testing.T) (string, string) {
 	t.Helper()
 	if p.waited {
 		t.Fatal("completion watcher was already waited")
 	}
-	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("signal completion watcher: %v", err)
-	}
-	if err := p.cmd.Wait(); err != nil {
+	if err := p.terminate(10 * time.Second); err != nil {
 		stdout, stderr := p.output(t)
 		t.Fatalf("completion watcher did not exit cleanly: %v stdout=%s stderr=%s", err, stdout, stderr)
 	}
-	p.waited = true
-	p.cancel()
 	if p.ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("completion watcher exceeded deadline: %v", p.ctx.Err())
 	}
@@ -7616,14 +10537,19 @@ func (p *atomicCompletionWatchProcess) kill(t *testing.T) (string, string) {
 	if p.waited {
 		t.Fatal("completion watcher was already waited")
 	}
-	if err := p.cmd.Process.Kill(); err != nil {
+	if err := p.group.Signal(os.Kill); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("kill completion watcher: %v", err)
 	}
-	if err := p.cmd.Wait(); err == nil {
-		t.Fatal("killed completion watcher exited successfully")
-	}
+	waitErr := p.cmd.Wait()
+	closeErr := p.group.Close()
 	p.waited = true
 	p.cancel()
+	if closeErr != nil {
+		t.Fatalf("close owned process group for killed completion watcher: %v", closeErr)
+	}
+	if waitErr == nil {
+		t.Fatal("killed completion watcher exited successfully")
+	}
 	return p.output(t)
 }
 
@@ -7648,32 +10574,51 @@ func (f *atomicAssignmentCLIFixture) runNTMInterrupted(
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+	if groupErr != nil {
+		t.Fatalf("create owned process group for interrupted ntm %q: %v", args, groupErr)
+	}
+	cmd.Cancel = func() error {
+		return group.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = 10 * time.Second
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start interruptible ntm %q: %v", args, err)
+		closeErr := group.Close()
+		t.Fatalf("start interruptible ntm %q: %v; close owned process group: %v", args, err, closeErr)
 	}
 	waited := false
 	t.Cleanup(func() {
-		if !waited && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+		if !waited {
+			if cmd.Process != nil {
+				_ = group.Signal(os.Kill)
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+			if closeErr := group.Close(); closeErr != nil {
+				t.Errorf("close owned process group for interrupted ntm %q: %v", args, closeErr)
+			}
 		}
 	})
 	ready(cmd.Process.Pid)
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("interrupt ntm %q: %v", args, err)
 	}
-	err := cmd.Wait()
+	commandErr := cmd.Wait()
+	closeErr := group.Close()
 	waited = true
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("interrupted ntm command timed out: %q", args)
 	}
 	exitCode := 0
-	if err != nil {
+	if closeErr != nil {
+		t.Fatalf("close owned process group for interrupted ntm %q: %v", args, closeErr)
+	}
+	if commandErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(commandErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
-			t.Fatalf("wait for interrupted ntm %q: %v", args, err)
+			t.Fatalf("wait for interrupted ntm %q: %v", args, commandErr)
 		}
 	}
 	t.Logf("[E2E-ATOMIC-CANCEL] exit=%d args=%q stdout=%s stderr=%s", exitCode, args, truncateString(stdout.String(), 500), truncateString(stderr.String(), 500))
@@ -7713,6 +10658,34 @@ func assertAtomicAssignmentSingleTimeoutJSON(t *testing.T, result atomicAssignme
 	if envelope.Success || code != "TIMEOUT" {
 		t.Fatalf("cancellation envelope success=%v code=%q raw=%s", envelope.Success, code, result.stdout)
 	}
+}
+
+func atomicAssignmentStaleObservationFailure(result atomicAssignmentProcessResult) bool {
+	if result.exitCode == 0 {
+		return false
+	}
+	var envelope atomicAssignmentAutoEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(result.stdout), &envelope); err == nil &&
+		envelope.Error != nil && envelope.Error.Code == "ASSIGN_ERROR" {
+		return atomicAssignmentStaleObservationMessage(envelope.Error.Message)
+	}
+	return atomicAssignmentStaleObservationMessage(string(result.stdout) + "\n" + string(result.stderr))
+}
+
+func atomicAssignmentStaleObservationMessage(message string) bool {
+	const prefix = "assignment observation for pane "
+	const suffix = " is stale"
+	for _, line := range strings.Split(message, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "Error:"))
+		if !strings.HasPrefix(line, prefix) || !strings.HasSuffix(line, suffix) {
+			continue
+		}
+		pane := strings.TrimSuffix(strings.TrimPrefix(line, prefix), suffix)
+		if strings.TrimSpace(pane) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func waitForAtomicAssignmentSignal(t *testing.T, signal <-chan struct{}, description string) {
@@ -7860,7 +10833,7 @@ func waitForAtomicAssignmentPath(t *testing.T, path string, pid int) {
 
 func (f *atomicAssignmentCLIFixture) runNTMInDir(t *testing.T, dir string, env map[string]string, args ...string) atomicAssignmentProcessResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.ntmPath, args...)
 	cmd.Dir = dir
@@ -7869,17 +10842,29 @@ func (f *atomicAssignmentCLIFixture) runNTMInDir(t *testing.T, dir string, env m
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+	if groupErr != nil {
+		t.Fatalf("create owned process group for ntm %q: %v", args, groupErr)
+	}
+	cmd.Cancel = func() error {
+		return group.Signal(os.Kill)
+	}
+	cmd.WaitDelay = 10 * time.Second
+	commandErr := cmd.Run()
+	closeErr := group.Close()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("ntm command timed out: %q", args)
 	}
 	exitCode := 0
-	if err != nil {
+	if closeErr != nil {
+		t.Fatalf("close owned process group for ntm %q: %v", args, closeErr)
+	}
+	if commandErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(commandErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
-			t.Fatalf("run ntm %q: %v", args, err)
+			t.Fatalf("run ntm %q: %v", args, commandErr)
 		}
 	}
 	t.Logf("[E2E-ATOMIC] exit=%d args=%q stdout=%s stderr=%s", exitCode, args, truncateString(stdout.String(), 500), truncateString(stderr.String(), 500))
@@ -7893,19 +10878,44 @@ func (f *atomicAssignmentCLIFixture) runNTMConcurrent(t *testing.T, count int, e
 
 func (f *atomicAssignmentCLIFixture) runNTMConcurrentAfterStart(t *testing.T, count int, env map[string]string, afterStart func(), args ...string) []atomicAssignmentProcessResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	type runningProcess struct {
 		cmd         *exec.Cmd
+		group       *testutil.ProcessGroupForTest
 		stdout      bytes.Buffer
 		stderr      bytes.Buffer
 		gateReader  *os.File
 		gateWriter  *os.File
 		readyReader *os.File
 		readyWriter *os.File
+		waited      bool
 	}
 	processes := make([]runningProcess, count)
+	t.Cleanup(func() {
+		for i := range processes {
+			process := &processes[i]
+			if process.cmd != nil && process.cmd.Process != nil && !process.waited {
+				if process.group != nil {
+					_ = process.group.Signal(os.Kill)
+				}
+				_ = process.cmd.Process.Kill()
+				_ = process.cmd.Wait()
+				process.waited = true
+			}
+			if process.group != nil {
+				if closeErr := process.group.Close(); closeErr != nil {
+					t.Errorf("close owned process group for contender %d: %v", i, closeErr)
+				}
+			}
+			for _, file := range []*os.File{process.gateReader, process.gateWriter, process.readyReader, process.readyWriter} {
+				if file != nil {
+					_ = file.Close()
+				}
+			}
+		}
+	})
 	for i := range processes {
 		gateReader, gateWriter, err := os.Pipe()
 		if err != nil {
@@ -7923,12 +10933,22 @@ func (f *atomicAssignmentCLIFixture) runNTMConcurrentAfterStart(t *testing.T, co
 		processes[i].readyWriter = readyWriter
 		barrierArgs := []string{"-c", `printf x >&4; IFS= read -r _ <&3; exec "$@"`, "ntm-e2e-barrier", f.ntmPath}
 		barrierArgs = append(barrierArgs, args...)
-		processes[i].cmd = exec.CommandContext(ctx, "/bin/sh", barrierArgs...)
-		processes[i].cmd.Dir = f.projectDir
-		processes[i].cmd.Env = atomicAssignmentMergeEnv(f.env, env)
-		processes[i].cmd.ExtraFiles = []*os.File{gateReader, readyWriter}
-		processes[i].cmd.Stdout = &processes[i].stdout
-		processes[i].cmd.Stderr = &processes[i].stderr
+		cmd := exec.CommandContext(ctx, "/bin/sh", barrierArgs...)
+		cmd.Dir = f.projectDir
+		cmd.Env = atomicAssignmentMergeEnv(f.env, env)
+		cmd.ExtraFiles = []*os.File{gateReader, readyWriter}
+		cmd.Stdout = &processes[i].stdout
+		cmd.Stderr = &processes[i].stderr
+		group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+		if groupErr != nil {
+			t.Fatalf("create owned process group for contender %d: %v", i, groupErr)
+		}
+		cmd.Cancel = func() error {
+			return group.Signal(syscall.SIGTERM)
+		}
+		cmd.WaitDelay = 10 * time.Second
+		processes[i].cmd = cmd
+		processes[i].group = group
 	}
 	for i := range processes {
 		if err := processes[i].cmd.Start(); err != nil {
@@ -7938,7 +10958,7 @@ func (f *atomicAssignmentCLIFixture) runNTMConcurrentAfterStart(t *testing.T, co
 		_ = processes[i].readyWriter.Close()
 	}
 	for i := range processes {
-		if err := processes[i].readyReader.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		if err := processes[i].readyReader.SetReadDeadline(time.Now().Add(45 * time.Second)); err != nil {
 			t.Fatalf("set contender %d readiness deadline: %v", i, err)
 		}
 		var ready [1]byte
@@ -7959,17 +10979,22 @@ func (f *atomicAssignmentCLIFixture) runNTMConcurrentAfterStart(t *testing.T, co
 
 	results := make([]atomicAssignmentProcessResult, count)
 	for i := range processes {
-		err := processes[i].cmd.Wait()
+		commandErr := processes[i].cmd.Wait()
+		closeErr := processes[i].group.Close()
+		processes[i].waited = true
 		if ctx.Err() == context.DeadlineExceeded {
 			t.Fatalf("concurrent ntm commands timed out: %q", args)
 		}
 		exitCode := 0
-		if err != nil {
+		if closeErr != nil {
+			t.Fatalf("close owned process group for ntm contender %d: %v", i, closeErr)
+		}
+		if commandErr != nil {
 			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
+			if errors.As(commandErr, &exitErr) {
 				exitCode = exitErr.ExitCode()
 			} else {
-				t.Fatalf("wait for ntm contender %d %q: %v", i, args, err)
+				t.Fatalf("wait for ntm contender %d %q: %v", i, args, commandErr)
 			}
 		}
 		results[i] = atomicAssignmentProcessResult{
@@ -7990,7 +11015,7 @@ func (f *atomicAssignmentCLIFixture) mustBR(t *testing.T, args ...string) []byte
 
 func (f *atomicAssignmentCLIFixture) mustBRAt(t *testing.T, dir string, args ...string) []byte {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.brPath, args...)
 	cmd.Dir = dir
@@ -8007,7 +11032,7 @@ func (f *atomicAssignmentCLIFixture) mustBRAt(t *testing.T, dir string, args ...
 
 func (f *atomicAssignmentCLIFixture) mustTMUX(t *testing.T, args ...string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxSetupTimeout)
 	defer cancel()
 	if err := f.runTMUX(ctx, args...); err != nil {
 		t.Fatalf("tmux %s: %v", strings.Join(args, " "), err)

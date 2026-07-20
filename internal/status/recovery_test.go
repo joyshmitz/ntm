@@ -1,9 +1,12 @@
 package status
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 func TestRecoveryManager_CanSendRecovery(t *testing.T) {
@@ -170,6 +173,36 @@ func TestRecoveryManager_HandleCompactionEvent(t *testing.T) {
 	}
 	if err != nil {
 		t.Error("should not error for nil event")
+	}
+}
+
+func TestRecoveryManagerRejectsGrokCompactionBeforeStateMutation(t *testing.T) {
+	rm := NewRecoveryManagerDefault()
+	event := &CompactionEvent{
+		PaneID:      "unchanged",
+		AgentType:   " XAI_GROK_BUILD ",
+		MatchedText: "continuing from summary",
+		DetectedAt:  time.Now(),
+	}
+
+	sent, err := rm.HandleCompactionEvent(event, "grok-session", 4)
+	if sent {
+		t.Fatal("recovery sent = true, want false")
+	}
+	if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		t.Fatalf("error = %v, want prompt-delivery sentinel", err)
+	}
+	if event.PaneID != "unchanged" {
+		t.Fatalf("event pane ID mutated to %q", event.PaneID)
+	}
+	if count := rm.GetRecoveryCount(makePaneID("grok-session", 4)); count != 0 {
+		t.Fatalf("recovery count = %d, want 0", count)
+	}
+	if _, ok := rm.GetLastRecoveryTime(makePaneID("grok-session", 4)); ok {
+		t.Fatal("last recovery time was mutated")
+	}
+	if events := rm.GetRecoveryEvents(); len(events) != 0 {
+		t.Fatalf("recovery events = %+v, want empty", events)
 	}
 }
 
@@ -452,7 +485,7 @@ func TestRecoveryManager_SendRecoveryPromptByID_Cooldown(t *testing.T) {
 	rm.mu.Unlock()
 
 	// Try to send again - should be blocked by cooldown
-	sent, err := rm.SendRecoveryPromptByID("test", 0, paneID, "trigger")
+	sent, err := rm.sendRecoveryPromptByIDForAgent("test", 0, paneID, "trigger", agent.AgentTypeClaudeCode)
 	if sent {
 		t.Error("should not send when in cooldown")
 	}
@@ -479,12 +512,42 @@ func TestRecoveryManager_SendRecoveryPromptByID_MaxRecoveries(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	// Try to send - should be blocked by max recoveries
-	sent, err := rm.SendRecoveryPromptByID("test", 0, paneID, "trigger")
+	sent, err := rm.sendRecoveryPromptByIDForAgent("test", 0, paneID, "trigger", agent.AgentTypeClaudeCode)
 	if sent {
 		t.Error("should not send when max recoveries reached")
 	}
 	if err != nil {
 		t.Errorf("should not error when blocked by max recoveries: %v", err)
+	}
+}
+
+func TestRecoveryManagerExportedPromptRejectsGrokBeforeStateOrSendMutation(t *testing.T) {
+	rm := NewRecoveryManagerDefault()
+	rm.resolvePaneType = func(string, int, string) (agent.AgentType, error) {
+		return agent.AgentType("xai-grok-build"), nil
+	}
+	sendCalls := 0
+	rm.sendPrompt = func(string, string, bool) error {
+		sendCalls++
+		return nil
+	}
+
+	paneID := "%grok"
+	sent, err := rm.SendRecoveryPromptByID("grok-session", 4, paneID, "compacted")
+	if sent {
+		t.Fatal("Grok recovery sent = true, want false")
+	}
+	if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		t.Fatalf("Grok recovery error = %v, want prompt-delivery sentinel", err)
+	}
+	if sendCalls != 0 {
+		t.Fatalf("Grok recovery send calls = %d, want 0", sendCalls)
+	}
+	if count := rm.GetRecoveryCount(paneID); count != 0 {
+		t.Fatalf("Grok recovery count = %d, want 0", count)
+	}
+	if _, ok := rm.GetLastRecoveryTime(paneID); ok {
+		t.Fatal("Grok recovery mutated last-recovery state")
 	}
 }
 
@@ -504,4 +567,28 @@ func TestCompactionRecoveryIntegration_CheckAndRecover_WithCompaction(t *testing
 	// Sent should be false since tmux isn't running
 	// or true if it happens to be available
 	t.Logf("Sent=%v, Error=%v", sent, err)
+}
+
+func TestCompactionRecoveryIntegrationDetectsButDoesNotRecoverGrok(t *testing.T) {
+	cri := NewCompactionRecoveryIntegrationDefault()
+
+	event, sent, err := cri.CheckAndRecover("Continuing from summary", "Grok-Build", "grok-session", 3)
+	if event == nil {
+		t.Fatal("compaction event = nil, want detected event")
+	}
+	if sent {
+		t.Fatal("recovery sent = true, want false")
+	}
+	if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		t.Fatalf("error = %v, want prompt-delivery sentinel", err)
+	}
+	if detectorEvents := cri.Detector().EventsForPane(makePaneID("grok-session", 3)); len(detectorEvents) != 1 {
+		t.Fatalf("detector events = %+v, want one detected event", detectorEvents)
+	}
+	if count := cri.Recovery().GetRecoveryCount(makePaneID("grok-session", 3)); count != 0 {
+		t.Fatalf("recovery count = %d, want 0", count)
+	}
+	if _, ok := cri.Recovery().GetLastRecoveryTime(makePaneID("grok-session", 3)); ok {
+		t.Fatal("last recovery time was mutated")
+	}
 }

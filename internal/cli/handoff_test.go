@@ -295,6 +295,7 @@ func TestRunHandoffLedgerTextOutput(t *testing.T) {
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	if err := runHandoffLedger(cmd, "testsession", false); err != nil {
@@ -327,6 +328,7 @@ func TestRunHandoffLedgerJSONOutput(t *testing.T) {
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	if err := runHandoffLedger(cmd, "testsession", true); err != nil {
@@ -431,6 +433,7 @@ func TestRunHandoffCreateWithFlags(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run create with flags
@@ -486,6 +489,7 @@ func TestRunHandoffCreateJSONOutput(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run create with JSON output
@@ -517,6 +521,91 @@ func TestRunHandoffCreateJSONOutput(t *testing.T) {
 	}
 }
 
+func TestRunHandoffCreateAutoPreservesCommandCancellation(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	err := runHandoffCreate(cmd, "", "", "", "", true, "", false, "", "yaml", false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runHandoffCreate() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRunHandoffHelpersRequireLiveCommandContext(t *testing.T) {
+	t.Chdir(t.TempDir())
+	outputPath := filepath.Join(t.TempDir(), "must-not-exist.yaml")
+	operations := []struct {
+		name string
+		run  func(*cobra.Command) error
+	}{
+		{
+			name: "create flags",
+			run: func(cmd *cobra.Command) error {
+				return runHandoffCreate(cmd, "general", "goal", "now", "", false, "canceled", false, outputPath, "yaml", false)
+			},
+		},
+		{
+			name: "create from file",
+			run: func(cmd *cobra.Command) error {
+				return runHandoffCreate(cmd, "general", "", "", filepath.Join(t.TempDir(), "missing-source.yaml"), false, "canceled", false, outputPath, "yaml", false)
+			},
+		},
+		{name: "ledger", run: func(cmd *cobra.Command) error { return runHandoffLedger(cmd, "general", false) }},
+		{name: "list all", run: func(cmd *cobra.Command) error { return runHandoffList(cmd, "", 10, false) }},
+		{name: "list scoped", run: func(cmd *cobra.Command) error { return runHandoffList(cmd, "general", 10, false) }},
+		{name: "show", run: func(cmd *cobra.Command) error {
+			return runHandoffShow(cmd, filepath.Join(t.TempDir(), "missing.yaml"), false)
+		}},
+	}
+
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			t.Run("nil command", func(t *testing.T) {
+				err := operation.run(nil)
+				if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+					t.Fatalf("error=%v, want required-context failure", err)
+				}
+			})
+
+			t.Run("unset context", func(t *testing.T) {
+				cmd := &cobra.Command{}
+				var output bytes.Buffer
+				cmd.SetOut(&output)
+				err := operation.run(cmd)
+				if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+					t.Fatalf("error=%v, want required-context failure", err)
+				}
+				if output.Len() != 0 {
+					t.Fatalf("output=%q, want no output before context rejection", output.String())
+				}
+			})
+
+			t.Run("pre-canceled", func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				cmd := &cobra.Command{}
+				cmd.SetContext(ctx)
+				var output bytes.Buffer
+				cmd.SetOut(&output)
+				err := operation.run(cmd)
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("error=%v, want context.Canceled", err)
+				}
+				if output.Len() != 0 {
+					t.Fatalf("output=%q, want no output after cancellation", output.String())
+				}
+			})
+		})
+	}
+
+	if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canceled handoff create wrote %s: stat error=%v", outputPath, err)
+	}
+}
+
 func TestRunHandoffCreateUsesProjectRootFromSubdir(t *testing.T) {
 	tmpDir := t.TempDir()
 	configDir := filepath.Join(tmpDir, ".ntm")
@@ -539,6 +628,7 @@ func TestRunHandoffCreateUsesProjectRootFromSubdir(t *testing.T) {
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	if err := runHandoffCreate(cmd, "testsession", "Test goal", "Next task", "", false, "root-check", false, "", "yaml", false); err != nil {
@@ -578,6 +668,7 @@ func TestRunHandoffCreateUsesSessionProjectDir(t *testing.T) {
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	if err := runHandoffCreate(cmd, "testsession", "Scoped goal", "Scoped next", "", false, "session-scope", false, "", "yaml", false); err != nil {
@@ -649,6 +740,7 @@ func TestRunHandoffList(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run list for session
@@ -696,6 +788,7 @@ func TestRunHandoffListUsesSessionProjectDir(t *testing.T) {
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	if err := runHandoffList(cmd, "testsession", 10, false); err != nil {
@@ -757,6 +850,7 @@ func TestRunHandoffLedgerUsesProjectRootFromSubdir(t *testing.T) {
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	if err := runHandoffLedger(cmd, "testsession", false); err != nil {
@@ -806,6 +900,7 @@ func TestRunHandoffListSessions(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run list without session (should list sessions)
@@ -853,6 +948,7 @@ func TestRunHandoffListJSONOutput(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run list with JSON output
@@ -909,6 +1005,7 @@ func TestRunHandoffShow(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run show
@@ -968,6 +1065,7 @@ func TestRunHandoffShowJSONOutput(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run show with JSON output
@@ -1023,6 +1121,7 @@ func TestRunHandoffCreateFromFile(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run create from file, overriding session name
@@ -1081,6 +1180,7 @@ func TestRunHandoffCreateFromFileUsesSessionProjectDir(t *testing.T) {
 	defer os.Chdir(oldWd)
 
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	if err := runHandoffCreate(cmd, "newsession", "", "", sourcePath, false, "from-file", false, "", "yaml", false); err != nil {
 		t.Fatalf("runHandoffCreate() error: %v", err)
 	}
@@ -1131,6 +1231,7 @@ func TestRunHandoffListLimit(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run list with limit
@@ -1186,6 +1287,7 @@ func TestRunHandoffShowRelativePath(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run show with relative path
@@ -1231,6 +1333,7 @@ func TestRunHandoffShowRelativePathFromSubdir(t *testing.T) {
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	err = runHandoffShow(cmd, relPath, false)
@@ -1244,7 +1347,7 @@ func TestRunHandoffShowRelativePathFromSubdir(t *testing.T) {
 }
 
 func TestResolveHandoffProjectDirRejectsInvalidSessionName(t *testing.T) {
-	_, err := resolveHandoffProjectDir("../escape")
+	_, err := resolveHandoffProjectDir(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1279,7 +1382,7 @@ func TestResolveHandoffProjectDirRejectsWorkspaceFallbackForExplicitSession(t *t
 		t.Fatalf("chdir cwd: %v", err)
 	}
 
-	_, err := resolveHandoffProjectDir("mysession")
+	_, err := resolveHandoffProjectDir(t.Context(), "mysession")
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -1315,7 +1418,7 @@ func TestResolveHandoffProjectDirUsesSavedSessionAgentProjectKey(t *testing.T) {
 	}
 	saveSessionAgentForTest(t, session, actualProject, "GreenCastle")
 
-	projectDir, err := resolveHandoffProjectDir(session)
+	projectDir, err := resolveHandoffProjectDir(t.Context(), session)
 	if err != nil {
 		t.Fatalf("resolveHandoffProjectDir() error = %v", err)
 	}
@@ -1346,7 +1449,7 @@ func TestResolveHandoffProjectDirResolvesProjectScopedPrefix(t *testing.T) {
 		t.Fatalf("chdir cwd: %v", err)
 	}
 
-	got, err := resolveHandoffProjectDir("mypro")
+	got, err := resolveHandoffProjectDir(t.Context(), "mypro")
 	if err != nil {
 		t.Fatalf("resolveHandoffProjectDir() error = %v", err)
 	}
@@ -1373,6 +1476,7 @@ func TestRunHandoffListNoHandoffs(t *testing.T) {
 	// Create a test command with buffer for output
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run list for non-existent session
@@ -1405,6 +1509,7 @@ func TestRunHandoffCreateValidation(t *testing.T) {
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	cmd.SetOut(&buf)
 
 	// Run create with goal but without now should still work (uses defaults)

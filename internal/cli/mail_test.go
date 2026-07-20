@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -45,6 +46,7 @@ type mailStub struct {
 	renewResult        agentmail.RenewReservationsResult
 	forceReleaseResult agentmail.ForceReleaseResult
 	failIDs            map[int]string // messageID -> error message
+	afterMark          func(int)
 }
 
 type fetchCall struct {
@@ -268,6 +270,12 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				return
 			}
 			writeResponse(map[string]interface{}{})
+			if stub.afterMark != nil {
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				stub.afterMark(id)
+			}
 		case "acknowledge_message":
 			id := toInt(args["message_id"])
 			stub.ackIDs = append(stub.ackIDs, id)
@@ -277,6 +285,12 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				return
 			}
 			writeResponse(map[string]interface{}{})
+			if stub.afterMark != nil {
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				stub.afterMark(id)
+			}
 		case "release_file_reservations":
 			call := releaseCall{
 				Agent:   toString(args["agent_name"]),
@@ -364,8 +378,8 @@ func (s *mailStub) Close() {
 	}
 }
 
-func (s *mailStub) IsAvailable() bool {
-	return true
+func (s *mailStub) IsAvailableContext(ctx context.Context) bool {
+	return ctx != nil && ctx.Err() == nil
 }
 
 func (s *mailStub) ListProjectAgents(ctx context.Context, projectKey string) ([]agentmail.Agent, error) {
@@ -589,7 +603,7 @@ func TestResolveMailAgentIdentityUsesCurrentPaneRegistryIdentity(t *testing.T) {
 	t.Setenv("TMUX_PANE", panes[0].ID)
 	t.Setenv("AGENT_NAME", "EnvAgent")
 
-	got, err := resolveMailAgentIdentity(session, "")
+	got, err := resolveMailAgentIdentity(t.Context(), session, "")
 	if err != nil {
 		t.Fatalf("resolveMailAgentIdentity() error = %v", err)
 	}
@@ -830,6 +844,7 @@ func TestMailReadWithAllSkipsAlreadyReadMessages(t *testing.T) {
 
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
@@ -853,6 +868,7 @@ func TestMailAckWithAllSkipsMessagesWithoutAckRequirement(t *testing.T) {
 
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
@@ -863,6 +879,29 @@ func TestMailAckWithAllSkipsMessagesWithoutAckRequirement(t *testing.T) {
 
 	if len(stub.ackIDs) != 1 || stub.ackIDs[0] != 2 {
 		t.Fatalf("expected only ack-required message to be acknowledged, got %v", stub.ackIDs)
+	}
+}
+
+func TestRunMailMarkStopsImmediatelyWhenContextCancelsBetweenMessages(t *testing.T) {
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stub.afterMark = func(int) { cancel() }
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+
+	err := runMailMark(cmd, "mysession", "TestAgent", mailActionRead, []int{1, 2}, false, "", false, 50)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runMailMark() error=%v, want context.Canceled", err)
+	}
+	if len(stub.readIDs) != 1 || stub.readIDs[0] != 1 {
+		t.Fatalf("mark calls=%v, want only first message before cancellation", stub.readIDs)
 	}
 }
 
@@ -883,7 +922,7 @@ func TestRunUnlockErrorsOnZeroSpecificRelease(t *testing.T) {
 
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 
-	err := runUnlock(session, []string{"internal/cli/*.go"}, false, -1, "")
+	err := runUnlock(t.Context(), session, []string{"internal/cli/*.go"}, false, -1, "")
 	if err == nil {
 		t.Fatal("expected unlock to fail when no requested reservations were released")
 	}
@@ -914,7 +953,7 @@ func TestRunRenewLocksUsesProjectRootFromSubdir(t *testing.T) {
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	t.Chdir(filepath.Join(projectKey, "internal"))
 
-	if err := runRenewLocks(session, 30); err != nil {
+	if err := runRenewLocks(t.Context(), session, 30); err != nil {
 		t.Fatalf("runRenewLocks: %v", err)
 	}
 	if len(stub.renewCalls) != 1 {
@@ -940,7 +979,7 @@ func TestRunRenewLocksErrorsOnZeroRenewed(t *testing.T) {
 
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 
-	err := runRenewLocks(session, 30)
+	err := runRenewLocks(t.Context(), session, 30)
 	if err == nil {
 		t.Fatal("expected renew to fail when no reservations were renewed")
 	}
@@ -1021,6 +1060,7 @@ func TestRunMailInboxUsesSessionProjectDir(t *testing.T) {
 	t.Chdir(canonicalTempDir(t))
 
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -1054,6 +1094,7 @@ func TestRunMailInboxSanitizesDisplayFields(t *testing.T) {
 	t.Chdir(projectKey)
 
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -1099,6 +1140,7 @@ func TestRunMailMarkUsesSessionProjectDir(t *testing.T) {
 	t.Chdir(canonicalTempDir(t))
 
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -1130,6 +1172,7 @@ func TestRunMailSendOverseerUsesSessionProjectDir(t *testing.T) {
 	t.Chdir(canonicalTempDir(t))
 
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -1152,13 +1195,96 @@ func TestRunMailSendOverseerUsesSessionProjectDir(t *testing.T) {
 	}
 }
 
+func TestRunMailMutationHelpersRejectMissingOrCanceledContext(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*cobra.Command) error
+	}{
+		{
+			name: "mark",
+			run: func(cmd *cobra.Command) error {
+				return runMailMark(cmd, "mysession", "BlueLake", mailActionRead, []int{42}, false, "", false, 50)
+			},
+		},
+		{
+			name: "overseer send",
+			run: func(cmd *cobra.Command) error {
+				return runMailSendOverseer(cmd, "mysession", []string{"BlueLake"}, "Subject", "Body", "", false)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Run("nil command", func(t *testing.T) {
+				if err := tt.run(nil); err == nil || !strings.Contains(err.Error(), "requires a command context") {
+					t.Fatalf("helper error = %v, want missing context error", err)
+				}
+			})
+
+			t.Run("nil context", func(t *testing.T) {
+				if err := tt.run(&cobra.Command{}); err == nil || !strings.Contains(err.Error(), "requires a command context") {
+					t.Fatalf("helper error = %v, want missing context error", err)
+				}
+			})
+
+			t.Run("pre-canceled context", func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				cmd := &cobra.Command{}
+				cmd.SetContext(ctx)
+				if err := tt.run(cmd); !errors.Is(err, context.Canceled) {
+					t.Fatalf("helper error = %v, want context.Canceled", err)
+				}
+			})
+		})
+	}
+}
+
 func TestResolveAgentMailProjectKeyRejectsInvalidSessionName(t *testing.T) {
-	_, err := resolveAgentMailProjectKey("../escape")
+	_, err := resolveAgentMailProjectKey(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
 	if !strings.Contains(err.Error(), "invalid session name") {
 		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveAgentMailScopesPreservePreCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, test := range []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "command scope",
+			run: func() error {
+				_, _, err := resolveAgentMailCommandScope(ctx, "mysession")
+				return err
+			},
+		},
+		{
+			name: "preferred scope",
+			run: func() error {
+				_, _, err := resolveAgentMailScopeWithPreference(ctx, "mysession", true)
+				return err
+			},
+		},
+		{
+			name: "explicit agent identity",
+			run: func() error {
+				_, err := resolveMailAgentIdentity(ctx, "mysession", "ExplicitAgent")
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("scope error=%v, want context.Canceled", err)
+			}
+		})
 	}
 }
 
@@ -1193,7 +1319,7 @@ func TestResolveAgentMailProjectKeyWithPreferenceUsesCWDForInferredSession(t *te
 
 	cfg = &config.Config{ProjectsBase: projectsBase}
 
-	projectKey, err := resolveAgentMailProjectKeyWithPreference("mysession", false)
+	projectKey, err := resolveAgentMailProjectKeyWithPreference(t.Context(), "mysession", false)
 	if err != nil {
 		t.Fatalf("resolveAgentMailProjectKeyWithPreference() error = %v", err)
 	}
@@ -1231,7 +1357,7 @@ func TestResolveAgentMailProjectKeyUsesSavedSessionAgentProjectKey(t *testing.T)
 	}
 	saveSessionAgentForTest(t, session, actualProject, "GreenCastle")
 
-	projectKey, err := resolveAgentMailProjectKeyWithPreference(session, true)
+	projectKey, err := resolveAgentMailProjectKeyWithPreference(t.Context(), session, true)
 	if err != nil {
 		t.Fatalf("resolveAgentMailProjectKeyWithPreference() error = %v", err)
 	}
@@ -1278,7 +1404,7 @@ func TestUpdateSessionActivityUsesSavedSessionAgentProjectKey(t *testing.T) {
 		t.Fatalf("save session agent: %v", err)
 	}
 
-	updateSessionActivity(session)
+	updateSessionActivity(t.Context(), session)
 
 	updated, err := agentmail.LoadSessionAgent(session, actualProject)
 	if err != nil {
@@ -1342,7 +1468,7 @@ func TestUpdateSessionActivityIgnoresCWDMatchedWrongProject(t *testing.T) {
 		t.Fatalf("save actual session agent: %v", err)
 	}
 
-	updateSessionActivity(session)
+	updateSessionActivity(t.Context(), session)
 
 	updatedWrong, err := agentmail.LoadSessionAgent(session, wrongProject)
 	if err != nil {
@@ -1395,7 +1521,7 @@ func TestResolveAgentMailScopeWithPreferenceNormalizesExplicitPrefix(t *testing.
 	}
 	defer os.Chdir(oldWd)
 
-	resolvedSession, resolvedProjectKey, err := resolveAgentMailScopeWithPreference(prefix, true)
+	resolvedSession, resolvedProjectKey, err := resolveAgentMailScopeWithPreference(t.Context(), prefix, true)
 	if err != nil {
 		t.Fatalf("resolveAgentMailScopeWithPreference() error = %v", err)
 	}
@@ -1428,7 +1554,7 @@ func TestResolveAgentMailScopeWithPreferenceRejectsWorkspaceFallbackForExplicitS
 		t.Fatalf("chdir: %v", err)
 	}
 
-	_, _, err := resolveAgentMailScopeWithPreference(session, true)
+	_, _, err := resolveAgentMailScopeWithPreference(t.Context(), session, true)
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -1457,7 +1583,7 @@ func TestResolveAgentMailCommandScopeFallsBackToCurrentProjectRootForExplicitSes
 		t.Fatalf("chdir: %v", err)
 	}
 
-	resolvedSession, projectKey, err := resolveAgentMailCommandScope("mysession")
+	resolvedSession, projectKey, err := resolveAgentMailCommandScope(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolveAgentMailCommandScope() error = %v", err)
 	}
@@ -1495,7 +1621,7 @@ func TestResolveAgentMailCommandScopePrefersSavedSessionAgentProject(t *testing.
 	}
 	saveSessionAgentForTest(t, "mysession", actualProject, "GreenCastle")
 
-	_, projectKey, err := resolveAgentMailCommandScope("mysession")
+	_, projectKey, err := resolveAgentMailCommandScope(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolveAgentMailCommandScope() error = %v", err)
 	}
@@ -1545,7 +1671,7 @@ func TestRunLockUsesSessionProjectDir(t *testing.T) {
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	t.Chdir(canonicalTempDir(t))
 
-	if err := runLock(session, []string{"internal/**/*.go"}, "scope test", "1h", false); err != nil {
+	if err := runLock(t.Context(), session, []string{"internal/**/*.go"}, "scope test", "1h", false); err != nil {
 		t.Fatalf("runLock: %v", err)
 	}
 	if len(stub.reserveCalls) != 1 {
@@ -1580,7 +1706,7 @@ func TestRunLocksUsesSessionProjectDir(t *testing.T) {
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	t.Chdir(canonicalTempDir(t))
 
-	if err := runLocks(session, false); err != nil {
+	if err := runLocks(t.Context(), session, false); err != nil {
 		t.Fatalf("runLocks: %v", err)
 	}
 	if len(stub.listCalls) != 1 {
@@ -1611,7 +1737,7 @@ func TestRunLocksRequiresSessionAgentUnlessAllAgents(t *testing.T) {
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	t.Chdir(canonicalTempDir(t))
 
-	err := runLocks("mysession", false)
+	err := runLocks(t.Context(), "mysession", false)
 	if err == nil {
 		t.Fatal("expected missing session-agent identity error")
 	}
@@ -1647,7 +1773,7 @@ func TestRunUnlockUsesSessionProjectDir(t *testing.T) {
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	t.Chdir(canonicalTempDir(t))
 
-	if err := runUnlock(session, []string{"internal/cli/*.go"}, false, -1, ""); err != nil {
+	if err := runUnlock(t.Context(), session, []string{"internal/cli/*.go"}, false, -1, ""); err != nil {
 		t.Fatalf("runUnlock: %v", err)
 	}
 	if len(stub.releaseCalls) != 1 {
@@ -1682,7 +1808,7 @@ func TestRunUnlockUsesSavedSessionAgentIdentityAndProjectKey(t *testing.T) {
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	t.Chdir(canonicalTempDir(t))
 
-	if err := runUnlock(session, []string{"internal/cli/*.go"}, false, -1, ""); err != nil {
+	if err := runUnlock(t.Context(), session, []string{"internal/cli/*.go"}, false, -1, ""); err != nil {
 		t.Fatalf("runUnlock: %v", err)
 	}
 	if len(stub.releaseCalls) != 1 {
@@ -1720,7 +1846,7 @@ func TestRunForceReleaseUsesSessionProjectDir(t *testing.T) {
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	t.Chdir(canonicalTempDir(t))
 
-	if err := runForceRelease(session, 42, "stale", true, true); err != nil {
+	if err := runForceRelease(t.Context(), session, 42, "stale", true, true); err != nil {
 		t.Fatalf("runForceRelease: %v", err)
 	}
 	if len(stub.forceReleaseCalls) != 1 {
@@ -1755,7 +1881,7 @@ func TestRunRenewLocksUsesSessionProjectDir(t *testing.T) {
 	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
 	t.Chdir(canonicalTempDir(t))
 
-	if err := runRenewLocks(session, 30); err != nil {
+	if err := runRenewLocks(t.Context(), session, 30); err != nil {
 		t.Fatalf("runRenewLocks: %v", err)
 	}
 	if len(stub.renewCalls) != 1 {

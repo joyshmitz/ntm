@@ -7,11 +7,258 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 	"unicode"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("NTM_TEST_TMUX_ENV_OWNED") == "1" {
+		os.Exit(m.Run())
+	}
+
+	tmuxRoot, err := os.MkdirTemp(tmuxTestTempBase(), "ntm-tmux-test-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create isolated tmux root: %v\n", err)
+		os.Exit(1)
+	}
+	for _, setting := range []struct {
+		key   string
+		value string
+	}{
+		{key: "TMUX", value: ""},
+		{key: "TMUX_PANE", value: ""},
+		{key: "TMUX_TMPDIR", value: tmuxRoot},
+	} {
+		if err := os.Setenv(setting.key, setting.value); err != nil {
+			_ = os.RemoveAll(tmuxRoot)
+			fmt.Fprintf(os.Stderr, "set %s for tmux isolation: %v\n", setting.key, err)
+			os.Exit(1)
+		}
+	}
+	cleanupBinary := findInstalledTmuxBinaryPath()
+	if cleanupBinary != "" {
+		startupCtx, cancelStartup := context.WithTimeout(context.Background(), 8*time.Second)
+		cmd := exec.CommandContext(
+			startupCtx,
+			cleanupBinary,
+			"start-server", ";", "set-option", "-s", "exit-empty", "off",
+		)
+		cmd.Env = isolatedTmuxTestEnvironment(tmuxRoot)
+		output, startupErr := cmd.CombinedOutput()
+		contextErr := startupCtx.Err()
+		cancelStartup()
+		if startupErr != nil {
+			_ = os.RemoveAll(tmuxRoot)
+			fmt.Fprintf(
+				os.Stderr,
+				"start isolated tmux server: %s: %v: %s\n",
+				cleanupBinary,
+				errors.Join(startupErr, contextErr),
+				strings.TrimSpace(string(output)),
+			)
+			os.Exit(1)
+		}
+	}
+
+	code := m.Run()
+	if cleanupBinary != "" {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 8*time.Second)
+		cmd := exec.CommandContext(cleanupCtx, cleanupBinary, "kill-server")
+		cmd.Env = isolatedTmuxTestEnvironment(tmuxRoot)
+		output, cleanupErr := cmd.CombinedOutput()
+		contextErr := cleanupCtx.Err()
+		cancelCleanup()
+		if cleanupErr != nil {
+			wrapped := fmt.Errorf(
+				"%s kill-server: %w: %s",
+				cleanupBinary,
+				errors.Join(cleanupErr, contextErr),
+				strings.TrimSpace(string(output)),
+			)
+			if ClassifyCommandError(wrapped).Kind != CommandErrorNoServer {
+				fmt.Fprintf(os.Stderr, "stop isolated tmux server: %v\n", wrapped)
+				code = 1
+			}
+		}
+	}
+	if err := os.RemoveAll(tmuxRoot); err != nil {
+		fmt.Fprintf(os.Stderr, "remove isolated tmux root %s: %v\n", tmuxRoot, err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+func tmuxTestTempBase() string {
+	if runtime.GOOS == "windows" {
+		return os.TempDir()
+	}
+	return "/tmp"
+}
+
+func isolatedTmuxTestEnvironment(root string) []string {
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "TMUX", "TMUX_PANE", "TMUX_TMPDIR":
+			continue
+		default:
+			env = append(env, entry)
+		}
+	}
+	return append(env, "TMUX=", "TMUX_PANE=", "TMUX_TMPDIR="+root)
+}
+
+func TestPaneCommandIsShell(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    bool
+	}{
+		{command: "zsh", want: true},
+		{command: "/bin/bash", want: true},
+		{command: "  /usr/local/bin/fish  ", want: true},
+		{command: "/bin/ash", want: true},
+		{command: "mksh", want: true},
+		{command: "yash", want: true},
+		{command: "xonsh", want: true},
+		{command: "elvish", want: true},
+		{command: "pwsh.exe", want: true},
+		{command: "grok"},
+		{command: "/opt/bin/grok"},
+		{command: ""},
+	} {
+		if got := PaneCommandIsShell(test.command); got != test.want {
+			t.Fatalf("PaneCommandIsShell(%q) = %v, want %v", test.command, got, test.want)
+		}
+	}
+}
+
+func TestValidatePaneLaunchBaseline(t *testing.T) {
+	tests := []struct {
+		name    string
+		pane    Pane
+		wantErr bool
+	}{
+		{name: "empty observation", pane: Pane{ID: "%1"}},
+		{name: "shell", pane: Pane{ID: "%2", Command: "zsh"}},
+		{name: "shell path", pane: Pane{ID: "%3", Command: "/bin/bash"}},
+		{name: "occupied utility", pane: Pane{ID: "%4", Command: "sleep"}, wantErr: true},
+		{name: "occupied agent", pane: Pane{ID: "%5", Command: "/opt/bin/grok"}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidatePaneLaunchBaseline(test.pane)
+			if !test.wantErr {
+				if err != nil {
+					t.Fatalf("ValidatePaneLaunchBaseline(%+v) error = %v", test.pane, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidatePaneLaunchBaseline(%+v) error = nil, want occupied-pane rejection", test.pane)
+			}
+			for _, want := range []string{test.pane.ID, strings.TrimSpace(test.pane.Command), "pre-launch", "non-shell", "idle shell"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("ValidatePaneLaunchBaseline(%+v) error = %q, want %q", test.pane, err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestWaitForPaneProcessStartRequiresStableNonShellObservation(t *testing.T) {
+	observations := [][]Pane{
+		{{ID: "%7", Command: "zsh"}},
+		{{ID: "%7", Command: "/opt/bin/grok"}},
+		{{ID: "%7", Command: "grok"}},
+	}
+	calls := 0
+	pane, err := waitForPaneProcessStartContext(
+		t.Context(), "proj", "%7", 100*time.Millisecond, time.Millisecond, 2,
+		func(context.Context, string) ([]Pane, error) {
+			index := calls
+			calls++
+			if index >= len(observations) {
+				index = len(observations) - 1
+			}
+			return observations[index], nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitForPaneProcessStartContext returned error: %v", err)
+	}
+	if pane.ID != "%7" || calls != 3 {
+		t.Fatalf("pane=%+v calls=%d, want %%7 after three observations", pane, calls)
+	}
+}
+
+func TestWaitForPaneProcessStartRejectsImmediatelyExitingProcess(t *testing.T) {
+	observations := [][]Pane{
+		{{ID: "%7", Command: "ash"}},
+		{{ID: "%7", Command: "grok"}},
+		{{ID: "%7", Command: "ash"}},
+	}
+	calls := 0
+	_, err := waitForPaneProcessStartContext(
+		t.Context(), "proj", "%7", 10*time.Millisecond, time.Millisecond, 2,
+		func(context.Context, string) ([]Pane, error) {
+			index := calls
+			calls++
+			if index >= len(observations) {
+				index = len(observations) - 1
+			}
+			return observations[index], nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), `current command "ash"`) {
+		t.Fatalf("error = %v, want stable-process timeout reporting ash", err)
+	}
+	if calls < 3 {
+		t.Fatalf("pane observations=%d, want at least three", calls)
+	}
+}
+
+func TestWaitForPaneProcessStartBoundsBlockingObservation(t *testing.T) {
+	started := time.Now()
+	_, err := waitForPaneProcessStartContext(
+		t.Context(), "proj", "%7", 20*time.Millisecond, time.Millisecond, 2,
+		func(ctx context.Context, _ string) ([]Pane, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("error = %v, want bounded list-panes deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("blocking pane observation took %s, want a bounded timeout", elapsed)
+	}
+}
+
+func TestWaitForPaneProcessStartReportsObservationFailureAndCancellation(t *testing.T) {
+	observationErr := errors.New("tmux socket unavailable")
+	_, err := waitForPaneProcessStartContext(
+		t.Context(), "proj", "%7", 5*time.Millisecond, time.Millisecond, 2,
+		func(context.Context, string) ([]Pane, error) { return nil, observationErr },
+	)
+	if err == nil || !strings.Contains(err.Error(), observationErr.Error()) {
+		t.Fatalf("error = %v, want observation failure", err)
+	}
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = waitForPaneProcessStartContext(
+		canceled, "proj", "%7", time.Second, time.Millisecond, 2,
+		func(context.Context, string) ([]Pane, error) { return []Pane{{ID: "%7", Command: "zsh"}}, nil },
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled error = %v, want context.Canceled", err)
+	}
+}
 
 func TestClassifySessionExistsResultUsesExactExitStatus(t *testing.T) {
 	exitOne := commandExitError(t, 1)
@@ -126,6 +373,7 @@ esac
 	cmd.Env = append(os.Environ(),
 		"NTM_TEST_BUFFER_CLEANUP_HELPER=1",
 		"NTM_TEST_BUFFER_CLEANUP_ROOT="+root,
+		"NTM_TEST_TMUX_ENV_OWNED=1",
 		"NTM_TMUX_BINARY="+scriptPath,
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -290,6 +538,7 @@ esac
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestApplyTiledLayoutContextFailureHelper$")
 			cmd.Env = append(os.Environ(),
+				"NTM_TEST_TMUX_ENV_OWNED=1",
 				"NTM_TMUX_BINARY="+tmuxPath,
 				"NTM_LAYOUT_FAIL_COMMAND="+failCommand,
 			)
@@ -362,6 +611,7 @@ esac
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSessionPostCreationFailureHelper$")
 			cmd.Env = append(os.Environ(),
+				"NTM_TEST_TMUX_ENV_OWNED=1",
 				"NTM_TMUX_BINARY="+tmuxPath,
 				"NTM_SESSION_MUTATION_FAILURE="+mutation,
 			)
@@ -466,6 +716,35 @@ func TestCreateSession(t *testing.T) {
 	}
 }
 
+func TestPrivateServerSurvivesEmptySessionTransition(t *testing.T) {
+	skipIfNoTmux(t)
+	acquireGlobalTmuxTestLock(t)
+
+	first := fmt.Sprintf("ntm_test_empty_transition_first_%d", time.Now().UnixNano())
+	second := fmt.Sprintf("ntm_test_empty_transition_second_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_ = KillSession(first)
+		_ = KillSession(second)
+	})
+	if err := CreateSession(first, t.TempDir()); err != nil {
+		t.Fatalf("create first isolated session: %v", err)
+	}
+	if err := KillSession(first); err != nil {
+		t.Fatalf("kill sole isolated session: %v", err)
+	}
+
+	exitEmpty, err := DefaultClient.Run("show-options", "-sv", "exit-empty")
+	if err != nil {
+		t.Fatalf("query isolated server after its last session exited: %v", err)
+	}
+	if got := strings.TrimSpace(exitEmpty); got != "off" {
+		t.Fatalf("isolated server exit-empty = %q, want off", got)
+	}
+	if err := CreateSession(second, t.TempDir()); err != nil {
+		t.Fatalf("create session immediately after empty transition: %v", err)
+	}
+}
+
 func TestCreateSessionWithDir(t *testing.T) {
 	skipIfNoTmux(t)
 	acquireGlobalTmuxTestLock(t)
@@ -552,7 +831,16 @@ func TestGetAllPanes_NoServerReturnsEmpty(t *testing.T) {
 	// Point tmux at an empty socket directory so no server exists. Also
 	// neutralize TMUX so a CI/agent shell that already lives inside a tmux
 	// server cannot leak its panes into list-panes -a (bd-wt9d4).
-	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	tmuxTmpDir, err := os.MkdirTemp(tmuxTestTempBase(), "ntm-tmux-test-*")
+	if err != nil {
+		t.Fatalf("create short tmux socket root: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(tmuxTmpDir); err != nil {
+			t.Errorf("remove short tmux socket root %q: %v", tmuxTmpDir, err)
+		}
+	})
+	t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
 	t.Setenv("TMUX", "")
 
 	panes, err := GetAllPanes()
@@ -1259,6 +1547,18 @@ func TestResolveTmuxBinaryPathUsesExplicitOverride(t *testing.T) {
 	t.Setenv("NTM_TMUX_BINARY", "  "+override+"  ")
 	if got := resolveTmuxBinaryPath(); got != override {
 		t.Fatalf("resolveTmuxBinaryPath() = %q, want override %q", got, override)
+	}
+}
+
+func TestBinaryPathExplicitOverrideWinsAfterInstalledPathIsCached(t *testing.T) {
+	t.Setenv("NTM_TMUX_BINARY", "")
+	if baseline := BinaryPath(); baseline == "" {
+		t.Fatal("BinaryPath() returned an empty baseline")
+	}
+	override := filepath.Join(t.TempDir(), "late-custom-tmux")
+	t.Setenv("NTM_TMUX_BINARY", "  "+override+"  ")
+	if got := BinaryPath(); got != override {
+		t.Fatalf("BinaryPath() after cache initialization = %q, want override %q", got, override)
 	}
 }
 

@@ -275,23 +275,40 @@ func legacyDashNames(targetOS, targetArch, version string) []string {
 }
 
 func findUpgradeAsset(assets []GitHubAsset, targetOS, targetArch, version string, strict bool) (*assetMatch, []string) {
-	archiveAssetName := archiveAssetNameFor(version, targetOS, targetArch)
-	binaryAssetName := assetNameFor(targetOS, targetArch)
+	archiveAssetNames := []string{archiveAssetNameFor(version, targetOS, targetArch)}
+	binaryAssetNames := []string{assetNameFor(targetOS, targetArch)}
 
-	tried := []string{archiveAssetName, binaryAssetName}
-
-	if match := matchExactArchive(assets, archiveAssetName); match != nil {
-		return match, tried
+	// DSR publishes native macOS architectures, while older GoReleaser
+	// releases used a universal darwin_all binary. Both are exact contracts:
+	// prefer the native artifact but keep strict upgrades working for old tags.
+	if targetOS == "darwin" && targetArch != "all" {
+		archiveAssetNames = append([]string{
+			fmt.Sprintf("ntm_%s_%s_%s.tar.gz", version, targetOS, targetArch),
+		}, archiveAssetNames...)
+		binaryAssetNames = append([]string{
+			fmt.Sprintf("ntm_%s_%s", targetOS, targetArch),
+		}, binaryAssetNames...)
 	}
 
-	if match := matchExactBinary(assets, binaryAssetName, targetOS); match != nil {
-		return match, tried
+	tried := append(append([]string{}, archiveAssetNames...), binaryAssetNames...)
+
+	for _, archiveAssetName := range archiveAssetNames {
+		if match := matchExactArchive(assets, archiveAssetName); match != nil {
+			return match, tried
+		}
+	}
+
+	for _, binaryAssetName := range binaryAssetNames {
+		if match := matchExactBinary(assets, binaryAssetName, targetOS); match != nil {
+			return match, tried
+		}
 	}
 
 	if strict {
 		return nil, tried
 	}
 
+	binaryAssetName := binaryAssetNames[0]
 	arch := normalizedArch(targetOS, targetArch)
 	tried = append(tried, binaryAssetName+"*", fmt.Sprintf("ntm_%s_%s_%s*", version, targetOS, arch))
 	if match := matchPrefix(assets, binaryAssetName, version, targetOS, targetArch); match != nil {

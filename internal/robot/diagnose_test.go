@@ -1,8 +1,15 @@
 package robot
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // =============================================================================
@@ -293,6 +300,266 @@ func TestDiagnoseRecommendation_JSONStructure(t *testing.T) {
 	}
 	if decoded["auto_fixable"].(bool) != true {
 		t.Errorf("auto_fixable = %v, want true", decoded["auto_fixable"])
+	}
+}
+
+func TestValidateDiagnoseFixTargetsRejectsGrokBeforeMixedBatch(t *testing.T) {
+	diag := DiagnoseOutput{Recommendations: []DiagnoseRecommendation{
+		{Pane: 1, Action: "restart", AutoFixable: true},
+		{Pane: 2, Action: "interrupt", AutoFixable: true},
+	}}
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 1, Type: tmux.AgentClaude},
+		{ID: "%2", Index: 2, Type: tmux.AgentGrok},
+	}
+	err := validateDiagnoseFixTargets(diag, panes)
+	if !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("validateDiagnoseFixTargets() error = %v, want Grok relaunch sentinel", err)
+	}
+}
+
+func TestValidateDiagnoseFixTargetsAllowsSupportedAndNonMutatingActions(t *testing.T) {
+	diag := DiagnoseOutput{Recommendations: []DiagnoseRecommendation{
+		{Pane: 1, Action: "restart", AutoFixable: true},
+		{Pane: 2, Action: "investigate", AutoFixable: false},
+	}}
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 1, Type: tmux.AgentCodex},
+		{ID: "%2", Index: 2, Type: tmux.AgentGrok},
+	}
+	if err := validateDiagnoseFixTargets(diag, panes); err != nil {
+		t.Fatalf("validateDiagnoseFixTargets() unexpected error = %v", err)
+	}
+}
+
+func TestExecuteDiagnoseRestartUsesCanonicalRelaunchPath(t *testing.T) {
+	var got RestartPaneOptions
+	success, message, err := executeDiagnoseRestart(t.Context(), "project", "%7", func(_ context.Context, opts RestartPaneOptions) (*RestartPaneOutput, error) {
+		got = opts
+		return &RestartPaneOutput{
+			RobotResponse:   NewRobotResponse(true),
+			Restarted:       []string{"2"},
+			AgentRelaunched: map[string]bool{"2": true},
+		}, nil
+	})
+	if err != nil || !success || !contains(message, "agent restarted") {
+		t.Fatalf("diagnose restart success=%v message=%q err=%v", success, message, err)
+	}
+	if got.Session != "project" || len(got.Panes) != 1 || got.Panes[0] != "%7" {
+		t.Fatalf("diagnose restart options = %+v", got)
+	}
+}
+
+func TestExecuteDiagnoseRestartRejectsShellOnlySuccess(t *testing.T) {
+	success, message, err := executeDiagnoseRestart(t.Context(), "project", "%7", func(context.Context, RestartPaneOptions) (*RestartPaneOutput, error) {
+		return &RestartPaneOutput{
+			RobotResponse:   NewRobotResponse(true),
+			Restarted:       []string{"2"},
+			AgentRelaunched: map[string]bool{"2": false},
+		}, nil
+	})
+	if err != nil || success || !contains(message, "not relaunched") {
+		t.Fatalf("shell-only diagnose restart success=%v message=%q err=%v", success, message, err)
+	}
+}
+
+func TestExecuteDiagnoseRestartForwardsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	calls := 0
+	success, message, err := executeDiagnoseRestart(ctx, "project", "%7", func(gotCtx context.Context, opts RestartPaneOptions) (*RestartPaneOutput, error) {
+		calls++
+		if gotCtx != ctx {
+			t.Fatal("diagnose restart replaced the caller context")
+		}
+		return GetRestartPaneContext(gotCtx, opts)
+	})
+	if success || calls != 1 || !errors.Is(err, context.Canceled) || !strings.Contains(strings.ToLower(message), "canceled") {
+		t.Fatalf("canceled diagnose restart success=%v calls=%d message=%q err=%v", success, calls, message, err)
+	}
+}
+
+type diagnoseFixTestOutput struct {
+	RobotResponse
+	FixAttempts []struct {
+		Pane    int    `json:"pane"`
+		Action  string `json:"action"`
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	} `json:"fix_attempts"`
+}
+
+func captureDiagnoseFixOutput(t *testing.T, ctx context.Context, diag DiagnoseOutput, deps diagnoseDependencies) (diagnoseFixTestOutput, error) {
+	t.Helper()
+	raw, returnedErr := captureStdout(t, func() error {
+		return executeDiagnoseFixWithDependencies(ctx, diag, DiagnoseOptions{Session: "project", Fix: true}, deps)
+	})
+	var output diagnoseFixTestOutput
+	if err := json.Unmarshal([]byte(raw), &output); err != nil {
+		t.Fatalf("decode diagnose fix output: %v raw=%s", err, raw)
+	}
+	return output, returnedErr
+}
+
+func TestExecuteDiagnoseFixStopsOnWrappedRestartCancellation(t *testing.T) {
+	ctx := t.Context()
+	restartCalls := 0
+	interruptCalls := 0
+	output, returnedErr := captureDiagnoseFixOutput(t, ctx, DiagnoseOutput{Recommendations: []DiagnoseRecommendation{
+		{Pane: 1, Action: "restart", AutoFixable: true},
+		{Pane: 2, Action: "interrupt", AutoFixable: true},
+	}}, diagnoseDependencies{
+		listPanes: func(gotCtx context.Context, session string) ([]tmux.Pane, error) {
+			if gotCtx != ctx || session != "project" {
+				t.Fatalf("list panes context/session = %p/%q, want %p/project", gotCtx, session, ctx)
+			}
+			return []tmux.Pane{
+				{ID: "%1", Index: 1, Type: tmux.AgentCodex},
+				{ID: "%2", Index: 2, Type: tmux.AgentClaude},
+			}, nil
+		},
+		restartPane: func(gotCtx context.Context, _ RestartPaneOptions) (*RestartPaneOutput, error) {
+			restartCalls++
+			if gotCtx != ctx {
+				t.Fatal("restart callback did not receive caller context")
+			}
+			return nil, fmt.Errorf("restart callback: %w", context.Canceled)
+		},
+		sendKeys: func(context.Context, string, string, bool) error {
+			interruptCalls++
+			return nil
+		},
+	})
+	if returnedErr == nil || output.Success || output.ErrorCode != ErrCodeTimeout ||
+		restartCalls != 1 || interruptCalls != 0 || len(output.FixAttempts) != 1 ||
+		output.FixAttempts[0].Action != "restart" || output.FixAttempts[0].Success {
+		t.Fatalf("restart cancellation output=%+v err=%v restart_calls=%d interrupt_calls=%d", output, returnedErr, restartCalls, interruptCalls)
+	}
+}
+
+func TestExecuteDiagnoseFixStopsOnInterruptCancellation(t *testing.T) {
+	ctx := t.Context()
+	interruptCalls := 0
+	restartCalls := 0
+	output, returnedErr := captureDiagnoseFixOutput(t, ctx, DiagnoseOutput{Recommendations: []DiagnoseRecommendation{
+		{Pane: 1, Action: "interrupt", AutoFixable: true},
+		{Pane: 2, Action: "restart", AutoFixable: true},
+	}}, diagnoseDependencies{
+		listPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return []tmux.Pane{
+				{ID: "%1", Index: 1, Type: tmux.AgentClaude},
+				{ID: "%2", Index: 2, Type: tmux.AgentCodex},
+			}, nil
+		},
+		restartPane: func(context.Context, RestartPaneOptions) (*RestartPaneOutput, error) {
+			restartCalls++
+			return &RestartPaneOutput{RobotResponse: NewRobotResponse(true)}, nil
+		},
+		sendKeys: func(gotCtx context.Context, target, keys string, enter bool) error {
+			interruptCalls++
+			if gotCtx != ctx || target != "%1" || keys != "C-c" || enter {
+				t.Fatalf("interrupt callback context/args = %p %q %q %v", gotCtx, target, keys, enter)
+			}
+			return fmt.Errorf("interrupt transport: %w", context.DeadlineExceeded)
+		},
+	})
+	if returnedErr == nil || output.Success || output.ErrorCode != ErrCodeTimeout ||
+		interruptCalls != 1 || restartCalls != 0 || len(output.FixAttempts) != 1 ||
+		output.FixAttempts[0].Action != "interrupt" || output.FixAttempts[0].Success {
+		t.Fatalf("interrupt cancellation output=%+v err=%v interrupt_calls=%d restart_calls=%d", output, returnedErr, interruptCalls, restartCalls)
+	}
+}
+
+func TestDiagnoseDiscoveryErrorClassification(t *testing.T) {
+	t.Run("full session cancellation", func(t *testing.T) {
+		output, err := getDiagnoseWithDependencies(t.Context(), DiagnoseOptions{Session: "project"}, diagnoseDependencies{
+			sessionExists: func(context.Context, string) (bool, error) {
+				return false, fmt.Errorf("session probe: %w", context.Canceled)
+			},
+		})
+		if err != nil || output.Success || output.ErrorCode != ErrCodeTimeout || !strings.Contains(output.Error, "session probe") {
+			t.Fatalf("session cancellation output=%+v err=%v", output, err)
+		}
+	})
+
+	t.Run("full session transport failure", func(t *testing.T) {
+		output, err := getDiagnoseWithDependencies(t.Context(), DiagnoseOptions{Session: "project"}, diagnoseDependencies{
+			sessionExists: func(context.Context, string) (bool, error) {
+				return false, errors.New("tmux socket unavailable")
+			},
+		})
+		if err != nil || output.Success || output.ErrorCode != ErrCodeInternalError {
+			t.Fatalf("session transport output=%+v err=%v", output, err)
+		}
+	})
+
+	t.Run("full pane cancellation", func(t *testing.T) {
+		output, err := getDiagnoseWithDependencies(t.Context(), DiagnoseOptions{Session: "project"}, diagnoseDependencies{
+			sessionExists: func(context.Context, string) (bool, error) { return true, nil },
+			listPanes: func(context.Context, string) ([]tmux.Pane, error) {
+				return nil, fmt.Errorf("pane discovery: %w", context.DeadlineExceeded)
+			},
+		})
+		if err != nil || output.Success || output.ErrorCode != ErrCodeTimeout || !strings.Contains(output.Error, "pane discovery") {
+			t.Fatalf("pane cancellation output=%+v err=%v", output, err)
+		}
+	})
+
+	t.Run("brief pane cancellation", func(t *testing.T) {
+		output, err := getDiagnoseBriefWithDependencies(t.Context(), "project", diagnoseDependencies{
+			sessionExists: func(context.Context, string) (bool, error) { return true, nil },
+			listPanes: func(context.Context, string) ([]tmux.Pane, error) {
+				return nil, fmt.Errorf("brief pane discovery: %w", context.Canceled)
+			},
+		})
+		if err != nil || output.Success || output.ErrorCode != ErrCodeTimeout || !strings.Contains(output.Error, "brief pane discovery") {
+			t.Fatalf("brief pane cancellation output=%+v err=%v", output, err)
+		}
+	})
+}
+
+func TestExecuteDiagnoseFixClassifiesDiscoveryCancellation(t *testing.T) {
+	restartCalls := 0
+	interruptCalls := 0
+	output, returnedErr := captureDiagnoseFixOutput(t, t.Context(), DiagnoseOutput{Recommendations: []DiagnoseRecommendation{
+		{Pane: 1, Action: "restart", AutoFixable: true},
+	}}, diagnoseDependencies{
+		listPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return nil, fmt.Errorf("fix pane discovery: %w", context.Canceled)
+		},
+		restartPane: func(context.Context, RestartPaneOptions) (*RestartPaneOutput, error) {
+			restartCalls++
+			return nil, nil
+		},
+		sendKeys: func(context.Context, string, string, bool) error {
+			interruptCalls++
+			return nil
+		},
+	})
+	if returnedErr == nil || output.Success || output.ErrorCode != ErrCodeTimeout || len(output.FixAttempts) != 0 ||
+		restartCalls != 0 || interruptCalls != 0 {
+		t.Fatalf("fix discovery cancellation output=%+v err=%v restart_calls=%d interrupt_calls=%d", output, returnedErr, restartCalls, interruptCalls)
+	}
+}
+
+func TestGetDiagnoseRejectsMissingAndCanceledContexts(t *testing.T) {
+	calls := 0
+	deps := diagnoseDependencies{
+		sessionExists: func(context.Context, string) (bool, error) {
+			calls++
+			return true, nil
+		},
+	}
+	output, err := getDiagnoseWithDependencies(nil, DiagnoseOptions{Session: "project"}, deps)
+	if err != nil || output.Success || output.ErrorCode != ErrCodeInternalError || calls != 0 {
+		t.Fatalf("nil context output=%+v err=%v calls=%d", output, err, calls)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	output, err = getDiagnoseWithDependencies(ctx, DiagnoseOptions{Session: "project"}, deps)
+	if err != nil || output.Success || output.ErrorCode != ErrCodeTimeout || calls != 0 {
+		t.Fatalf("pre-canceled output=%+v err=%v calls=%d", output, err, calls)
 	}
 }
 

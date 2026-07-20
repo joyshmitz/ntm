@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -58,6 +59,114 @@ func TestRunRebalancePreCanceledJSONEnvelope(t *testing.T) {
 			}
 			if got, _ := document["error_code"].(string); got != test.wantCode {
 				t.Fatalf("rebalance error_code=%q, want %q", got, test.wantCode)
+			}
+			for _, field := range []string{"workloads", "transfers"} {
+				items, ok := document[field].([]any)
+				if !ok || len(items) != 0 {
+					t.Fatalf("rebalance %s=%v, want required empty array", field, document[field])
+				}
+			}
+		})
+	}
+}
+
+func TestRunRebalancePolicyFailuresPrecedeStoreAndTmuxReads(t *testing.T) {
+	previousConfigFile := cfgFile
+	previousResolveProject := resolveRebalanceProjectDir
+	previousLoadStore := loadRebalanceAssignmentStore
+	previousGetPanes := getRebalancePanes
+	t.Cleanup(func() {
+		cfgFile = previousConfigFile
+		resolveRebalanceProjectDir = previousResolveProject
+		loadRebalanceAssignmentStore = previousLoadStore
+		getRebalancePanes = previousGetPanes
+	})
+	t.Setenv("NTM_CONFIG", "")
+
+	root := t.TempDir()
+	validGlobal := filepath.Join(root, "valid-global.toml")
+	if err := os.WriteFile(validGlobal, []byte("[assign]\noperator_gated_labels = [\"global-approval\"]\n"), 0o600); err != nil {
+		t.Fatalf("write valid global config: %v", err)
+	}
+	invalidGlobal := filepath.Join(root, "invalid-global.toml")
+	if err := os.WriteFile(invalidGlobal, []byte("[assign\n"), 0o600); err != nil {
+		t.Fatalf("write invalid global config: %v", err)
+	}
+	missingGlobal := filepath.Join(root, "missing-global.toml")
+	validProject := t.TempDir()
+	invalidProject := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(invalidProject, ".ntm"), 0o755); err != nil {
+		t.Fatalf("create invalid project config directory: %v", err)
+	}
+	invalidProjectConfig := filepath.Join(invalidProject, ".ntm", "config.toml")
+	if err := os.WriteFile(invalidProjectConfig, []byte("[assign\n"), 0o600); err != nil {
+		t.Fatalf("write invalid project config: %v", err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		globalPath string
+		projectDir string
+		wantPath   string
+	}{
+		{name: "missing explicitly selected global", globalPath: missingGlobal, projectDir: validProject, wantPath: missingGlobal},
+		{name: "invalid explicitly selected global", globalPath: invalidGlobal, projectDir: validProject, wantPath: invalidGlobal},
+		{name: "invalid target project", globalPath: validGlobal, projectDir: invalidProject, wantPath: invalidProjectConfig},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfgFile = test.globalPath
+			resolveCalls := 0
+			storeCalls := 0
+			paneCalls := 0
+			resolveRebalanceProjectDir = func(_ context.Context, session string) (string, error) {
+				resolveCalls++
+				if session != "rebalance-policy" {
+					t.Errorf("resolve session = %q, want rebalance-policy", session)
+				}
+				return test.projectDir, nil
+			}
+			loadRebalanceAssignmentStore = func(string) (*assignment.AssignmentStore, error) {
+				storeCalls++
+				return nil, errors.New("assignment store must not be read")
+			}
+			getRebalancePanes = func(context.Context, string) ([]tmux.Pane, error) {
+				paneCalls++
+				return nil, errors.New("tmux panes must not be read")
+			}
+
+			oldStdout := os.Stdout
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("create stdout pipe: %v", err)
+			}
+			os.Stdout = writer
+			runErr := runRebalance(t.Context(), "rebalance-policy", true, false, "", 0, "json")
+			_ = writer.Close()
+			os.Stdout = oldStdout
+			raw, readErr := io.ReadAll(reader)
+			_ = reader.Close()
+			if readErr != nil {
+				t.Fatalf("read rebalance JSON: %v", readErr)
+			}
+			if !errors.Is(runErr, errJSONFailure) {
+				t.Fatalf("runRebalance() error = %v, want errJSONFailure", runErr)
+			}
+			if resolveCalls != 1 || storeCalls != 0 || paneCalls != 0 {
+				t.Fatalf("rebalance calls: resolve=%d store=%d panes=%d, want 1/0/0", resolveCalls, storeCalls, paneCalls)
+			}
+
+			var document map[string]any
+			if err := json.Unmarshal(raw, &document); err != nil {
+				t.Fatalf("decode rebalance JSON: %v raw=%s", err, raw)
+			}
+			if success, ok := document["success"].(bool); !ok || success {
+				t.Fatalf("rebalance success=%v, want false", document["success"])
+			}
+			if got, _ := document["error_code"].(string); got != robot.ErrCodeInvalidFlag {
+				t.Fatalf("rebalance error_code=%q, want %q", got, robot.ErrCodeInvalidFlag)
+			}
+			if got, _ := document["error"].(string); !strings.Contains(got, test.wantPath) {
+				t.Fatalf("rebalance error=%q, want path %q", got, test.wantPath)
 			}
 			for _, field := range []string{"workloads", "transfers"} {
 				items, ok := document[field].([]any)
@@ -537,9 +646,12 @@ func makeAssignment(beadID, title string, pane int, status assignment.Assignment
 }
 
 type rebalanceTestClaimPort struct {
-	owner      string
-	status     string
-	claimCalls int
+	owner               string
+	status              string
+	claimCalls          int
+	eligibilityCalls    int
+	eligibilityErr      error
+	eligibilityRequests []assignment.AssignmentEligibilityAuthorizationRequest
 }
 
 func (p *rebalanceTestClaimPort) Claim(_ context.Context, beadID, actor string) (assignment.ClaimReceipt, error) {
@@ -555,6 +667,12 @@ func (p *rebalanceTestClaimPort) Claim(_ context.Context, beadID, actor string) 
 
 func (p *rebalanceTestClaimPort) AuthorizeWorkingReplacement(_ context.Context, _ string) (assignment.WorkingReplacementAuthorization, error) {
 	return assignment.WorkingReplacementAuthorization{Status: p.status, Assignee: p.owner}, nil
+}
+
+func (p *rebalanceTestClaimPort) AuthorizeAssignment(_ context.Context, request assignment.AssignmentEligibilityAuthorizationRequest) error {
+	p.eligibilityCalls++
+	p.eligibilityRequests = append(p.eligibilityRequests, request)
+	return p.eligibilityErr
 }
 
 type rebalanceTestReleasePort struct {
@@ -717,6 +835,7 @@ func rebalanceTestCoordinator(
 	release assignment.WorkingReplacementReleasePort,
 ) *assignment.AtomicCoordinator {
 	return assignment.NewAtomicCoordinator(store, claim, reservation, dispatch).
+		WithAssignmentEligibilityAuthorizationPort(claim).
 		WithWorkingReplacementAuthorizationPort(claim).
 		WithWorkingReplacementReleasePort(release)
 }
@@ -759,8 +878,8 @@ func TestApplyTransfersAtomicSuccessReplayAndExactReservationTransfer(t *testing
 	if err := applyTransfers(t.Context(), store.SessionName, store, panes, transfers, coordinator, observer); err != nil {
 		t.Fatalf("replay applyTransfers: %v", err)
 	}
-	if claim.claimCalls != 1 || release.calls != 1 || reservation.calls != 1 || dispatch.calls != 1 {
-		t.Fatalf("replay side effects claim=%d release=%d reserve=%d dispatch=%d", claim.claimCalls, release.calls, reservation.calls, dispatch.calls)
+	if claim.eligibilityCalls != 1 || claim.claimCalls != 1 || release.calls != 1 || reservation.calls != 1 || dispatch.calls != 1 {
+		t.Fatalf("replay side effects authorization=%d claim=%d release=%d reserve=%d dispatch=%d", claim.eligibilityCalls, claim.claimCalls, release.calls, reservation.calls, dispatch.calls)
 	}
 	if replayed := store.Get(source.BeadID); !reflect.DeepEqual(replayed, after) {
 		t.Fatalf("replay mutated receipt: before=%+v after=%+v", after, replayed)
@@ -809,6 +928,36 @@ func TestApplyTransfersRejectsStaleOrUnauthorizedSourceWithoutMutation(t *testin
 			t.Fatalf("changed owner side effects claim=%d release=%d dispatch=%d", claim.claimCalls, release.calls, dispatch.calls)
 		}
 	})
+
+	for _, policyChange := range []string{"operator gate appeared", "blocker appeared"} {
+		policyChange := policyChange
+		t.Run(policyChange, func(t *testing.T) {
+			store, source := seedRebalanceWorkingAssignment(t, "rebalance-"+strings.ReplaceAll(policyChange, " ", "-"), nil, nil)
+			before := store.Get(source.BeadID)
+			claim := &rebalanceTestClaimPort{
+				owner: source.ClaimActor, status: "in_progress",
+				eligibilityErr: fmt.Errorf("%w: %s", assignment.ErrClaimIneligible, policyChange),
+			}
+			release := &rebalanceTestReleasePort{}
+			reservation := &rebalanceTestReservationPort{}
+			dispatch := &rebalanceTestDispatchPort{}
+			coordinator := rebalanceTestCoordinator(store, claim, reservation, dispatch, release)
+			panes := rebalanceTestPanes()
+			err := applyTransfers(t.Context(), store.SessionName, store, panes, []RebalanceTransfer{rebalanceTestTransfer(source)}, coordinator, rebalanceSafeObserver(store.SessionName, panes[1]))
+			if !errors.Is(err, assignment.ErrClaimIneligible) || !strings.Contains(err.Error(), policyChange) {
+				t.Fatalf("policy change error = %v", err)
+			}
+			if after := store.Get(source.BeadID); !reflect.DeepEqual(after, before) {
+				t.Fatalf("policy change mutated source: before=%+v after=%+v", before, after)
+			}
+			if claim.eligibilityCalls != 1 || claim.claimCalls != 0 || release.calls != 0 || reservation.calls != 0 || dispatch.calls != 0 {
+				t.Fatalf("policy change side effects authorization=%d claim=%d release=%d reserve=%d dispatch=%d", claim.eligibilityCalls, claim.claimCalls, release.calls, reservation.calls, dispatch.calls)
+			}
+			if len(claim.eligibilityRequests) != 1 || !claim.eligibilityRequests[0].AllowOwnedInProgress || claim.eligibilityRequests[0].ClaimActor != source.ClaimActor {
+				t.Fatalf("policy change authorization request=%+v", claim.eligibilityRequests)
+			}
+		})
+	}
 
 	t.Run("target is not freshly idle", func(t *testing.T) {
 		store, source := seedRebalanceWorkingAssignment(t, "rebalance-busy-target", nil, nil)

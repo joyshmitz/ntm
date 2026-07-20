@@ -29,6 +29,7 @@ var (
 	healthStatus           string
 	healthAutoRestartStuck bool
 	healthThreshold        string
+	healthDryRun           bool
 	healthKernelRun        = kernel.Run
 )
 
@@ -128,6 +129,7 @@ Examples:
 	cmd.Flags().StringVar(&healthStatus, "status", "", "Filter by status (ok, warning, error)")
 	cmd.Flags().BoolVar(&healthAutoRestartStuck, "auto-restart-stuck", false, "Detect and restart agents stuck with no output")
 	cmd.Flags().StringVar(&healthThreshold, "threshold", "", "Duration before considering stuck (default 5m, e.g. 10m, 300s)")
+	cmd.Flags().BoolVar(&healthDryRun, "dry-run", false, "Preview stuck agents without restarting them")
 	cmd.ValidArgsFunction = completeSessionArgs
 	_ = cmd.RegisterFlagCompletionFunc("pane", completePaneIndexes)
 
@@ -170,7 +172,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 
 	// Auto-restart-stuck mode
 	if healthAutoRestartStuck {
-		return runAutoRestartStuck(session)
+		return runAutoRestartStuck(cmd.Context(), session)
 	}
 
 	// Watch mode - continuous refresh
@@ -183,7 +185,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 }
 
 // runAutoRestartStuck detects and restarts stuck agents
-func runAutoRestartStuck(session string) error {
+func runAutoRestartStuck(ctx context.Context, session string) error {
 	threshold, err := robot.ParseStuckThreshold(healthThreshold)
 	if err != nil {
 		return err
@@ -192,26 +194,33 @@ func runAutoRestartStuck(session string) error {
 	opts := autoRestartStuckOptions(
 		session,
 		threshold,
-		false, // dry-run handled via --json + robot flag path
+		healthDryRun,
 		loadSelectedConfigOrDefault(),
 	)
 
 	if jsonOutput {
-		return robot.PrintAutoRestartStuck(opts)
+		return robot.PrintAutoRestartStuck(ctx, opts)
 	}
 
-	result, err := robot.GetAutoRestartStuck(opts)
+	result, err := robot.GetAutoRestartStuck(ctx, opts)
 	if err != nil {
 		return err
 	}
+	if err := autoRestartStuckResultError(result); err != nil {
+		return err
+	}
 
-	// TUI output
+	// Human-readable output
 	if len(result.StuckPanes) == 0 {
 		fmt.Printf("No stuck agents found (threshold: %s)\n", result.Threshold)
 		return nil
 	}
 
-	fmt.Printf("Stuck agents detected (threshold: %s):\n", result.Threshold)
+	if result.DryRun {
+		fmt.Printf("Stuck agents detected (dry run, threshold: %s):\n", result.Threshold)
+	} else {
+		fmt.Printf("Stuck agents detected (threshold: %s):\n", result.Threshold)
+	}
 	fmt.Printf("  Stuck panes:    %v\n", result.StuckPanes)
 	if len(result.Restarted) > 0 {
 		fmt.Printf("  Restarted:      %v\n", result.Restarted)
@@ -220,6 +229,23 @@ func runAutoRestartStuck(session string) error {
 		fmt.Printf("  Failed:         %v\n", result.Failed)
 	}
 	return nil
+}
+
+func autoRestartStuckResultError(result *robot.AutoRestartStuckOutput) error {
+	if result == nil {
+		return errors.New("auto-restart-stuck failed: empty response")
+	}
+	if result.Success {
+		return nil
+	}
+	message := strings.TrimSpace(result.Error)
+	if message == "" {
+		message = "auto-restart-stuck failed"
+	}
+	if result.ErrorCode != "" {
+		return fmt.Errorf("%s (%s)", message, result.ErrorCode)
+	}
+	return errors.New(message)
 }
 
 func autoRestartStuckOptions(session string, threshold time.Duration, dryRun bool, cfg *config.Config) robot.AutoRestartStuckOptions {

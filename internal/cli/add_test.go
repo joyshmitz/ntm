@@ -23,6 +23,7 @@ func TestNewAgentLifecycleFailureResponseClassifiesPromptFailureAndMutation(t *t
 		true,
 		true,
 		[]string{"%7", "%7", "", " %8 "},
+		nil,
 	)
 
 	if response.Success || response.ErrorCode != robot.ErrCodePromptSendFailed || response.Code != robot.ErrCodePromptSendFailed {
@@ -41,12 +42,77 @@ func TestNewAgentLifecycleFailureResponseClassifiesPromptFailureAndMutation(t *t
 
 func TestNewAgentLifecycleFailureResponseCancellationTakesPrecedence(t *testing.T) {
 	err := newPromptSendFailure(errors.Join(errors.New("dispatch interrupted"), context.Canceled))
-	response := newAgentLifecycleFailureResponse(err, "cancel-session", true, true, nil)
+	response := newAgentLifecycleFailureResponse(err, "cancel-session", true, true, nil, nil)
 	if response.Success || response.ErrorCode != robot.ErrCodeTimeout || response.Code != robot.ErrCodeTimeout {
 		t.Fatalf("canceled prompt response = %+v, want TIMEOUT", response)
 	}
 	if response.AffectedPaneIDs == nil || len(response.AffectedPaneIDs) != 0 {
 		t.Fatalf("canceled prompt affected panes = %v, want checked-empty []", response.AffectedPaneIDs)
+	}
+}
+
+func TestNewAgentLifecycleFailureResponseErrorCodePrecedence(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "cancellation beats prompt failure",
+			err:  newPromptSendFailure(errors.Join(errors.New("dispatch interrupted"), context.Canceled)),
+			want: robot.ErrCodeTimeout,
+		},
+		{
+			name: "deadline beats invalid input",
+			err:  markCLIInvalidInput(errors.Join(errors.New("policy load timed out"), context.DeadlineExceeded)),
+			want: robot.ErrCodeTimeout,
+		},
+		{
+			name: "prompt failure beats invalid input",
+			err:  newPromptSendFailure(markCLIInvalidInput(errors.New("prompt target is invalid"))),
+			want: robot.ErrCodePromptSendFailed,
+		},
+		{
+			name: "invalid input",
+			err:  markCLIInvalidInput(errors.New("invalid target policy")),
+			want: robot.ErrCodeInvalidFlag,
+		},
+		{
+			name: "internal error fallback",
+			err:  errors.New("unexpected lifecycle failure"),
+			want: robot.ErrCodeInternalError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := newAgentLifecycleFailureResponse(tt.err, "classified-session", false, false, nil, nil)
+			if response.ErrorCode != tt.want || response.Code != tt.want {
+				t.Fatalf("lifecycle failure code = (%q, %q), want (%q, %q)", response.ErrorCode, response.Code, tt.want, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewAgentLifecycleFailureResponseReportsAffectedWorktrees(t *testing.T) {
+	response := newAgentLifecycleFailureResponse(
+		errors.New("second worktree failed"),
+		"worktree-session",
+		true,
+		false,
+		nil,
+		[]string{" /repo/.ntm/worktrees/worktree-session/cc_1 ", "", "/repo/.ntm/worktrees/worktree-session/cc_1"},
+	)
+
+	if len(response.AffectedWorktreePaths) != 1 || response.AffectedWorktreePaths[0] != "/repo/.ntm/worktrees/worktree-session/cc_1" {
+		t.Fatalf("affected worktree paths = %v, want one normalized path", response.AffectedWorktreePaths)
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal lifecycle failure: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"affected_worktree_paths":["/repo/.ntm/worktrees/worktree-session/cc_1"]`) {
+		t.Fatalf("lifecycle failure JSON omits affected worktree paths: %s", encoded)
 	}
 }
 
@@ -238,19 +304,23 @@ func TestAddThreadsCodexReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestAddResponseJSONIncludesOllama(t *testing.T) {
+func TestAddResponseJSONIncludesModernAgentCounts(t *testing.T) {
 
 	data, err := json.Marshal(output.AddResponse{
 		AddedClaude: 1,
-		AddedOllama: 2,
-		TotalAdded:  3,
+		AddedGrok:   2,
+		AddedOllama: 3,
+		TotalAdded:  6,
 	})
 	if err != nil {
 		t.Fatalf("json.Marshal(AddResponse) error = %v", err)
 	}
 
 	encoded := string(data)
-	if !strings.Contains(encoded, "\"added_ollama\":2") {
+	if !strings.Contains(encoded, "\"added_grok\":2") {
+		t.Fatalf("AddResponse JSON = %s, want added_grok field", encoded)
+	}
+	if !strings.Contains(encoded, "\"added_ollama\":3") {
 		t.Fatalf("AddResponse JSON = %s, want added_ollama field", encoded)
 	}
 }

@@ -12,7 +12,7 @@ import (
 )
 
 func TestRunHistoryListRejectsNonPositiveLimit(t *testing.T) {
-	err := runHistoryList(0, "", "", "", "", "", false)
+	err := runHistoryList(t.Context(), 0, "", "", "", "", "", false)
 	if err == nil {
 		t.Fatalf("expected error for limit <= 0")
 	}
@@ -34,7 +34,7 @@ func TestResolveHistorySessionFilterNormalizesProjectScopedPrefix(t *testing.T) 
 		jsonOutput = oldJSON
 	})
 
-	got, err := resolveHistorySessionFilter("mypro")
+	got, err := resolveHistorySessionFilter(t.Context(), "mypro")
 	if err != nil {
 		t.Fatalf("resolveHistorySessionFilter() error = %v", err)
 	}
@@ -60,7 +60,7 @@ func TestResolveHistorySessionFilterRejectsAmbiguousProjectScopedPrefix(t *testi
 		jsonOutput = oldJSON
 	})
 
-	_, err := resolveHistorySessionFilter("myp")
+	_, err := resolveHistorySessionFilter(t.Context(), "myp")
 	if err == nil {
 		t.Fatal("expected ambiguous prefix error")
 	}

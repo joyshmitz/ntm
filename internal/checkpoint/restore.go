@@ -97,6 +97,9 @@ func (r *Restorer) RestoreFromCheckpoint(cp *Checkpoint, opts RestoreOptions) (*
 	if cp == nil {
 		return nil, ErrNilCheckpoint
 	}
+	if err := validateCheckpointAutomatedRelaunch(cp); err != nil {
+		return nil, err
+	}
 
 	result := &RestoreResult{
 		SessionName: cp.SessionName,
@@ -209,6 +212,15 @@ func (r *Restorer) RestoreFromCheckpoint(cp *Checkpoint, opts RestoreOptions) (*
 	}
 
 	return result, nil
+}
+
+func validateCheckpointAutomatedRelaunch(cp *Checkpoint) error {
+	for _, pane := range cp.Session.Panes {
+		if err := agent.AgentType(pane.AgentType).ValidateAutomatedRelaunch(); err != nil {
+			return fmt.Errorf("checkpoint pane %d (%s): %w", pane.Index, pane.AgentType, err)
+		}
+	}
+	return nil
 }
 
 // createSession creates the initial tmux session.
@@ -938,6 +950,9 @@ func sameCheckpointPane(a, b PaneState) bool {
 func restorableAgentCommand(pane PaneState) string {
 	agentType := agent.AgentType(pane.AgentType).Canonical()
 	if !agentType.IsValid() || agentType == agent.AgentTypeUser || agentType == agent.AgentTypeUnknown {
+		return ""
+	}
+	if agentType == agent.AgentTypeGrok {
 		return ""
 	}
 

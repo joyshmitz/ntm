@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -37,7 +38,7 @@ Examples:
 			if len(args) > 0 {
 				session = args[0]
 			}
-			return runPalette(cmd.OutOrStdout(), cmd.ErrOrStderr(), session)
+			return runPalette(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), session)
 		},
 	}
 
@@ -46,19 +47,19 @@ Examples:
 	return cmd
 }
 
-func runPalette(w io.Writer, errW io.Writer, session string) error {
+func runPalette(ctx context.Context, w io.Writer, errW io.Writer, session string) error {
 	// When --json is passed, output palette data as JSON instead of launching the TUI
 	if jsonOutput {
 		sess := strings.TrimSpace(session)
 		sessionExplicit := sess != ""
 		if sessionExplicit {
-			resolved, err := resolvePaletteConfigSession(sess, true)
+			resolved, err := resolvePaletteConfigSession(ctx, sess, true)
 			if err != nil {
 				return err
 			}
 			sess = resolved
 		}
-		paletteCfg, err := loadPaletteRuntimeConfig(sess, sessionExplicit)
+		paletteCfg, err := loadPaletteRuntimeConfig(ctx, sess, sessionExplicit)
 		if err != nil {
 			return err
 		}
@@ -86,11 +87,11 @@ func runPalette(w io.Writer, errW io.Writer, session string) error {
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
-	contextDir, err := paletteConfigContextDir(session, sessionExplicit)
+	contextDir, err := paletteConfigContextDir(ctx, session, sessionExplicit)
 	if err != nil {
 		return err
 	}
-	paletteCfg, err := loadPaletteRuntimeConfig(session, sessionExplicit)
+	paletteCfg, err := loadPaletteRuntimeConfig(ctx, session, sessionExplicit)
 	if err != nil {
 		return err
 	}
@@ -145,22 +146,22 @@ func runPalette(w io.Writer, errW io.Writer, session string) error {
 	return nil
 }
 
-func resolvePaletteConfigSession(session string, sessionExplicit bool) (string, error) {
+func resolvePaletteConfigSession(ctx context.Context, session string, sessionExplicit bool) (string, error) {
 	session = strings.TrimSpace(session)
 	if !sessionExplicit || session == "" {
 		return session, nil
 	}
 
-	return normalizeProjectScopedSessionName(session, true)
+	return normalizeProjectScopedSessionName(ctx, session, true)
 }
 
-func paletteConfigContextDir(session string, sessionExplicit bool) (string, error) {
-	resolvedSession, err := resolvePaletteConfigSession(session, sessionExplicit)
+func paletteConfigContextDir(ctx context.Context, session string, sessionExplicit bool) (string, error) {
+	resolvedSession, err := resolvePaletteConfigSession(ctx, session, sessionExplicit)
 	if err != nil {
 		return "", err
 	}
 	if sessionExplicit && resolvedSession != "" {
-		return resolveExplicitProjectDirForSession(resolvedSession)
+		return resolveExplicitProjectDirForSessionContext(ctx, resolvedSession)
 	}
 	if dir := resolveProjectDirForSession(resolvedSession, false); strings.TrimSpace(dir) != "" {
 		return dir, nil
@@ -172,8 +173,8 @@ func paletteConfigContextDir(session string, sessionExplicit bool) (string, erro
 	return cwd, nil
 }
 
-func loadPaletteRuntimeConfig(session string, sessionExplicit bool) (*config.Config, error) {
-	contextDir, err := paletteConfigContextDir(session, sessionExplicit)
+func loadPaletteRuntimeConfig(ctx context.Context, session string, sessionExplicit bool) (*config.Config, error) {
+	contextDir, err := paletteConfigContextDir(ctx, session, sessionExplicit)
 	if err != nil {
 		return nil, err
 	}

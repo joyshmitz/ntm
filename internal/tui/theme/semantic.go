@@ -51,6 +51,7 @@ type SemanticPalette struct {
 	AgentClaude      lipgloss.Color // Claude Code (purple)
 	AgentCodex       lipgloss.Color // OpenAI Codex (blue)
 	AgentGemini      lipgloss.Color // Google Gemini (yellow)
+	AgentGrok        lipgloss.Color // Grok Build (pink)
 	AgentAntigravity lipgloss.Color // Antigravity / agy (lavender)
 	AgentCursor      lipgloss.Color // Cursor (teal)
 	AgentWindsurf    lipgloss.Color // Windsurf (flamingo)
@@ -124,6 +125,7 @@ func (t Theme) Semantic() SemanticPalette {
 		AgentClaude:      t.Claude,
 		AgentCodex:       t.Codex,
 		AgentGemini:      t.Gemini,
+		AgentGrok:        t.Pink,
 		AgentAntigravity: t.Lavender,
 		AgentCursor:      t.Cursor,
 		AgentWindsurf:    t.Windsurf,
@@ -169,6 +171,8 @@ func (p SemanticPalette) AgentColor(agentType string) lipgloss.Color {
 		return p.AgentCodex
 	case agent.AgentTypeGemini:
 		return p.AgentGemini
+	case agent.AgentTypeGrok:
+		return p.AgentGrok
 	case agent.AgentTypeAntigravity:
 		return p.AgentAntigravity
 	case agent.AgentTypeCursor:
@@ -247,6 +251,7 @@ type SemanticStyles struct {
 	BadgeClaude   lipgloss.Style
 	BadgeCodex    lipgloss.Style
 	BadgeGemini   lipgloss.Style
+	BadgeGrok     lipgloss.Style
 	BadgeCursor   lipgloss.Style
 	BadgeWindsurf lipgloss.Style
 	BadgeAider    lipgloss.Style
@@ -354,6 +359,9 @@ func NewSemanticStyles(t Theme) SemanticStyles {
 			Foreground(p.FgInverse),
 		BadgeGemini: baseBadge.
 			Background(p.AgentGemini).
+			Foreground(p.FgInverse),
+		BadgeGrok: baseBadge.
+			Background(p.AgentGrok).
 			Foreground(p.FgInverse),
 		BadgeCursor: baseBadge.
 			Background(p.AgentCursor).

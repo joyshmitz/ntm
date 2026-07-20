@@ -16,9 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
@@ -59,6 +61,25 @@ func TestGetBulkAssignRejectsInvalidStrategyBeforeExternalWork(t *testing.T) {
 	}
 	if output.Success || output.ErrorCode != ErrCodeInvalidFlag || output.Assignments == nil {
 		t.Fatalf("invalid strategy output = %+v", output)
+	}
+	assertBulkAssignRequiredCollections(t, output)
+}
+
+func assertBulkAssignRequiredCollections(t *testing.T, output *BulkAssignOutput) {
+	t.Helper()
+	payload, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("marshal bulk assignment output: %v", err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &document); err != nil {
+		t.Fatalf("decode bulk assignment output: %v", err)
+	}
+	for _, field := range []string{"assignments", "unassigned_beads", "unassigned_panes"} {
+		value, present := document[field]
+		if !present || string(value) != "[]" {
+			t.Fatalf("bulk assignment field %q = %s (present=%t), want checked-empty [] in %s", field, value, present, payload)
+		}
 	}
 }
 
@@ -973,6 +994,7 @@ func TestBulkAssignAtomicOrderAndDurableReplay(t *testing.T) {
 	deliverCalls := 0
 	keyCalls := 0
 	observeCalls := 0
+	policyLabels := []string{"bulk-release-gate"}
 	deps := BulkAssignDependencies{
 		ReadFile: func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 		Cwd:      func() (string, error) { return t.TempDir(), nil },
@@ -980,11 +1002,20 @@ func TestBulkAssignAtomicOrderAndDurableReplay(t *testing.T) {
 			return []tmux.Pane{{ID: "%21", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex}}, nil
 		},
 		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
-		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+		GetBeadAssignmentDetails: func(_ context.Context, _ string, beadID string) (*bv.BeadAssignmentDetails, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, "authorize")
+			return &bv.BeadAssignmentDetails{ID: beadID, Status: "open"}, nil
+		},
+		ClaimBeadWithOperatorGatedLabels: func(_ context.Context, _ string, beadID, actor string, labels []string) (bv.BeadClaimResult, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			claimCalls++
 			order = append(order, "claim")
+			if !reflect.DeepEqual(labels, policyLabels) {
+				t.Fatalf("guarded claim labels=%v, want captured %v", labels, policyLabels)
+			}
 			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
 		},
 		NewIdempotencyKey: func() (string, error) {
@@ -1026,20 +1057,96 @@ func TestBulkAssignAtomicOrderAndDurableReplay(t *testing.T) {
 
 	first := BulkAssignOutput{Session: "bulk-atomic"}
 	reservationPaths := []string{"internal/robot/**"}
-	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths}, bulkAssignDeps(&deps), &first, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths, operatorGatedLabels: policyLabels}, bulkAssignDeps(&deps), &first, plan)
 	second := BulkAssignOutput{Session: "bulk-atomic"}
-	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths}, bulkAssignDeps(&deps), &second, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths, operatorGatedLabels: policyLabels}, bulkAssignDeps(&deps), &second, plan)
 	if len(first.Assignments) != 1 || !first.Assignments[0].Claimed || !first.Assignments[0].PromptSent || first.Assignments[0].DispatchReceiptID == "" {
 		t.Fatalf("first assignments=%+v", first.Assignments)
 	}
 	if len(second.Assignments) != 1 || !second.Assignments[0].PromptSent || second.Assignments[0].IdempotencyKey != first.Assignments[0].IdempotencyKey {
 		t.Fatalf("replayed assignments=%+v", second.Assignments)
 	}
-	if !reflect.DeepEqual(order, []string{"claim", "reserve", "dispatch"}) {
+	if !reflect.DeepEqual(order, []string{"authorize", "claim", "reserve", "dispatch"}) {
 		t.Fatalf("side-effect order=%v", order)
 	}
 	if claimCalls != 1 || reserveCalls != 1 || deliverCalls != 1 || keyCalls != 1 || observeCalls != 2 {
 		t.Fatalf("calls claim=%d reserve=%d dispatch=%d key=%d observe=%d", claimCalls, reserveCalls, deliverCalls, keyCalls, observeCalls)
+	}
+}
+
+func TestRobotAtomicEligibilityAuthorizationCapturesOperatorGateSnapshot(t *testing.T) {
+	projectDir := t.TempDir()
+	labels := []string{"release-snapshot"}
+	readCalls := 0
+	port := newRobotAtomicEligibilityAuthorizationPort(
+		projectDir,
+		labels,
+		func(_ context.Context, gotProject, beadID string) (*bv.BeadAssignmentDetails, error) {
+			readCalls++
+			if gotProject != projectDir || beadID != "bd-gated" {
+				t.Fatalf("details lookup project=%q bead=%q", gotProject, beadID)
+			}
+			return &bv.BeadAssignmentDetails{
+				ID: beadID, Status: "open", Labels: []string{"RELEASE-SNAPSHOT"},
+			}, nil
+		},
+	)
+	labels[0] = "mutated-after-admission"
+
+	err := port.AuthorizeAssignment(t.Context(), assignment.AssignmentEligibilityAuthorizationRequest{
+		BeadID: "bd-gated", ClaimActor: "PolicyAgent", AllowUnassignedOpen: true,
+	})
+	if !errors.Is(err, assignment.ErrClaimIneligible) || !strings.Contains(err.Error(), "RELEASE-SNAPSHOT") {
+		t.Fatalf("authorization error=%v, want captured operator-gate rejection", err)
+	}
+	if readCalls != 1 {
+		t.Fatalf("details reads=%d, want one", readCalls)
+	}
+}
+
+func TestRobotAtomicStaleEligibilityRejectsGateBeforeLedgerOrExternalMutation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const beadID = "bd-stale-gated"
+	store := assignment.NewStore("stale-eligibility-gate")
+	var claimCalls, reservationCalls, dispatchCalls int
+	port := newRobotAtomicStaleEligibilityAuthorizationPort(
+		t.TempDir(),
+		[]string{"stale-approval"},
+		func(context.Context, string, string) (*bv.BeadAssignmentDetails, error) {
+			return &bv.BeadAssignmentDetails{
+				ID: beadID, Status: "in_progress", Labels: []string{"STALE-APPROVAL"},
+			}, nil
+		},
+	)
+	coordinator := assignment.NewAtomicCoordinator(
+		store,
+		assignment.ClaimFunc(func(context.Context, string, string) (assignment.ClaimReceipt, error) {
+			claimCalls++
+			return assignment.ClaimReceipt{}, nil
+		}),
+		assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			reservationCalls++
+			return assignment.LeaseReceipt{}, nil
+		}),
+		assignment.DispatchFunc(func(context.Context, assignment.DispatchRequest) (assignment.DispatchReceipt, error) {
+			dispatchCalls++
+			return assignment.DispatchReceipt{}, nil
+		}),
+	).WithAssignmentEligibilityAuthorizationPort(port)
+
+	result, err := coordinator.Execute(t.Context(), assignment.AtomicRequest{
+		BeadID: beadID, BeadTitle: "Stale gated work", Target: "%88", OccupancyKey: "%88", Pane: 1,
+		AgentType: "codex", AgentName: "StaleAgent", Actor: "StaleAgent", Prompt: "work",
+		IdempotencyKey: "stale-gated-key",
+	})
+	if !errors.Is(err, assignment.ErrClaimIneligible) || !strings.Contains(err.Error(), "STALE-APPROVAL") {
+		t.Fatalf("stale authorization result=%+v error=%v, want operator-gate rejection", result, err)
+	}
+	if stored := store.Get(beadID); stored != nil {
+		t.Fatalf("stale gate persisted assignment before authorization: %+v", stored)
+	}
+	if claimCalls != 0 || reservationCalls != 0 || dispatchCalls != 0 {
+		t.Fatalf("stale gate crossed external mutation: claim=%d reserve=%d dispatch=%d", claimCalls, reservationCalls, dispatchCalls)
 	}
 }
 
@@ -1050,6 +1157,7 @@ func TestBulkAssignStalePlanUsesGuardedStaleClaimer(t *testing.T) {
 		UpdatedAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
 	}})
 	var ordinaryClaims, staleClaims int
+	policyLabels := []string{"stale-release-gate"}
 	deps := BulkAssignDependencies{
 		ReadFile: func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
 		DispatchDeliverer: bulkTestDeliverer(t, func(dispatchsvc.Delivery) error {
@@ -1062,15 +1170,21 @@ func TestBulkAssignStalePlanUsesGuardedStaleClaimer(t *testing.T) {
 		return bv.BeadClaimResult{}, errors.New("ordinary ready-work claimer must not adopt stale work")
 	}
 	deps.ClaimStaleBead = func(_ context.Context, _ string, beadID, actor string, expectedUpdatedAt time.Time) (bv.BeadClaimResult, error) {
+		return bv.BeadClaimResult{}, errors.New("legacy stale claimer must not be used when a captured-policy claimer is available")
+	}
+	deps.ClaimStaleBeadWithOperatorGatedLabels = func(_ context.Context, _ string, beadID, actor string, expectedUpdatedAt time.Time, labels []string) (bv.BeadClaimResult, error) {
 		staleClaims++
 		if !expectedUpdatedAt.Equal(time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)) {
 			t.Fatalf("stale claim expected update=%s", expectedUpdatedAt)
+		}
+		if !reflect.DeepEqual(labels, policyLabels) {
+			t.Fatalf("stale guarded claim labels=%v, want %v", labels, policyLabels)
 		}
 		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
 	}
 
 	output := BulkAssignOutput{Session: "bulk-stale-adopt"}
-	applyBulkAssignPlan(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{operatorGatedLabels: policyLabels}, bulkAssignDeps(&deps), &output, plan)
 	if ordinaryClaims != 0 || staleClaims != 1 {
 		t.Fatalf("claim calls ordinary=%d stale=%d, want guarded stale claimer exactly once", ordinaryClaims, staleClaims)
 	}
@@ -1337,7 +1451,8 @@ func TestBulkDurableSentReplayCoexistsWithFreshPlanOutcomes(t *testing.T) {
 				ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
 					return append([]tmux.Pane(nil), panes...), nil
 				},
-				ObserveSession: bulkSafeObserver(panes),
+				ObserveSession:           bulkSafeObserver(panes),
+				GetBeadAssignmentDetails: bulkOpenAssignmentDetails,
 				ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 					return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
 				},
@@ -1460,6 +1575,12 @@ func TestBulkPendingRecoveryReusesValidReservationWithoutAgentMail(t *testing.T)
 			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: now}, nil
 		},
 		GetBeadStatus: func(context.Context, string, string) (string, error) { return "in_progress", nil },
+		GetBeadAssignmentDetails: func(_ context.Context, _ string, gotBead string) (*bv.BeadAssignmentDetails, error) {
+			if gotBead != beadID {
+				t.Fatalf("eligibility bead=%q, want %q", gotBead, beadID)
+			}
+			return &bv.BeadAssignmentDetails{ID: beadID, Status: "in_progress"}, nil
+		},
 		NewIdempotencyKey: func() (string, error) {
 			t.Fatal("recovery generated a new idempotency key")
 			return "", nil
@@ -1588,7 +1709,8 @@ func TestBulkAssignClaimConflictNeverReservesOrDispatches(t *testing.T) {
 		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
 			return []tmux.Pane{{ID: "%7", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude}}, nil
 		},
-		LoadStore: func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("bulk-conflict"), nil },
+		LoadStore:                func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("bulk-conflict"), nil },
+		GetBeadAssignmentDetails: bulkOpenAssignmentDetails,
 		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
 			return bv.BeadClaimResult{}, bv.ErrBeadAlreadyClaimed
 		},
@@ -1714,12 +1836,13 @@ func TestBulkAssignTerminalGenerationRequiresReopenedBead(t *testing.T) {
 	deliverCalls := 0
 	panes := []tmux.Pane{{ID: "%8", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex}}
 	deps := BulkAssignDependencies{
-		ReadFile:       func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
-		Cwd:            func() (string, error) { return t.TempDir(), nil },
-		ListPanes:      func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
-		LoadStore:      func(string) (*assignment.AssignmentStore, error) { return store, nil },
-		GetBeadStatus:  func(context.Context, string, string) (string, error) { return "closed", nil },
-		ObserveSession: bulkSafeObserver(panes),
+		ReadFile:                 func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+		Cwd:                      func() (string, error) { return t.TempDir(), nil },
+		ListPanes:                func(context.Context, string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore:                func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		GetBeadStatus:            func(context.Context, string, string) (string, error) { return "closed", nil },
+		GetBeadAssignmentDetails: bulkOpenAssignmentDetails,
+		ObserveSession:           bulkSafeObserver(panes),
 		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
 			claimCalls++
 			return bv.BeadClaimResult{}, errors.New("closed bead must not be claimed")
@@ -1887,8 +2010,8 @@ func TestBulkAssignBVFailure(t *testing.T) {
 	if result.ErrorCode != ErrCodeInternalError {
 		t.Fatalf("expected error_code %s, got %s", ErrCodeInternalError, result.ErrorCode)
 	}
-	if !strings.Contains(result.Error, "bv triage failed") {
-		t.Fatalf("expected error to mention triage failure, got: %s", result.Error)
+	if !strings.Contains(result.Error, "verify actionable bulk assignment work") {
+		t.Fatalf("expected error to mention actionable verification failure, got: %s", result.Error)
 	}
 }
 
@@ -1935,6 +2058,419 @@ func TestBulkAssignUsesAuthoritativeSessionProjectForBVPlanning(t *testing.T) {
 	}
 	if cwdCalls != 0 {
 		t.Fatalf("caller CWD resolved %d time(s), want zero", cwdCalls)
+	}
+}
+
+func TestBulkAssignLoadsAuthoritativePolicyBeforeParsingPlanningAndMutation(t *testing.T) {
+	policyErr := errors.New("injected authoritative policy failure")
+	for _, test := range []struct {
+		name string
+		opts BulkAssignOptions
+	}{
+		{
+			name: "malformed explicit allocation is not parsed first",
+			opts: BulkAssignOptions{AllocationJSON: `{"1":`},
+		},
+		{
+			name: "from-bv planning and stale recovery do not start first",
+			opts: BulkAssignOptions{FromBV: true, Strategy: "balanced"},
+		},
+		{
+			name: "valid explicit allocation cannot actuate first",
+			opts: BulkAssignOptions{
+				AllocationJSON:     `{"1":"bd-policy"}`,
+				RequireReservation: true,
+				ReservationPaths:   []string{"internal/robot/**"},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			authoritative := t.TempDir()
+			selectedConfig := filepath.Join(t.TempDir(), "selected.toml")
+			calls := make([]string, 0, 3)
+			forbidden := func(surface string) {
+				t.Fatalf("authoritative policy failure reached %s; call order=%v", surface, calls)
+			}
+			deps := BulkAssignDependencies{
+				ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+					calls = append(calls, "list-panes")
+					return mockTmuxPanesForList([]int{1}), nil
+				},
+				ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) {
+					calls = append(calls, "resolve-project")
+					return authoritative, nil
+				},
+				LoadAssignmentPolicy: func(projectDir, configPath string, requireConfig bool) (*config.Config, error) {
+					calls = append(calls, "load-policy")
+					if projectDir != authoritative || configPath != selectedConfig || !requireConfig {
+						t.Fatalf("policy args = project %q config %q required=%t, want %q %q true",
+							projectDir, configPath, requireConfig, authoritative, selectedConfig)
+					}
+					return nil, policyErr
+				},
+				FetchActionable: func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+					forbidden("actionable plan/label verification")
+					return nil, nil
+				},
+				FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
+					forbidden("triage")
+					return nil, nil
+				},
+				FetchInProgress: func(context.Context, string, int) ([]bv.BeadInProgress, error) {
+					forbidden("in-progress lookup")
+					return nil, nil
+				},
+				ReadFile: func(string) ([]byte, error) {
+					forbidden("prompt template I/O")
+					return nil, nil
+				},
+				FetchBeadTitle: func(context.Context, string, string) (string, error) {
+					forbidden("allocation title lookup")
+					return "", nil
+				},
+				LoadStore: func(string) (*assignment.AssignmentStore, error) {
+					forbidden("assignment ledger or stale recovery")
+					return nil, nil
+				},
+				ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+					forbidden("Beads claim")
+					return bv.BeadClaimResult{}, nil
+				},
+				ClaimStaleBead: func(context.Context, string, string, string, time.Time) (bv.BeadClaimResult, error) {
+					forbidden("stale Beads claim")
+					return bv.BeadClaimResult{}, nil
+				},
+				ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+					forbidden("Agent Mail reservation")
+					return assignment.LeaseReceipt{}, nil
+				}),
+				ResolveAgentName: func(context.Context, string, string, string, string) (string, error) {
+					forbidden("Agent Mail identity lookup")
+					return "", nil
+				},
+				ObserveSession: func(context.Context, string) (statuspkg.SessionObservation, error) {
+					forbidden("dispatch observation")
+					return statuspkg.SessionObservation{}, nil
+				},
+				DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+					forbidden("prompt dispatch")
+					return nil
+				}),
+				LoadRedaction: func(string) (redaction.Config, error) {
+					forbidden("dispatch redaction setup")
+					return redaction.Config{}, nil
+				},
+			}
+
+			opts := test.opts
+			opts.Session = "policy-order"
+			opts.ConfigPath = selectedConfig
+			opts.RequireConfig = true
+			opts.Deps = &deps
+			output, err := GetBulkAssign(t.Context(), opts)
+			if err != nil {
+				t.Fatalf("GetBulkAssign transport error: %v", err)
+			}
+			if output.Success || output.ErrorCode != ErrCodeInvalidFlag || output.Assignments == nil ||
+				!strings.Contains(output.Error, policyErr.Error()) {
+				t.Fatalf("policy failure output = %+v, want exact INVALID_FLAG boundary", output)
+			}
+			if want := []string{"list-panes", "resolve-project", "load-policy"}; !reflect.DeepEqual(calls, want) {
+				t.Fatalf("call order = %v, want %v", calls, want)
+			}
+		})
+	}
+}
+
+func TestBulkAssignMissingExplicitConfigIsInvalidFlagWithZeroSideEffects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	authoritative := t.TempDir()
+	missingConfig := filepath.Join(t.TempDir(), "missing-selected.toml")
+	forbiddenCalls := 0
+	forbidden := func() { forbiddenCalls++ }
+	deps := BulkAssignDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return mockTmuxPanesForList([]int{1}), nil
+		},
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) {
+			return authoritative, nil
+		},
+		FetchActionable: func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+			forbidden()
+			return nil, nil
+		},
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
+			forbidden()
+			return nil, nil
+		},
+		FetchInProgress: func(context.Context, string, int) ([]bv.BeadInProgress, error) {
+			forbidden()
+			return nil, nil
+		},
+		LoadStore: func(string) (*assignment.AssignmentStore, error) {
+			forbidden()
+			return nil, nil
+		},
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			forbidden()
+			return bv.BeadClaimResult{}, nil
+		},
+		ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			forbidden()
+			return assignment.LeaseReceipt{}, nil
+		}),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			forbidden()
+			return nil
+		}),
+	}
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{
+		Session: "missing-policy", ConfigPath: missingConfig, RequireConfig: true,
+		AllocationJSON: `{"1":"bd-missing"}`, Deps: &deps,
+	})
+	if err != nil {
+		t.Fatalf("GetBulkAssign transport error: %v", err)
+	}
+	if output.Success || output.ErrorCode != ErrCodeInvalidFlag || output.Assignments == nil ||
+		!strings.Contains(output.Error, "explicitly selected config") {
+		t.Fatalf("missing explicit policy output = %+v", output)
+	}
+	if forbiddenCalls != 0 {
+		t.Fatalf("missing explicit config reached %d planning or mutation dependencies", forbiddenCalls)
+	}
+	if _, err := os.Stat(missingConfig); !os.IsNotExist(err) {
+		t.Fatalf("missing explicit config was created or changed: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(os.Getenv("HOME"), ".ntm", "sessions", "missing-policy", "assignments.json"),
+		filepath.Join(os.Getenv("HOME"), ".ntm", "sessions", "missing-policy", "assignments.json.bak"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("policy rejection created assignment ledger %s: %v", path, err)
+		}
+	}
+}
+
+func TestBulkAssignActionableVerificationFailureHasZeroMutation(t *testing.T) {
+	authoritative := t.TempDir()
+	verificationErr := errors.New("live label coverage is incomplete")
+	calls := make([]string, 0, 4)
+	forbidden := func(surface string) {
+		t.Fatalf("actionable verification failure reached %s; calls=%v", surface, calls)
+	}
+	deps := BulkAssignDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			calls = append(calls, "list-panes")
+			return mockTmuxPanesForList([]int{1}), nil
+		},
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) {
+			calls = append(calls, "resolve-project")
+			return authoritative, nil
+		},
+		LoadAssignmentPolicy: func(projectDir, _ string, _ bool) (*config.Config, error) {
+			calls = append(calls, "load-policy")
+			if projectDir != authoritative {
+				t.Fatalf("policy project = %q, want %q", projectDir, authoritative)
+			}
+			return config.Default(), nil
+		},
+		FetchActionable: func(_ context.Context, projectDir string, limit int) ([]bv.TriageRecommendation, error) {
+			calls = append(calls, "verify-actionable")
+			if projectDir != authoritative || limit != 0 {
+				t.Fatalf("actionable args = dir %q limit %d, want %q 0", projectDir, limit, authoritative)
+			}
+			return nil, verificationErr
+		},
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
+			forbidden("triage")
+			return nil, nil
+		},
+		FetchInProgress: func(context.Context, string, int) ([]bv.BeadInProgress, error) {
+			forbidden("in-progress lookup")
+			return nil, nil
+		},
+		LoadStore: func(string) (*assignment.AssignmentStore, error) {
+			forbidden("assignment ledger")
+			return nil, nil
+		},
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			forbidden("Beads claim")
+			return bv.BeadClaimResult{}, nil
+		},
+		ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			forbidden("Agent Mail reservation")
+			return assignment.LeaseReceipt{}, nil
+		}),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			forbidden("prompt dispatch")
+			return nil
+		}),
+	}
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{
+		Session: "unverified-actionable", FromBV: true, Strategy: "balanced", Deps: &deps,
+	})
+	if err != nil {
+		t.Fatalf("GetBulkAssign transport error: %v", err)
+	}
+	if output.Success || output.ErrorCode != ErrCodeInternalError || output.Assignments == nil ||
+		!strings.Contains(output.Error, verificationErr.Error()) {
+		t.Fatalf("actionable verification failure output = %+v", output)
+	}
+	if want := []string{"list-panes", "resolve-project", "load-policy", "verify-actionable"}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("call order = %v, want %v", calls, want)
+	}
+}
+
+func TestBulkAssignTargetProjectCustomGateOverridesCallerCWD(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NTM_CONFIG", "")
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() { bv.ConfigureOperatorGatedLabels(previousLabels) })
+
+	authoritative := t.TempDir()
+	wrongCWD := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(authoritative, ".ntm"), 0o700); err != nil {
+		t.Fatalf("create target config directory: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(authoritative, ".ntm", "config.toml"),
+		[]byte("[assign]\noperator_gated_labels = [\"architecture-approval\"]\n"),
+		0o600,
+	); err != nil {
+		t.Fatalf("write target assignment policy: %v", err)
+	}
+	triage := mockTriage(
+		[]bv.TriageRecommendation{{
+			ID: "bd-target-gated", Title: "Target-scoped gated work", Status: "open", Priority: 0,
+			Labels: []string{"ARCHITECTURE-APPROVAL"},
+		}},
+		[]bv.BlockerToClear{{
+			ID: "bd-target-gated", Title: "Stale high-impact copy", Actionable: true, UnblocksCount: 99,
+		}},
+	)
+	cwdCalls := 0
+	mutationCalls := 0
+	deps := BulkAssignDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return mockTmuxPanesForList([]int{1}), nil
+		},
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) {
+			return authoritative, nil
+		},
+		Cwd: func() (string, error) {
+			cwdCalls++
+			return wrongCWD, nil
+		},
+		FetchTriage: func(_ context.Context, dir string) (*bv.TriageResponse, error) {
+			if dir != authoritative {
+				t.Fatalf("triage dir = %q, want %q", dir, authoritative)
+			}
+			return triage, nil
+		},
+		FetchInProgress: func(_ context.Context, dir string, _ int) ([]bv.BeadInProgress, error) {
+			if dir != authoritative {
+				t.Fatalf("in-progress dir = %q, want %q", dir, authoritative)
+			}
+			return nil, nil
+		},
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			mutationCalls++
+			return bv.BeadClaimResult{}, nil
+		},
+		ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			mutationCalls++
+			return assignment.LeaseReceipt{}, nil
+		}),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			mutationCalls++
+			return nil
+		}),
+	}
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{
+		Session: "target-policy", FromBV: true, Strategy: "impact", Deps: &deps,
+	})
+	if err != nil {
+		t.Fatalf("GetBulkAssign transport error: %v", err)
+	}
+	if !output.Success || len(output.Assignments) != 0 || len(output.UnassignedBeads) != 0 {
+		t.Fatalf("target-gated bulk output = %+v, want empty successful plan", output)
+	}
+	if cwdCalls != 0 {
+		t.Fatalf("bulk policy consulted caller CWD %d time(s), want target project only", cwdCalls)
+	}
+	if mutationCalls != 0 {
+		t.Fatalf("target-gated candidate reached %d mutation surfaces", mutationCalls)
+	}
+}
+
+func TestBulkAssignVerifiedActionableSetRemovesOverlappingTriageCandidates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		gatedID = "bd-overlap-gated"
+		safeID  = "bd-verified-safe"
+	)
+	triage := mockTriage(
+		[]bv.TriageRecommendation{
+			{ID: gatedID, Title: "Stale triage row", Status: "open", Priority: 0},
+			{ID: safeID, Title: "Verified live row", Status: "open", Priority: 1},
+		},
+		[]bv.BlockerToClear{
+			{ID: gatedID, Title: "Stale impact row", Actionable: true, UnblocksCount: 100},
+			{ID: safeID, Title: "Verified impact row", Actionable: true, UnblocksCount: 1},
+		},
+	)
+	claimIDs := make([]string, 0, 1)
+	deps := BulkAssignDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return mockTmuxPanesForList([]int{1}), nil
+		},
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) {
+			return t.TempDir(), nil
+		},
+		LoadAssignmentPolicy: func(string, string, bool) (*config.Config, error) {
+			return config.Default(), nil
+		},
+		FetchActionable: func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+			return []bv.TriageRecommendation{{
+				ID: safeID, Title: "Verified live row", Status: "open", Priority: 1, UnblocksIDs: []string{"bd-child"},
+			}}, nil
+		},
+		FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
+			return triage, nil
+		},
+		FetchInProgress: func(context.Context, string, int) ([]bv.BeadInProgress, error) {
+			return nil, nil
+		},
+		GetBeadAssignmentDetails: bulkOpenAssignmentDetails,
+		ClaimBead: func(_ context.Context, _ string, beadID, _ string) (bv.BeadClaimResult, error) {
+			claimIDs = append(claimIDs, beadID)
+			return bv.BeadClaimResult{}, errors.New("stop after observing claim target")
+		},
+		LoadStore: func(string) (*assignment.AssignmentStore, error) {
+			return assignment.NewStore("verified-overlap"), nil
+		},
+		NewIdempotencyKey: func() (string, error) { return "verified-overlap-key", nil },
+		ResolveAgentName:  func(context.Context, string, string, string, string) (string, error) { return "VerifiedAgent", nil },
+		ObserveSession:    bulkSafeObserver(mockTmuxPanesForList([]int{1})),
+		LoadRedaction:     func(string) (redaction.Config, error) { return redaction.Config{Mode: redaction.ModeOff}, nil },
+	}
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{
+		Session: "verified-overlap", FromBV: true, Strategy: "impact", Deps: &deps,
+	})
+	if err != nil {
+		t.Fatalf("GetBulkAssign transport error: %v", err)
+	}
+	if len(output.Assignments) != 1 || output.Assignments[0].Bead != safeID {
+		t.Fatalf("verified overlap output = %+v, want only %s", output, safeID)
+	}
+	if !reflect.DeepEqual(claimIDs, []string{safeID}) {
+		t.Fatalf("claim IDs = %v, want only verified safe candidate %s", claimIDs, safeID)
+	}
+	for _, beadID := range append(append([]string(nil), claimIDs...), output.UnassignedBeads...) {
+		if beadID == gatedID {
+			t.Fatalf("overlapping stale candidate %s survived verified actionable restriction: %+v", gatedID, output)
+		}
 	}
 }
 
@@ -2041,9 +2577,10 @@ func TestBulkAssignUsesAuthoritativeSessionProjectForActuation(t *testing.T) {
 			titleDir = dir
 			return "Scoped " + beadID, nil
 		},
-		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
-		ReadFile:  func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
-		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		ListPanes:                func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
+		ReadFile:                 func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+		LoadStore:                func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		GetBeadAssignmentDetails: bulkOpenAssignmentDetails,
 		ClaimBead: func(_ context.Context, dir, beadID, actor string) (bv.BeadClaimResult, error) {
 			claimDir = dir
 			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
@@ -2391,6 +2928,25 @@ func mockTmuxPanesForList(indices []int) []tmux.Pane {
 	return panes
 }
 
+func TestValidateBulkAssignPromptDeliveryRejectsMixedGrokBatch(t *testing.T) {
+	assignments := []BulkAssignAssignment{
+		{Pane: "0.1", AgentType: "claude", Status: "planned"},
+		{Pane: "0.2", AgentType: "grok-build", Status: "planned"},
+	}
+	err := validateBulkAssignPromptDelivery(assignments)
+	if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		t.Fatalf("validateBulkAssignPromptDelivery() error = %v, want Grok prompt sentinel", err)
+	}
+	if got := bulkAssignTMUXAgentType("grok-build"); got != tmux.AgentGrok {
+		t.Fatalf("bulkAssignTMUXAgentType(grok-build) = %s, want grok", got)
+	}
+
+	assignments[1].Status = "failed"
+	if err := validateBulkAssignPromptDelivery(assignments); err != nil {
+		t.Fatalf("already-failed Grok assignment blocked remaining supported plan: %v", err)
+	}
+}
+
 func mustParseAllocation(t *testing.T, allocation string) map[string]string {
 	parsed, err := parseBulkAssignAllocation(allocation)
 	if err != nil {
@@ -2419,6 +2975,21 @@ func bulkAtomicTestDeps(t *testing.T, session string, plan bulkAssignPlan, deps 
 	}
 	deps.ClaimStaleBead = func(ctx context.Context, dir, beadID, actor string, _ time.Time) (bv.BeadClaimResult, error) {
 		return deps.ClaimBead(ctx, dir, beadID, actor)
+	}
+	if deps.GetBeadAssignmentDetails == nil {
+		staleIDs := make(map[string]struct{})
+		for _, planned := range plan.Assignments {
+			if planned.stale {
+				staleIDs[planned.Bead] = struct{}{}
+			}
+		}
+		deps.GetBeadAssignmentDetails = func(_ context.Context, _ string, beadID string) (*bv.BeadAssignmentDetails, error) {
+			status := "open"
+			if _, stale := staleIDs[beadID]; stale {
+				status = "in_progress"
+			}
+			return &bv.BeadAssignmentDetails{ID: beadID, Status: status}, nil
+		}
 	}
 	deps.NewIdempotencyKey = func() (string, error) {
 		mu.Lock()
@@ -2458,6 +3029,10 @@ func bulkAtomicTestDeps(t *testing.T, session string, plan bulkAssignPlan, deps 
 		return bulkSafeObservation(observedSession, panes), nil
 	}
 	return deps
+}
+
+func bulkOpenAssignmentDetails(_ context.Context, _ string, beadID string) (*bv.BeadAssignmentDetails, error) {
+	return &bv.BeadAssignmentDetails{ID: beadID, Status: "open"}, nil
 }
 
 func bulkSafeObserver(panes []tmux.Pane) func(context.Context, string) (statuspkg.SessionObservation, error) {

@@ -4,6 +4,7 @@ package robot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/process"
@@ -1700,6 +1702,11 @@ func (rm *RestartManager) TryRestart(ctx context.Context, paneID, agentType stri
 		AgentType:   agentType,
 		AttemptedAt: time.Now(),
 	}
+	if err := agent.AgentType(agentType).ValidateAutomatedRelaunch(); err != nil {
+		result.Type = RestartNone
+		result.Reason = err.Error()
+		return result
+	}
 
 	// Check if restarts are enabled
 	if !rm.config.Enabled {
@@ -2110,6 +2117,15 @@ func ClearRestartManager(session string) {
 // AutoRestartUnhealthyAgent checks agent health and restarts if needed.
 // shellPID is the tmux pane's shell PID for PID-based liveness checking (0 to skip).
 func AutoRestartUnhealthyAgent(ctx context.Context, session, paneID, agentType string, shellPID int, alerter AlerterInterface) *RestartResult {
+	if err := agent.AgentType(agentType).ValidateAutomatedRelaunch(); err != nil {
+		return &RestartResult{
+			PaneID:    paneID,
+			AgentType: agentType,
+			Type:      RestartNone,
+			Reason:    err.Error(),
+		}
+	}
+
 	// Check current health (paneID can be just the pane or full session:pane target)
 	check, err := CheckAgentHealthWithActivity(paneID, agentType, shellPID)
 	if err != nil {
@@ -2223,10 +2239,20 @@ func BuildAutoRestartStuckOutput(session string, stuckPanes []int, restarted []i
 
 // GetAutoRestartStuck detects stuck agent panes and optionally restarts them.
 // It uses GetSessionHealth() to detect panes idle beyond the threshold,
-// then calls GetRestartPane() for each stuck pane.
-func GetAutoRestartStuck(opts AutoRestartStuckOptions) (*AutoRestartStuckOutput, error) {
+// then calls the cancellation-aware restart engine for each stuck pane.
+func GetAutoRestartStuck(ctx context.Context, opts AutoRestartStuckOptions) (*AutoRestartStuckOutput, error) {
 	if opts.Threshold <= 0 {
 		opts.Threshold = DefaultStuckThreshold
+	}
+	if ctx == nil {
+		output := BuildAutoRestartStuckOutput(opts.Session, nil, nil, nil, opts.Threshold, opts.DryRun)
+		output.RobotResponse = NewErrorResponse(errors.New("auto-restart-stuck context is required"), ErrCodeInternalError, "Retry the command")
+		return output, nil
+	}
+	if err := ctx.Err(); err != nil {
+		output := BuildAutoRestartStuckOutput(opts.Session, nil, nil, nil, opts.Threshold, opts.DryRun)
+		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry after the cancellation or timeout condition clears")
+		return output, nil
 	}
 
 	// Get current health state
@@ -2246,28 +2272,88 @@ func GetAutoRestartStuck(opts AutoRestartStuckOptions) (*AutoRestartStuckOutput,
 		}
 		return output, nil
 	}
+	if err := ctx.Err(); err != nil {
+		output := BuildAutoRestartStuckOutput(opts.Session, nil, nil, nil, opts.Threshold, opts.DryRun)
+		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry after the cancellation or timeout condition clears")
+		return output, nil
+	}
 
 	// Classify stuck panes
 	stuckPanes := ClassifyStuckPanes(healthOutput.Agents, opts.Threshold)
-
-	// Dry-run: report without restarting
+	// Preview is observational: report every candidate even when its lifecycle
+	// protocol is intentionally unavailable. Capability validation belongs at
+	// the actuation boundary below.
 	if opts.DryRun {
 		return BuildAutoRestartStuckOutput(opts.Session, stuckPanes, nil, nil, opts.Threshold, true), nil
 	}
+	if err := validateAutoRestartStuckAgents(healthOutput.Agents, stuckPanes); err != nil {
+		output := BuildAutoRestartStuckOutput(opts.Session, stuckPanes, nil, nil, opts.Threshold, opts.DryRun)
+		output.RobotResponse = NewErrorResponse(err, ErrCodeNotImplemented, agent.GrokPhaseOneCapabilityHint)
+		return output, nil
+	}
 
 	// Restart stuck panes
+	restarted, failed, restartErr := restartAutoRestartStuckPanes(ctx, opts, healthOutput.Agents, stuckPanes, GetRestartPaneContext)
+	if restartErr != nil {
+		output := BuildAutoRestartStuckOutput(opts.Session, stuckPanes, restarted, failed, opts.Threshold, false)
+		code := ErrCodeNotImplemented
+		hint := agent.GrokPhaseOneCapabilityHint
+		if errors.Is(restartErr, context.Canceled) || errors.Is(restartErr, context.DeadlineExceeded) {
+			code = ErrCodeTimeout
+			hint = "Retry after the cancellation or timeout condition clears"
+		}
+		output.RobotResponse = NewErrorResponse(restartErr, code, hint)
+		return output, nil
+	}
+
+	return BuildAutoRestartStuckOutput(opts.Session, stuckPanes, restarted, failed, opts.Threshold, false), nil
+}
+
+func validateAutoRestartStuckAgents(agents []SessionAgentHealth, stuckPanes []int) error {
+	stuck := make(map[int]struct{}, len(stuckPanes))
+	for _, pane := range stuckPanes {
+		stuck[pane] = struct{}{}
+	}
+	for _, health := range agents {
+		if _, ok := stuck[health.Pane]; !ok {
+			continue
+		}
+		if err := agent.AgentType(health.AgentType).ValidateAutomatedRelaunch(); err != nil {
+			return fmt.Errorf("pane %d (%s): %w", health.Pane, health.AgentType, err)
+		}
+	}
+	return nil
+}
+
+type autoRestartStuckPaneFunc func(context.Context, RestartPaneOptions) (*RestartPaneOutput, error)
+
+func restartAutoRestartStuckPanes(ctx context.Context, opts AutoRestartStuckOptions, agents []SessionAgentHealth, stuckPanes []int, restart autoRestartStuckPaneFunc) ([]int, []int, error) {
+	if ctx == nil {
+		return nil, nil, errors.New("auto-restart-stuck context is required")
+	}
+	if err := validateAutoRestartStuckAgents(agents, stuckPanes); err != nil {
+		return nil, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	var restarted, failed []int
 	for _, paneIdx := range stuckPanes {
-		restartOpts := autoRestartStuckPaneOptions(opts, paneIdx)
-		restartOut, restartErr := GetRestartPane(restartOpts)
-		if restartErr != nil || len(restartOut.Failed) > 0 {
+		restartOut, restartErr := restart(ctx, autoRestartStuckPaneOptions(opts, paneIdx))
+		if errors.Is(restartErr, context.Canceled) || errors.Is(restartErr, context.DeadlineExceeded) {
+			failed = append(failed, paneIdx)
+			return restarted, failed, restartErr
+		}
+		if restartErr != nil || restartOut == nil || !restartOut.Success || len(restartOut.Failed) > 0 {
 			failed = append(failed, paneIdx)
 		} else {
 			restarted = append(restarted, paneIdx)
 		}
+		if err := ctx.Err(); err != nil {
+			return restarted, failed, err
+		}
 	}
-
-	return BuildAutoRestartStuckOutput(opts.Session, stuckPanes, restarted, failed, opts.Threshold, false), nil
+	return restarted, failed, nil
 }
 
 func autoRestartStuckPaneOptions(opts AutoRestartStuckOptions, paneIdx int) RestartPaneOptions {
@@ -2280,8 +2366,8 @@ func autoRestartStuckPaneOptions(opts AutoRestartStuckOptions, paneIdx int) Rest
 
 // PrintAutoRestartStuck outputs the auto-restart-stuck result as JSON.
 // This is a thin wrapper around GetAutoRestartStuck() for CLI output.
-func PrintAutoRestartStuck(opts AutoRestartStuckOptions) error {
-	output, err := GetAutoRestartStuck(opts)
+func PrintAutoRestartStuck(ctx context.Context, opts AutoRestartStuckOptions) error {
+	output, err := GetAutoRestartStuck(ctx, opts)
 	if err != nil {
 		return err
 	}

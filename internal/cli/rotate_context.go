@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
@@ -328,7 +329,7 @@ Examples:
 			if len(args) > 0 {
 				sessionFilter = args[0]
 			}
-			return runContextRotationPending(sessionFilter)
+			return runContextRotationPending(cmd.Context(), sessionFilter)
 		},
 	}
 
@@ -390,12 +391,12 @@ func (r *PendingRotationsResult) JSON() interface{} {
 	return r
 }
 
-func runContextRotationPending(sessionFilter string) error {
+func runContextRotationPending(ctx context.Context, sessionFilter string) error {
 	var pending []*ctxmon.PendingRotation
 	var err error
 
 	if sessionFilter != "" {
-		sessionFilter, err = normalizeProjectScopedSessionName(sessionFilter, true)
+		sessionFilter, err = normalizeProjectScopedSessionName(ctx, sessionFilter, true)
 		if err != nil {
 			return err
 		}

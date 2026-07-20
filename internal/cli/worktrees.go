@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -37,13 +38,13 @@ func newWorktreesListCmd() *cobra.Command {
 		Short: "List all worktrees for the current session",
 		Long:  `List all Git worktrees created for agents in the current session.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, session, err := resolveWorktreeScope("")
+			dir, session, err := resolveWorktreeScope(cmd.Context(), "")
 			if err != nil {
 				return err
 			}
 
 			manager := worktrees.NewManager(dir, session)
-			worktreeList, err := manager.ListWorktrees()
+			worktreeList, err := manager.ListWorktrees(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("failed to list worktrees: %w", err)
 			}
@@ -93,7 +94,7 @@ a non-fast-forward merge to preserve the merge history.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			agentName := args[0]
-			dir, session, err := resolveWorktreeScope("")
+			dir, session, err := resolveWorktreeScope(cmd.Context(), "")
 			if err != nil {
 				return err
 			}
@@ -101,7 +102,7 @@ a non-fast-forward merge to preserve the merge history.`,
 			manager := worktrees.NewManager(dir, session)
 
 			// Check if worktree exists
-			info, err := manager.GetWorktreeForAgent(agentName)
+			info, err := manager.GetWorktreeForAgent(cmd.Context(), agentName)
 			if err != nil {
 				return fmt.Errorf("failed to get worktree info: %w", err)
 			}
@@ -115,7 +116,7 @@ a non-fast-forward merge to preserve the merge history.`,
 			}
 
 			// Perform the merge
-			if err := manager.MergeBack(agentName); err != nil {
+			if err := manager.MergeBack(cmd.Context(), agentName); err != nil {
 				return fmt.Errorf("failed to merge worktree: %w", err)
 			}
 
@@ -142,7 +143,7 @@ func newWorktreesCleanCmd() *cobra.Command {
 By default, cleans up the current session. Use --session to specify
 		a different session.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, session, err := resolveWorktreeScope(sessionName)
+			dir, session, err := resolveWorktreeScope(cmd.Context(), sessionName)
 			if err != nil {
 				return err
 			}
@@ -150,7 +151,7 @@ By default, cleans up the current session. Use --session to specify
 			manager := worktrees.NewManager(dir, session)
 
 			// List worktrees first to show what will be removed
-			worktreeList, err := manager.ListWorktrees()
+			worktreeList, err := manager.ListWorktrees(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("failed to list worktrees: %w", err)
 			}
@@ -176,7 +177,7 @@ By default, cleans up the current session. Use --session to specify
 			}
 
 			// Perform cleanup
-			if err := manager.Cleanup(); err != nil {
+			if err := manager.Cleanup(cmd.Context()); err != nil {
 				return fmt.Errorf("failed to cleanup worktrees: %w", err)
 			}
 
@@ -202,7 +203,7 @@ in the worktree.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			agentName := args[0]
-			dir, session, err := resolveWorktreeScope("")
+			dir, session, err := resolveWorktreeScope(cmd.Context(), "")
 			if err != nil {
 				return err
 			}
@@ -210,7 +211,7 @@ in the worktree.`,
 			manager := worktrees.NewManager(dir, session)
 
 			// Check if worktree exists
-			info, err := manager.GetWorktreeForAgent(agentName)
+			info, err := manager.GetWorktreeForAgent(cmd.Context(), agentName)
 			if err != nil {
 				return fmt.Errorf("failed to get worktree info: %w", err)
 			}
@@ -220,7 +221,7 @@ in the worktree.`,
 			}
 
 			// Remove the worktree
-			if err := manager.RemoveWorktree(agentName); err != nil {
+			if err := manager.RemoveWorktree(cmd.Context(), agentName); err != nil {
 				return fmt.Errorf("failed to remove worktree: %w", err)
 			}
 
@@ -230,10 +231,10 @@ in the worktree.`,
 	}
 }
 
-func resolveWorktreeScope(session string) (string, string, error) {
+func resolveWorktreeScope(ctx context.Context, session string) (string, string, error) {
 	session = strings.TrimSpace(session)
 	if session != "" {
-		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+		resolved, err := normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 		if err != nil {
 			return "", "", err
 		}
@@ -247,7 +248,7 @@ func resolveWorktreeScope(session string) (string, string, error) {
 		return projectDir, defaultProjectScopedSession(projectDir), nil
 	}
 
-	projectDir, err := resolveExplicitProjectDirForSession(session)
+	projectDir, err := resolveExplicitProjectDirForSessionContext(ctx, session)
 	if err != nil {
 		return "", "", err
 	}

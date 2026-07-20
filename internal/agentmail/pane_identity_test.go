@@ -140,13 +140,7 @@ func TestResolveIdentityIgnoresCanonicalSymlink(t *testing.T) {
 }
 
 func TestWriteLegacyCompatIdentityDoesNotOverwriteSymlinkTarget(t *testing.T) {
-	projectKey := filepath.Join(t.TempDir(), "project")
-	paneID := "%legacy-symlink"
-	legacyPath := fmt.Sprintf("/tmp/agent-mail-name.%s.%s", projectSha1Short(projectKey), sanitizePaneID(paneID))
-	if _, err := os.Lstat(legacyPath); err == nil {
-		t.Skipf("legacy identity path already exists: %s", legacyPath)
-	}
-	t.Cleanup(func() { _ = os.Remove(legacyPath) })
+	legacyPath := filepath.Join(t.TempDir(), "agent-mail-name.test.legacy-symlink")
 
 	outsidePath := filepath.Join(t.TempDir(), "outside-identity")
 	outsideContent := []byte("OutsideName\n")
@@ -157,7 +151,7 @@ func TestWriteLegacyCompatIdentityDoesNotOverwriteSymlinkTarget(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	writtenPath := WriteLegacyCompatIdentity(projectKey, paneID, "BlueLake")
+	writtenPath := writeLegacyCompatIdentityAtPath(legacyPath, "BlueLake")
 	if writtenPath != legacyPath {
 		t.Fatalf("legacy path = %q, want %q", writtenPath, legacyPath)
 	}

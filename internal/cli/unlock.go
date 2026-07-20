@@ -37,7 +37,7 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
 			patterns := args[1:]
-			return runUnlock(session, patterns, all, paneIdx, taskID)
+			return runUnlock(cmd.Context(), session, patterns, all, paneIdx, taskID)
 		},
 	}
 
@@ -86,12 +86,12 @@ type ReleaseConflict struct {
 	Reason string `json:"reason"`
 }
 
-func runUnlock(session string, patterns []string, all bool, paneIdx int, taskID string) error {
+func runUnlock(ctx context.Context, session string, patterns []string, all bool, paneIdx int, taskID string) error {
 	if len(patterns) == 0 && !all {
 		return fmt.Errorf("specify patterns to release or use --all")
 	}
 
-	session, projectKey, err := resolveAgentMailScope(session)
+	session, projectKey, err := resolveAgentMailScope(ctx, session)
 	if err != nil {
 		return err
 	}

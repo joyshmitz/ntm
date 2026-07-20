@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
@@ -577,6 +578,10 @@ func GetProbe(opts ProbeOptions) (*ProbeOutput, error) {
 		)
 		return output, nil
 	}
+	if err := validateProbePane(*targetPane); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeNotImplemented, agent.GrokPromptDeliveryCapabilityHint)
+		return output, nil
+	}
 
 	// Build target string for tmux commands
 	target := fmt.Sprintf("%s:%d.%d", opts.Session, targetPane.WindowIndex, opts.Pane)
@@ -645,8 +650,32 @@ func probeEntryFromOutput(output *ProbeOutput) ProbeEntry {
 	return entry
 }
 
+func validateProbePane(pane tmux.Pane) error {
+	if err := pane.Type.ValidateAutomatedPromptDelivery(); err != nil {
+		return fmt.Errorf("pane %d (%s) does not support automated probe input: %w", pane.Index, pane.Type.Canonical(), err)
+	}
+	return nil
+}
+
+func validateProbeTargets(panes []tmux.Pane, targetPanes []int) error {
+	panesByIndex := make(map[int]tmux.Pane, len(panes))
+	for _, pane := range panes {
+		panesByIndex[pane.Index] = pane
+	}
+	for _, paneIndex := range targetPanes {
+		pane, ok := panesByIndex[paneIndex]
+		if !ok {
+			continue
+		}
+		if err := validateProbePane(pane); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GetProbeSession probes panes in a session and returns aggregated output and exit code.
-// Exit code: 0 = all responsive, 1 = partial or complete failure.
+// Exit code: 0 = all responsive, 1 = partial or complete failure, 2 = unsupported.
 func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 	output := &ProbeSessionOutput{
 		RobotResponse: NewRobotResponse(true),
@@ -713,6 +742,10 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 	}
 
 	sort.Ints(targetPanes)
+	if err := validateProbeTargets(panes, targetPanes); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeNotImplemented, agent.GrokPromptDeliveryCapabilityHint)
+		return output, 2
+	}
 
 	for _, paneIndex := range targetPanes {
 		probeOutput, _ := GetProbe(ProbeOptions{
@@ -759,7 +792,7 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 }
 
 // PrintProbeSession outputs multi-pane probe results as JSON.
-// Returns 0 on success and 1 for partial or complete failure.
+// Returns 0 on success, 1 for partial or complete failure, and 2 when unsupported.
 func PrintProbeSession(opts ProbeSessionOptions) int {
 	output, exitCode := GetProbeSession(opts)
 	return printLegacyRobotOutput(output, output.RobotResponse, exitCode, "robot probe failed")

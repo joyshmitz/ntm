@@ -1,6 +1,6 @@
 // Package recipe provides session preset definitions (recipes) for NTM.
 // Recipes define reusable session configurations specifying agent types,
-// counts, and optional model/persona overrides.
+// counts, and optional model, effort, and persona overrides.
 package recipe
 
 import (
@@ -25,10 +25,11 @@ type Recipe struct {
 
 // AgentSpec defines an agent configuration within a recipe.
 type AgentSpec struct {
-	Type    string `toml:"type"`              // cc, cod, gmi
-	Count   int    `toml:"count"`             // Number of agents
-	Model   string `toml:"model,omitempty"`   // Optional model override (opus, sonnet, etc.)
-	Persona string `toml:"persona,omitempty"` // Optional persona name
+	Type            string `toml:"type"`                       // cc, cod, gmi, grok, etc.
+	Count           int    `toml:"count"`                      // Number of agents
+	Model           string `toml:"model,omitempty"`            // Optional model override
+	ReasoningEffort string `toml:"reasoning_effort,omitempty"` // Optional reasoning-effort override
+	Persona         string `toml:"persona,omitempty"`          // Optional persona name
 }
 
 // TotalAgents returns the total number of agents in the recipe.
@@ -296,6 +297,7 @@ func normalizeRecipe(recipe *Recipe) error {
 func normalizeRecipeAgentSpec(spec *AgentSpec) error {
 	spec.Type = strings.TrimSpace(spec.Type)
 	spec.Model = strings.TrimSpace(spec.Model)
+	spec.ReasoningEffort = strings.TrimSpace(spec.ReasoningEffort)
 	spec.Persona = strings.TrimSpace(spec.Persona)
 
 	canonical, err := normalizeRecipeAgentType(spec.Type)
@@ -316,6 +318,8 @@ func normalizeRecipeAgentType(raw string) (string, error) {
 		return string(agentpkg.AgentTypeGemini), nil
 	case agentpkg.AgentTypeAntigravity:
 		return string(agentpkg.AgentTypeAntigravity), nil
+	case agentpkg.AgentTypeGrok:
+		return string(agentpkg.AgentTypeGrok), nil
 	case agentpkg.AgentTypeCursor:
 		return string(agentpkg.AgentTypeCursor), nil
 	case agentpkg.AgentTypeWindsurf:

@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -40,25 +42,31 @@ Examples:
   ntm respawn myproject --dry-run    # Preview which panes would be restarted`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRespawn(args[0], force, panes, agentType, all, dryRun)
+			return runRespawn(cmd.Context(), args[0], force, panes, agentType, all, dryRun)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "skip confirmation")
 	cmd.Flags().StringVarP(&panes, "panes", "p", "", "comma-separated pane indices to restart (e.g., 1,2,3)")
-	cmd.Flags().StringVarP(&agentType, "type", "t", "", "filter by agent type (cc, claude, cod, codex, gmi, gemini, agy, antigravity)")
+	cmd.Flags().StringVarP(&agentType, "type", "t", "", "filter by agent type (cc, claude, cod, codex, gmi, gemini, agy, antigravity, grok, grok-build)")
 	cmd.Flags().BoolVarP(&all, "all", "a", false, "include all panes (including user pane)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview which panes would be restarted")
 
 	return cmd
 }
 
-func runRespawn(session string, force bool, panesFlag string, agentType string, all bool, dryRun bool) error {
+func runRespawn(ctx context.Context, session string, force bool, panesFlag string, agentType string, all bool, dryRun bool) error {
+	if ctx == nil {
+		return fmt.Errorf("respawn context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
 
-	res, err := ResolveSession(session, nil)
+	res, err := ResolveSessionWithOptionsContext(ctx, session, nil, SessionResolveOptions{})
 	if err != nil {
 		return err
 	}
@@ -67,7 +75,11 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 	}
 	session = res.Session
 
-	if !tmux.SessionExists(session) {
+	exists, err := tmux.SessionExistsContext(ctx, session)
+	if err != nil {
+		return fmt.Errorf("check session %q: %w", session, err)
+	}
+	if !exists {
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
@@ -81,7 +93,7 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 	}
 
 	// Get panes to determine targets
-	panes, err := tmux.GetPanes(session)
+	panes, err := tmux.GetPanesContext(ctx, session)
 	if err != nil {
 		return fmt.Errorf("failed to get panes: %w", err)
 	}
@@ -96,6 +108,9 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 	if len(targetPanes) == 0 {
 		fmt.Println("No panes matched the filter criteria.")
 		return nil
+	}
+	if err := validateRespawnTargets(targetPanes); err != nil {
+		return err
 	}
 
 	// Dry-run mode
@@ -122,7 +137,7 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 	// CLIs after the respawn and ready-gates them (#187) — respawn-pane -k
 	// alone only restores the pane's default command (the login shell).
 	fmt.Printf("Restarting %d pane(s) (relaunching agent CLIs)...\n", len(targetPanes))
-	out, err := robot.GetRestartPane(robot.RestartPaneOptions{
+	out, err := robot.GetRestartPaneContext(ctx, robot.RestartPaneOptions{
 		Session: session,
 		Panes:   paneFilter,
 		Type:    agentType,
@@ -132,16 +147,16 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 	if err != nil {
 		return err
 	}
+	if out == nil {
+		return respawnResultError(nil)
+	}
+	resultErr := respawnResultError(out)
 
 	// Report results
 	if len(out.Restarted) > 0 {
 		fmt.Printf("Restarted panes: %s\n", strings.Join(out.Restarted, ", "))
 		for _, paneKey := range out.Restarted {
-			if relaunched, ok := out.AgentRelaunched[paneKey]; ok {
-				status := "agent relaunched"
-				if !relaunched {
-					status = "agent relaunch FAILED (pane left at a shell)"
-				}
+			if status, ok := respawnRelaunchDisplayStatus(out, paneKey); ok {
 				fmt.Printf("  - Pane %s: %s\n", paneKey, status)
 			}
 		}
@@ -151,10 +166,68 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 		for _, f := range out.Failed {
 			fmt.Printf("  - %s: %s\n", f.Pane, f.Reason)
 		}
-		return fmt.Errorf("%d pane(s) failed to restart cleanly", len(out.Failed))
+		if resultErr == nil {
+			resultErr = fmt.Errorf("%d pane(s) failed to restart cleanly", len(out.Failed))
+		}
 	}
 
+	return resultErr
+}
+
+func respawnRelaunchDisplayStatus(out *robot.RestartPaneOutput, paneKey string) (string, bool) {
+	if out == nil {
+		return "", false
+	}
+	if status, ok := out.AgentRelaunchStatus[paneKey]; ok {
+		switch status {
+		case robot.RestartAgentRelaunchReady:
+			return "agent relaunched and ready", true
+		case robot.RestartAgentRelaunchNotReady:
+			if out.ProcessAlive[paneKey] {
+				return "agent process is alive but not ready", true
+			}
+			return "agent did not relaunch", true
+		case robot.RestartAgentRelaunchUnknown:
+			if out.ProcessAlive[paneKey] {
+				return "agent relaunch status UNKNOWN (live child observed; inspect pane before retrying)", true
+			}
+			return "agent relaunch status UNKNOWN (inspect pane before retrying)", true
+		case robot.RestartAgentRelaunchFailed:
+			return "agent relaunch FAILED", true
+		default:
+			return fmt.Sprintf("agent relaunch status %q (inspect pane)", status), true
+		}
+	}
+	if relaunched, ok := out.AgentRelaunched[paneKey]; ok {
+		if relaunched {
+			return "agent relaunched", true
+		}
+		return "agent relaunch FAILED (pane left at a shell)", true
+	}
+	return "", false
+}
+
+func validateRespawnTargets(panes []tmux.Pane) error {
+	for _, pane := range panes {
+		agentType := respawnPaneAgentType(pane)
+		if err := agent.AgentType(agentType).ValidateAutomatedRelaunch(); err != nil {
+			return fmt.Errorf("pane %d (%s): %w", pane.Index, agentType, err)
+		}
+	}
 	return nil
+}
+
+func respawnResultError(out *robot.RestartPaneOutput) error {
+	if out == nil {
+		return fmt.Errorf("respawn failed: empty restart response")
+	}
+	if out.Success {
+		return nil
+	}
+	if out.ErrorCode != "" {
+		return fmt.Errorf("respawn unavailable (%s): %s", out.ErrorCode, out.Error)
+	}
+	return fmt.Errorf("respawn failed: %s", out.Error)
 }
 
 func selectRespawnTargets(panes []tmux.Pane, paneFilterMap map[string]bool, agentType string, all bool) []tmux.Pane {

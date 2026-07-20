@@ -21,19 +21,20 @@ import (
 type ErrorCode string
 
 const (
-	ErrInvalidRequest     ErrorCode = "invalid_request"
-	ErrInvalidSelector    ErrorCode = "invalid_selector"
-	ErrNoTargets          ErrorCode = "no_targets"
-	ErrOrdering           ErrorCode = "target_ordering_failed"
-	ErrMessageBuild       ErrorCode = "message_build_failed"
-	ErrRedaction          ErrorCode = "redaction_failed"
-	ErrRedactionBlocked   ErrorCode = "redaction_blocked"
-	ErrProtocol           ErrorCode = "protocol_failed"
-	ErrLifecycle          ErrorCode = "lifecycle_failed"
-	ErrPacing             ErrorCode = "pacing_failed"
-	ErrDelivery           ErrorCode = "delivery_failed"
-	ErrAlreadyDispatched  ErrorCode = "already_dispatched"
-	ErrPreparedByOtherSvc ErrorCode = "prepared_by_other_service"
+	ErrInvalidRequest            ErrorCode = "invalid_request"
+	ErrInvalidSelector           ErrorCode = "invalid_selector"
+	ErrNoTargets                 ErrorCode = "no_targets"
+	ErrOrdering                  ErrorCode = "target_ordering_failed"
+	ErrMessageBuild              ErrorCode = "message_build_failed"
+	ErrRedaction                 ErrorCode = "redaction_failed"
+	ErrRedactionBlocked          ErrorCode = "redaction_blocked"
+	ErrPromptDeliveryUnsupported ErrorCode = "prompt_delivery_unsupported"
+	ErrProtocol                  ErrorCode = "protocol_failed"
+	ErrLifecycle                 ErrorCode = "lifecycle_failed"
+	ErrPacing                    ErrorCode = "pacing_failed"
+	ErrDelivery                  ErrorCode = "delivery_failed"
+	ErrAlreadyDispatched         ErrorCode = "already_dispatched"
+	ErrPreparedByOtherSvc        ErrorCode = "prepared_by_other_service"
 )
 
 // Error carries a machine-readable failure code without exposing message
@@ -526,6 +527,9 @@ func (s *Service) Prepare(ctx context.Context, req Request) (prepared *Prepared,
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidatePromptDeliveryTargets(targets); err != nil {
+		return nil, err
+	}
 	orderedTargets, err := s.orderer.OrderTargets(ctx, OrderInput{
 		Session: req.Session,
 		Targets: cloneTargets(targets),
@@ -796,6 +800,25 @@ func PlanTargets(req Request) ([]Target, error) {
 		return nil, &Error{Code: ErrNoTargets, Err: errors.New("no panes matched the target policy")}
 	}
 	return targets, nil
+}
+
+// ValidatePromptDeliveryTargets rejects agents whose prompt-delivery protocol
+// is not implemented. Callers that combine prompt delivery with another
+// actuation can use this pure preflight before performing that actuation.
+func ValidatePromptDeliveryTargets(targets []Target) error {
+	for _, target := range targets {
+		err := target.AgentType.ValidateAutomatedPromptDelivery()
+		if err == nil {
+			continue
+		}
+		unsupported := cloneTarget(target)
+		return &Error{
+			Code:   ErrPromptDeliveryUnsupported,
+			Target: &unsupported,
+			Err:    err,
+		}
+	}
+	return nil
 }
 
 func canonicalizePanes(input []tmux.Pane) ([]tmux.Pane, error) {

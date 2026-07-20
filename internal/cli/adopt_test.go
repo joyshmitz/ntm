@@ -64,7 +64,7 @@ func TestAdoptedAgentCountsTotal(t *testing.T) {
 	}{
 		{name: "all zeros", counts: AdoptedAgentCounts{}, expected: 0},
 		{name: "single type", counts: AdoptedAgentCounts{Cursor: 2}, expected: 2},
-		{name: "mixed", counts: AdoptedAgentCounts{CC: 3, Cod: 2, Gmi: 1, Aider: 1, User: 1}, expected: 8},
+		{name: "mixed", counts: AdoptedAgentCounts{CC: 3, Cod: 2, Gmi: 1, Grok: 2, Aider: 1, User: 1}, expected: 10},
 	}
 
 	for _, tt := range tests {
@@ -77,9 +77,24 @@ func TestAdoptedAgentCountsTotal(t *testing.T) {
 }
 
 func TestAdoptedAgentCountsSummary(t *testing.T) {
-	counts := AdoptedAgentCounts{Cod: 2, Cursor: 1, User: 1}
-	if got, want := counts.Summary(), "cod:2, cursor:1, user:1"; got != want {
+	counts := AdoptedAgentCounts{Cod: 2, Grok: 1, Cursor: 1, User: 1}
+	if got, want := counts.Summary(), "cod:2, grok:1, cursor:1, user:1"; got != want {
 		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+}
+
+func TestAdoptedAgentCountsCanonicalGrokProjection(t *testing.T) {
+	counts := AdoptedAgentCounts{}
+	counts.increment(agentpkg.AgentType(" XAI_GROK_BUILD "))
+
+	if counts.Grok != 1 {
+		t.Fatalf("Grok count = %d, want 1", counts.Grok)
+	}
+	if got := counts.countFor(agentpkg.AgentType("grok-build")); got != 1 {
+		t.Fatalf("countFor(grok-build) = %d, want 1", got)
+	}
+	if got := counts.Total(); got != 1 {
+		t.Fatalf("Total() = %d, want 1", got)
 	}
 }
 
@@ -144,7 +159,7 @@ func TestValidateAdoptAssignments(t *testing.T) {
 		{
 			name:        "no panes",
 			assignments: map[agentpkg.AgentType][]paneSpec{},
-			wantErr:     "use one or more of --cc, --cod, --gmi, --agy, --cursor, --windsurf, --aider, --oc, --ollama, or --user",
+			wantErr:     "use one or more of --cc, --cod, --gmi, --agy, --grok, --cursor, --windsurf, --aider, --oc, --ollama, or --user",
 		},
 	}
 
@@ -173,6 +188,9 @@ func TestNewAdoptCmdSupportsAllAgentFlags(t *testing.T) {
 		if flag := cmd.Flags().Lookup(spec.Flag); flag == nil {
 			t.Fatalf("expected flag --%s to be registered", spec.Flag)
 		}
+	}
+	if flag := cmd.Flags().Lookup("grok"); flag == nil || !strings.Contains(flag.Usage, "Grok Build") {
+		t.Fatalf("expected --grok flag with Grok Build help, got %+v", flag)
 	}
 }
 

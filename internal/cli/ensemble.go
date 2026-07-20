@@ -950,7 +950,7 @@ Use --force to synthesize even if some agents haven't completed.`,
 				if err != nil {
 					return err
 				}
-				return runEnsembleSynthesize(cmd.OutOrStdout(), resumeSession, opts)
+				return runEnsembleSynthesize(cmd.Context(), cmd.OutOrStdout(), resumeSession, opts)
 			}
 			res, err := resolveEnsembleStateCommandSessionForOutput(session, cmd.OutOrStdout(), machineJSON)
 			if err != nil {
@@ -960,7 +960,7 @@ Use --force to synthesize even if some agents haven't completed.`,
 				return nil
 			}
 			res.ExplainIfInferredForOutput(os.Stderr, machineJSON)
-			return runEnsembleSynthesize(cmd.OutOrStdout(), res.Session, opts)
+			return runEnsembleSynthesize(cmd.Context(), cmd.OutOrStdout(), res.Session, opts)
 		},
 	}
 
@@ -993,7 +993,7 @@ func validateSynthesizeOptions(opts synthesizeOptions) error {
 	return nil
 }
 
-func runEnsembleSynthesize(w io.Writer, session string, opts synthesizeOptions) error {
+func runEnsembleSynthesize(ctx context.Context, w io.Writer, session string, opts synthesizeOptions) error {
 	if err := validateSynthesizeOptions(opts); err != nil {
 		return err
 	}
@@ -1045,7 +1045,7 @@ func runEnsembleSynthesize(w io.Writer, session string, opts synthesizeOptions) 
 	var cacheContextHash string
 
 	if cacheEnabled {
-		projectDir, projErr := resolveEnsembleProjectDirForSessionForOutput(session, format == "json")
+		projectDir, projErr := resolveEnsembleProjectDirForSessionForOutput(ctx, session, format == "json")
 		if projErr != nil {
 			logger.Warn("mode output cache disabled (project dir)", "error", projErr)
 			cacheEnabled = false
@@ -1208,7 +1208,7 @@ func runEnsembleSynthesize(w io.Writer, session string, opts synthesizeOptions) 
 	}
 
 	if opts.Stream {
-		return streamEnsembleSynthesis(w, session, state, collector, synth, input, format, opts)
+		return streamEnsembleSynthesis(ctx, w, session, state, collector, synth, input, format, opts)
 	}
 
 	// Run synthesis
@@ -1258,6 +1258,7 @@ func runEnsembleSynthesize(w io.Writer, session string, opts synthesizeOptions) 
 }
 
 func streamEnsembleSynthesis(
+	commandCtx context.Context,
 	w io.Writer,
 	session string,
 	state *ensemble.EnsembleSession,
@@ -1301,7 +1302,7 @@ func streamEnsembleSynthesis(
 		}
 		resumeIndex = checkpoint.LastIndex
 	} else {
-		store, err = newEnsembleCheckpointStoreForSession(session)
+		store, err = newEnsembleCheckpointStoreForSession(commandCtx, session)
 		if err != nil {
 			return fmt.Errorf("open checkpoint store: %w", err)
 		}
@@ -1327,7 +1328,7 @@ func streamEnsembleSynthesis(
 		out = f
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(commandCtx, os.Interrupt)
 	defer stop()
 
 	startedAt := time.Now()
@@ -1643,7 +1644,7 @@ selector is shown.`,
 				session = args[0]
 			}
 
-			return runEnsembleExportFindings(cmd.OutOrStdout(), session, opts)
+			return runEnsembleExportFindings(cmd.Context(), cmd.OutOrStdout(), session, opts)
 		},
 	}
 
@@ -1658,7 +1659,7 @@ selector is shown.`,
 	return cmd
 }
 
-func runEnsembleExportFindings(w io.Writer, session string, opts exportFindingsOptions) error {
+func runEnsembleExportFindings(commandCtx context.Context, w io.Writer, session string, opts exportFindingsOptions) error {
 	format := strings.ToLower(strings.TrimSpace(opts.Format))
 	if format == "" {
 		format = "text"
@@ -1667,7 +1668,7 @@ func runEnsembleExportFindings(w io.Writer, session string, opts exportFindingsO
 		format = "json"
 	}
 
-	ctx, err := loadExportFindingsContextForOutput(w, session, opts, format == "json")
+	ctx, err := loadExportFindingsContextForOutput(commandCtx, w, session, opts, format == "json")
 	if err != nil {
 		return err
 	}
@@ -1720,7 +1721,7 @@ func runEnsembleExportFindings(w io.Writer, session string, opts exportFindingsO
 		}
 
 		beadID, err := func() (string, error) {
-			ctxTimeout, cancel := context.WithTimeout(context.Background(), defaultBrTimeout)
+			ctxTimeout, cancel := context.WithTimeout(commandCtx, defaultBrTimeout)
 			defer cancel()
 			return runBrCreate(ctxTimeout, ctx.ProjectDir, spec)
 		}()
@@ -1820,19 +1821,19 @@ func renderExportFindingsOutput(w io.Writer, payload exportFindingsOutput, forma
 	}
 }
 
-func loadExportFindingsContext(w io.Writer, session string, opts exportFindingsOptions) (*exportFindingsContext, error) {
-	return loadExportFindingsContextForOutput(w, session, opts, IsJSONOutput())
+func loadExportFindingsContext(commandCtx context.Context, w io.Writer, session string, opts exportFindingsOptions) (*exportFindingsContext, error) {
+	return loadExportFindingsContextForOutput(commandCtx, w, session, opts, IsJSONOutput())
 }
 
-func loadExportFindingsContextForOutput(w io.Writer, session string, opts exportFindingsOptions, machineJSON bool) (*exportFindingsContext, error) {
+func loadExportFindingsContextForOutput(commandCtx context.Context, w io.Writer, session string, opts exportFindingsOptions, machineJSON bool) (*exportFindingsContext, error) {
 	if opts.RunID != "" {
 		projectDir := ""
 		if strings.TrimSpace(session) != "" {
-			resolvedSession, err := normalizeProjectScopedSessionName(session, !machineJSON)
+			resolvedSession, err := normalizeProjectScopedSessionName(commandCtx, session, !machineJSON)
 			if err != nil {
 				return nil, err
 			}
-			projectDir, err = resolveExplicitProjectDirForSession(resolvedSession)
+			projectDir, err = resolveExplicitProjectDirForSessionContext(commandCtx, resolvedSession)
 			if err != nil {
 				return nil, err
 			}
@@ -1843,7 +1844,7 @@ func loadExportFindingsContextForOutput(w io.Writer, session string, opts export
 			return nil, err
 		}
 		if ctx.ProjectDir == "" {
-			projectDir, err = resolveEnsembleProjectDirForSessionForOutput(ctx.Session, machineJSON)
+			projectDir, err = resolveEnsembleProjectDirForSessionForOutput(commandCtx, ctx.Session, machineJSON)
 			if err != nil {
 				return nil, err
 			}
@@ -1861,7 +1862,7 @@ func loadExportFindingsContextForOutput(w io.Writer, session string, opts export
 	}
 	res.ExplainIfInferredForOutput(os.Stderr, machineJSON)
 	session = res.Session
-	projectDir, err := resolveEnsembleProjectDirForSessionForOutput(session, machineJSON)
+	projectDir, err := resolveEnsembleProjectDirForSessionForOutput(commandCtx, session, machineJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -1874,11 +1875,11 @@ func loadExportFindingsContextForOutput(w io.Writer, session string, opts export
 	return ctx, nil
 }
 
-func resolveEnsembleProjectDirForSession(session string) (string, error) {
-	return resolveEnsembleProjectDirForSessionForOutput(session, IsJSONOutput())
+func resolveEnsembleProjectDirForSession(ctx context.Context, session string) (string, error) {
+	return resolveEnsembleProjectDirForSessionForOutput(ctx, session, IsJSONOutput())
 }
 
-func resolveEnsembleProjectDirForSessionForOutput(session string, machineJSON bool) (string, error) {
+func resolveEnsembleProjectDirForSessionForOutput(ctx context.Context, session string, machineJSON bool) (string, error) {
 	session = strings.TrimSpace(session)
 	if session == "" {
 		projectDir := GetProjectRoot()
@@ -1887,13 +1888,13 @@ func resolveEnsembleProjectDirForSessionForOutput(session string, machineJSON bo
 		}
 		return projectDir, nil
 	}
-	resolved, err := normalizeProjectScopedSessionName(session, !machineJSON)
+	resolved, err := normalizeProjectScopedSessionName(ctx, session, !machineJSON)
 	if err != nil {
 		return "", err
 	}
 	session = resolved
 
-	return resolveExplicitProjectDirForSession(session)
+	return resolveExplicitProjectDirForSessionContext(ctx, session)
 }
 
 func loadExportFindingsFromRun(runID, projectDir string) (*exportFindingsContext, error) {
@@ -2494,8 +2495,8 @@ func normalizeOfflineCapableEnsembleSessionName(session string, allowPrefix bool
 	return config.FormatSessionName(resolvedBase, label), nil
 }
 
-func newEnsembleCheckpointStoreForSession(session string) (*ensemble.CheckpointStore, error) {
-	projectDir, err := resolveEnsembleProjectDirForSession(session)
+func newEnsembleCheckpointStoreForSession(ctx context.Context, session string) (*ensemble.CheckpointStore, error) {
+	projectDir, err := resolveEnsembleProjectDirForSession(ctx, session)
 	if err != nil {
 		return nil, err
 	}

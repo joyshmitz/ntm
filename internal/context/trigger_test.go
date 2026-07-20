@@ -1,10 +1,12 @@
 package context
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -247,6 +249,79 @@ func TestTriggerCompactionNow_AgentNotFound(t *testing.T) {
 	_, err := trigger.TriggerCompactionNow("nonexistent")
 	if err == nil {
 		t.Error("Expected error for nonexistent agent")
+	}
+}
+
+func TestCompactionTrigger_GrokPreflightRejectsBeforeMutation(t *testing.T) {
+	config := DefaultCompactionTriggerConfig()
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	compactor := NewCompactor(monitor, DefaultCompactorConfig())
+	predictor := NewContextPredictor(DefaultPredictorConfig())
+	trigger := NewCompactionTrigger(config, monitor, compactor, predictor)
+	sender := NewMockPaneSpawner()
+	trigger.inputSender = sender
+
+	monitor.RegisterAgent("grok-agent", "%9", "grok-3")
+	monitor.SetAgentType("grok-agent", string(tmux.AgentGrok))
+	state := monitor.GetState("grok-agent")
+	triggered := 0
+	completed := 0
+	trigger.SetCompactionTriggeredHandler(func(CompactionTriggerEvent) { triggered++ })
+	trigger.SetCompactionCompleteHandler(func(CompactionTriggerEvent) { completed++ })
+
+	trigger.triggerCompaction("grok-agent", state, &Prediction{
+		CurrentUsage:  0.95,
+		ShouldCompact: true,
+	})
+
+	if triggered != 0 || completed != 0 {
+		t.Fatalf("handler calls = triggered:%d completed:%d, want zero", triggered, completed)
+	}
+	if len(sender.sentKeys["%9"]) != 0 || len(sender.sentBuffers["%9"]) != 0 {
+		t.Fatalf("pane input was sent before Grok capability rejection: keys=%v buffers=%v", sender.sentKeys["%9"], sender.sentBuffers["%9"])
+	}
+	if _, ok := trigger.lastCompaction["grok-agent"]; ok {
+		t.Fatal("unsupported Grok compaction changed cooldown state")
+	}
+	if trigger.activeCompactions["grok-agent"] {
+		t.Fatal("unsupported Grok compaction changed active state")
+	}
+}
+
+func TestCompactionTrigger_GrokDirectPathsSendNothing(t *testing.T) {
+	config := DefaultCompactionTriggerConfig()
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	compactor := NewCompactor(monitor, DefaultCompactorConfig())
+	predictor := NewContextPredictor(DefaultPredictorConfig())
+	trigger := NewCompactionTrigger(config, monitor, compactor, predictor)
+	sender := NewMockPaneSpawner()
+	trigger.inputSender = sender
+	recoverySends := 0
+	trigger.sendKeysForAgent = func(string, string, bool, tmux.AgentType) error {
+		recoverySends++
+		return nil
+	}
+	trigger.sleep = func(time.Duration) {
+		t.Fatal("unsupported Grok path waited before rejecting capability")
+	}
+
+	monitor.RegisterAgent("grok-agent", "%9", "grok-3")
+	monitor.SetAgentType("grok-agent", string(tmux.AgentGrok))
+
+	_, err := trigger.TriggerCompactionNow("grok-agent")
+	if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		t.Fatalf("TriggerCompactionNow() error = %v, want automated prompt delivery sentinel", err)
+	}
+	trigger.injectRecoveryContext("%9", tmux.AgentGrok)
+
+	if recoverySends != 0 {
+		t.Fatalf("recovery sends = %d, want zero", recoverySends)
+	}
+	if len(sender.sentKeys["%9"]) != 0 || len(sender.sentBuffers["%9"]) != 0 {
+		t.Fatalf("compaction input was sent: keys=%v buffers=%v", sender.sentKeys["%9"], sender.sentBuffers["%9"])
+	}
+	if result := trigger.executeCompaction("grok-agent", "%9", tmux.AgentGrok); result == nil || result.Success || !strings.Contains(result.Error, agent.GrokPromptDeliveryCapabilityHint) {
+		t.Fatalf("executeCompaction() result = %+v, want unsupported Grok failure", result)
 	}
 }
 

@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	assignpkg "github.com/Dicklesworthstone/ntm/internal/assign"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
@@ -228,7 +230,8 @@ func createAssignProjectRoot(t *testing.T) (string, string) {
 	return root, nested
 }
 
-func TestResolveAssignProjectDirUsesProjectRootFromSubdir(t *testing.T) {
+func TestResolveAssignProjectDirRejectsCallerCWDForExplicitSession(t *testing.T) {
+	isolateSessionAgentStorage(t)
 	root, nested := createAssignProjectRoot(t)
 
 	oldCfg := cfg
@@ -241,12 +244,9 @@ func TestResolveAssignProjectDirUsesProjectRootFromSubdir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	got, err := resolveAssignProjectDir("demo")
-	if err != nil {
-		t.Fatalf("resolveAssignProjectDir() error = %v", err)
-	}
-	if got != root {
-		t.Fatalf("resolveAssignProjectDir() = %q, want %q", got, root)
+	got, err := resolveAssignProjectDir(t.Context(), "demo")
+	if err == nil || got != "" || !strings.Contains(err.Error(), "getting project root failed") {
+		t.Fatalf("resolveAssignProjectDir() = %q, %v; want explicit-session failure instead of caller CWD %q", got, err, root)
 	}
 }
 
@@ -263,7 +263,7 @@ func TestResolveAssignProjectDirRejectsInvalidSessionName(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	_, err := resolveAssignProjectDir("../escape")
+	_, err := resolveAssignProjectDir(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -293,7 +293,7 @@ func TestResolveAssignProjectDirUsesSavedSessionAgentProjectKey(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	got, err := resolveAssignProjectDir("demo")
+	got, err := resolveAssignProjectDir(t.Context(), "demo")
 	if err != nil {
 		t.Fatalf("resolveAssignProjectDir() error = %v", err)
 	}
@@ -319,7 +319,7 @@ func TestResolveAssignProjectDirExplicitRepoOverridesSavedSessionProject(t *test
 	assignRepoPath = overrideProject
 	t.Cleanup(func() { assignRepoPath = previousRepo })
 
-	got, err := resolveAssignProjectDir("demo")
+	got, err := resolveAssignProjectDir(t.Context(), "demo")
 	if err != nil {
 		t.Fatalf("resolveAssignProjectDir() error = %v", err)
 	}
@@ -333,19 +333,24 @@ func TestResolveAssignProjectDirExplicitRepoOverridesSavedSessionProject(t *test
 }
 
 func TestResolveAssignProjectDirResolvesProjectScopedPrefix(t *testing.T) {
+	isolateSessionAgentStorage(t)
 	root, nested := createAssignProjectRoot(t)
 
 	oldCfg := cfg
 	cfg = &config.Config{ProjectsBase: filepath.Join(root, "projects-base")}
 	t.Cleanup(func() { cfg = oldCfg })
+	if err := os.MkdirAll(filepath.Join(cfg.ProjectsBase, "demo"), 0o755); err != nil {
+		t.Fatalf("create configured project prefix target: %v", err)
+	}
 
 	oldWd, _ := os.Getwd()
 	if err := os.Chdir(nested); err != nil {
 		t.Fatalf("chdir nested: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	saveSessionAgentForTest(t, "demo", root, "GreenCastle")
 
-	got, err := resolveAssignProjectDir("de")
+	got, err := resolveAssignProjectDir(t.Context(), "de")
 	if err != nil {
 		t.Fatalf("resolveAssignProjectDir() error = %v", err)
 	}
@@ -355,6 +360,7 @@ func TestResolveAssignProjectDirResolvesProjectScopedPrefix(t *testing.T) {
 }
 
 func TestReleaseFileReservationsWithIDsUsesResolvedProjectDir(t *testing.T) {
+	isolateSessionAgentStorage(t)
 	root, nested := createAssignProjectRoot(t)
 
 	oldCfg := cfg
@@ -374,6 +380,7 @@ func TestReleaseFileReservationsWithIDsUsesResolvedProjectDir(t *testing.T) {
 		t.Fatalf("chdir nested: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	saveSessionAgentForTest(t, "demo", root, "BlueLake")
 
 	barrier := &assignment.Assignment{
 		BeadID: "bd-123", AgentName: "BlueLake", ClearState: assignment.ClearStateReservationReleasing,
@@ -824,6 +831,7 @@ func TestReleaseAssignmentReservationsForClearRejectsIDPathBindingMismatch(t *te
 }
 
 func TestReserveFilesForBeadUsesResolvedProjectDir(t *testing.T) {
+	isolateSessionAgentStorage(t)
 	root, nested := createAssignProjectRoot(t)
 
 	oldCfg := cfg
@@ -839,6 +847,7 @@ func TestReserveFilesForBeadUsesResolvedProjectDir(t *testing.T) {
 		t.Fatalf("chdir nested: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	saveSessionAgentForTest(t, "demo", root, "BlueLake")
 
 	result := reserveFilesForBead(t.Context(), "demo", "bd-123", "Update internal/cli/assign.go", "claude", false, time.Second)
 	if result == nil {
@@ -1675,9 +1684,10 @@ func TestClassifyTriageRecForAssignment(t *testing.T) {
 			wantSkip: false,
 		},
 		{
-			name:     "empty status is treated as assignable",
-			rec:      bv.TriageRecommendation{ID: "bd-2"},
-			wantSkip: false,
+			name:       "empty status fails closed",
+			rec:        bv.TriageRecommendation{ID: "bd-2"},
+			wantSkip:   true,
+			wantReason: "not_open_status",
 		},
 		{
 			name:       "dependency blocker wins over status",
@@ -1772,6 +1782,614 @@ func TestClassifyTriageRecForAssignmentUsesCanonicalOperatorGates(t *testing.T) 
 			}, nil)
 			if skipped == nil || skipped.Reason != "operator_gated" {
 				t.Fatalf("label %q classification=%+v", label, skipped)
+			}
+		})
+	}
+}
+
+func TestAssignmentLoadsFullPlanBeforeSafetyFiltering(t *testing.T) {
+	previous := getActionableRecommendationsForAssign
+	t.Cleanup(func() { getActionableRecommendationsForAssign = previous })
+
+	recommendations := make([]bv.TriageRecommendation, 0, 102)
+	for i := 0; i < 101; i++ {
+		recommendations = append(recommendations, bv.TriageRecommendation{
+			ID:       fmt.Sprintf("ntm-gated-%03d", i),
+			Title:    "Requires operator action",
+			Status:   "open",
+			Priority: 1,
+			Labels:   []string{"operator-gated"},
+		})
+	}
+	recommendations = append(recommendations, bv.TriageRecommendation{
+		ID:       "ntm-eligible-below-cap",
+		Title:    "Eligible below the former cap",
+		Status:   "open",
+		Priority: 2,
+	})
+
+	getActionableRecommendationsForAssign = func(ctx context.Context, projectDir string, limit int) ([]bv.TriageRecommendation, error) {
+		if ctx == nil {
+			t.Fatal("assignment loader received nil context")
+		}
+		if projectDir != "/authoritative/project" {
+			t.Fatalf("projectDir = %q, want authoritative project", projectDir)
+		}
+		if limit != 0 {
+			t.Fatalf("limit = %d, want 0 so safety filtering sees the full plan", limit)
+		}
+		return recommendations, nil
+	}
+
+	loaded, err := loadActionableRecommendationsForAssignment(t.Context(), "/authoritative/project")
+	if err != nil {
+		t.Fatalf("load actionable recommendations: %v", err)
+	}
+	ready, skipped := partitionActionableRecommendationsForAssignment(loaded, nil, bv.IsOperatorGatedLabel)
+	if len(skipped) != 101 {
+		t.Fatalf("skipped = %d, want 101 gated rows", len(skipped))
+	}
+	if len(ready) != 1 || ready[0].ID != "ntm-eligible-below-cap" {
+		t.Fatalf("ready = %+v, want the eligible row below 101 gated rows", ready)
+	}
+}
+
+func TestConfigureAuthoritativeAssignmentPolicyUsesResolvedProject(t *testing.T) {
+	previousConfigFile := cfgFile
+	previousWorkingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() {
+		cfgFile = previousConfigFile
+		if err := os.Chdir(previousWorkingDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+		bv.ConfigureOperatorGatedLabels(previousLabels)
+	})
+
+	globalPath := filepath.Join(t.TempDir(), "global.toml")
+	if err := os.WriteFile(globalPath, []byte("[assign]\noperator_gated_labels = [\"global-approval\"]\n"), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	writeProjectPolicy := func(dir, label string) {
+		t.Helper()
+		ntmDir := filepath.Join(dir, ".ntm")
+		if err := os.MkdirAll(ntmDir, 0o755); err != nil {
+			t.Fatalf("create project config directory: %v", err)
+		}
+		content := fmt.Sprintf("[assign]\noperator_gated_labels = [%q]\n", label)
+		if err := os.WriteFile(filepath.Join(ntmDir, "config.toml"), []byte(content), 0o600); err != nil {
+			t.Fatalf("write project config: %v", err)
+		}
+	}
+
+	ambientDir := t.TempDir()
+	writeProjectPolicy(ambientDir, "ambient-only")
+	authoritativeDir := t.TempDir()
+	writeProjectPolicy(authoritativeDir, "project-approval")
+	cfgFile = globalPath
+	bv.ConfigureOperatorGatedLabels([]string{"stale-policy"})
+	if err := os.Chdir(ambientDir); err != nil {
+		t.Fatalf("Chdir ambient project: %v", err)
+	}
+
+	if err := configureAuthoritativeAssignmentPolicy(authoritativeDir); err != nil {
+		t.Fatalf("configureAuthoritativeAssignmentPolicy: %v", err)
+	}
+	for _, label := range []string{"operator-gated", "global-approval", "project-approval"} {
+		if !bv.IsOperatorGatedLabel(label) {
+			t.Errorf("effective assignment policy omitted %q", label)
+		}
+	}
+	for _, label := range []string{"ambient-only", "stale-policy"} {
+		if bv.IsOperatorGatedLabel(label) {
+			t.Errorf("effective assignment policy unexpectedly retained %q", label)
+		}
+	}
+}
+
+func TestAuthoritativeAssignmentPolicyFailuresStopEntryPoints(t *testing.T) {
+	previousConfigFile := cfgFile
+	previousJSON := jsonOutput
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() {
+		cfgFile = previousConfigFile
+		jsonOutput = previousJSON
+		bv.ConfigureOperatorGatedLabels(previousLabels)
+	})
+
+	globalPath := filepath.Join(t.TempDir(), "global.toml")
+	if err := os.WriteFile(globalPath, []byte("[assign]\noperator_gated_labels = [\"global-approval\"]\n"), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	projectDir := t.TempDir()
+	ntmDir := filepath.Join(projectDir, ".ntm")
+	if err := os.MkdirAll(ntmDir, 0o755); err != nil {
+		t.Fatalf("create project config directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ntmDir, "config.toml"), []byte("[assign\n"), 0o600); err != nil {
+		t.Fatalf("write invalid project config: %v", err)
+	}
+	cfgFile = globalPath
+	jsonOutput = false
+	bv.ConfigureOperatorGatedLabels([]string{"previous-policy"})
+
+	assertInvalidPolicy := func(name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s unexpectedly accepted invalid authoritative policy", name)
+		}
+		if !errors.Is(err, errCLIInvalidInput) {
+			t.Errorf("%s error = %v, want errCLIInvalidInput", name, err)
+		}
+		if !strings.Contains(err.Error(), filepath.Join(projectDir, ".ntm", "config.toml")) {
+			t.Errorf("%s error = %q, want authoritative config path", name, err)
+		}
+	}
+
+	assertInvalidPolicy("policy helper", configureAuthoritativeAssignmentPolicy(projectDir))
+	_, planningErr := getAssignOutputEnhanced(t.Context(), &AssignCommandOptions{
+		Session:    "policy-planning-must-not-reach-tmux",
+		ProjectDir: projectDir,
+	})
+	assertInvalidPolicy("assignment planning", planningErr)
+	assertInvalidPolicy("assignment execution", executeAssignmentsEnhanced(t.Context(), "policy-execution-must-not-read-store", nil, &AssignCommandOptions{
+		Session:    "policy-execution-must-not-read-store",
+		ProjectDir: projectDir,
+		Quiet:      true,
+	}))
+	assertInvalidPolicy("direct assignment", runDirectPaneAssignment(t.Context(), &AssignCommandOptions{
+		Session:      "policy-direct-must-not-reach-tmux",
+		ProjectDir:   projectDir,
+		BeadIDs:      []string{"ntm-policy-test"},
+		PaneSelector: "1",
+	}))
+	autoResult, autoErr := PerformAutoReassignment(t.Context(), "ntm-policy-completed", &AutoReassignOptions{
+		Session:    "policy-auto-reassign-must-not-read-beads",
+		ProjectDir: projectDir,
+		DryRun:     true,
+	})
+	assertInvalidPolicy("dry-run auto-reassignment", autoErr)
+	if autoResult != nil {
+		t.Fatalf("dry-run auto-reassignment returned a preview under invalid policy: %+v", autoResult)
+	}
+
+	if !bv.IsOperatorGatedLabel("previous-policy") {
+		t.Error("failed policy load replaced the previously installed safety policy")
+	}
+	if bv.IsOperatorGatedLabel("global-approval") {
+		t.Error("failed policy load partially installed the global policy")
+	}
+}
+
+func TestConfigureAuthoritativeAssignmentPolicyRejectsMissingExplicitConfig(t *testing.T) {
+	previousConfigFile := cfgFile
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() {
+		cfgFile = previousConfigFile
+		bv.ConfigureOperatorGatedLabels(previousLabels)
+	})
+
+	missingPath := filepath.Join(t.TempDir(), "missing-selected.toml")
+	cfgFile = missingPath
+	bv.ConfigureOperatorGatedLabels([]string{"previous-policy"})
+	err := configureAuthoritativeAssignmentPolicy(t.TempDir())
+	if err == nil || !errors.Is(err, errCLIInvalidInput) {
+		t.Fatalf("configureAuthoritativeAssignmentPolicy() error = %v, want invalid input", err)
+	}
+	if !strings.Contains(err.Error(), missingPath) || !strings.Contains(err.Error(), "explicitly selected config") {
+		t.Fatalf("configureAuthoritativeAssignmentPolicy() error = %q, want explicit path diagnostic", err)
+	}
+	if !bv.IsOperatorGatedLabel("previous-policy") {
+		t.Fatal("missing explicit config replaced the previously installed safety policy")
+	}
+}
+
+func TestConfigureAuthoritativeAssignmentPolicyRejectsMissingEnvConfig(t *testing.T) {
+	previousConfigFile := cfgFile
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() {
+		cfgFile = previousConfigFile
+		bv.ConfigureOperatorGatedLabels(previousLabels)
+	})
+
+	cfgFile = ""
+	missingPath := filepath.Join(t.TempDir(), "missing-env-selected.toml")
+	t.Setenv("NTM_CONFIG", missingPath)
+	bv.ConfigureOperatorGatedLabels([]string{"previous-env-policy"})
+	err := configureAuthoritativeAssignmentPolicy(t.TempDir())
+	if err == nil || !errors.Is(err, errCLIInvalidInput) {
+		t.Fatalf("configureAuthoritativeAssignmentPolicy() error = %v, want invalid input", err)
+	}
+	if !strings.Contains(err.Error(), missingPath) || !strings.Contains(err.Error(), "explicitly selected config") {
+		t.Fatalf("configureAuthoritativeAssignmentPolicy() error = %q, want NTM_CONFIG path diagnostic", err)
+	}
+	if !bv.IsOperatorGatedLabel("previous-env-policy") {
+		t.Fatal("missing NTM_CONFIG path replaced the previously installed safety policy")
+	}
+}
+
+func TestPrepareResolvedAssignCommandFailsBeforeExternalSideEffects(t *testing.T) {
+	previousConfigFile := cfgFile
+	previousClear := assignClear
+	previousClearPane := assignClearPane
+	previousClearFailed := assignClearFailed
+	previousStartWebhook := startAssignWebhookForCommand
+	previousRunClear := runClearAssignmentsForCommand
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() {
+		cfgFile = previousConfigFile
+		assignClear = previousClear
+		assignClearPane = previousClearPane
+		assignClearFailed = previousClearFailed
+		startAssignWebhookForCommand = previousStartWebhook
+		runClearAssignmentsForCommand = previousRunClear
+		bv.ConfigureOperatorGatedLabels(previousLabels)
+	})
+	t.Setenv("NTM_CONFIG", "")
+	assignClear = ""
+	assignClearPane = ""
+	assignClearFailed = false
+
+	root := t.TempDir()
+	validGlobal := filepath.Join(root, "valid-global.toml")
+	if err := os.WriteFile(validGlobal, []byte("[assign]\noperator_gated_labels = [\"global-approval\"]\n"), 0o600); err != nil {
+		t.Fatalf("write valid global config: %v", err)
+	}
+	invalidGlobal := filepath.Join(root, "invalid-global.toml")
+	if err := os.WriteFile(invalidGlobal, []byte("[assign\n"), 0o600); err != nil {
+		t.Fatalf("write invalid global config: %v", err)
+	}
+	missingGlobal := filepath.Join(root, "missing-global.toml")
+	validProject := t.TempDir()
+	invalidProject := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(invalidProject, ".ntm"), 0o755); err != nil {
+		t.Fatalf("create invalid project config directory: %v", err)
+	}
+	invalidProjectConfig := filepath.Join(invalidProject, ".ntm", "config.toml")
+	if err := os.WriteFile(invalidProjectConfig, []byte("[assign\n"), 0o600); err != nil {
+		t.Fatalf("write invalid project config: %v", err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		globalPath string
+		projectDir string
+		wantPath   string
+	}{
+		{name: "missing explicitly selected global", globalPath: missingGlobal, projectDir: validProject, wantPath: missingGlobal},
+		{name: "invalid explicitly selected global", globalPath: invalidGlobal, projectDir: validProject, wantPath: invalidGlobal},
+		{name: "invalid target project", globalPath: validGlobal, projectDir: invalidProject, wantPath: invalidProjectConfig},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfgFile = test.globalPath
+			bv.ConfigureOperatorGatedLabels([]string{"previous-policy"})
+			webhookStarts := 0
+			clearCalls := 0
+			startAssignWebhookForCommand = func(_, _ string) (func() error, error) {
+				webhookStarts++
+				return nil, nil
+			}
+			runClearAssignmentsForCommand = func(_ *cobra.Command, _ string) error {
+				clearCalls++
+				return nil
+			}
+
+			handled, policyProject, closeWebhook, err := prepareResolvedAssignCommand(&cobra.Command{}, "policy-preflight", test.projectDir)
+			if err == nil || !errors.Is(err, errCLIInvalidInput) {
+				t.Fatalf("prepareResolvedAssignCommand() error = %v, want invalid input", err)
+			}
+			if !strings.Contains(err.Error(), test.wantPath) {
+				t.Fatalf("prepareResolvedAssignCommand() error = %q, want path %q", err, test.wantPath)
+			}
+			if handled || policyProject != "" || closeWebhook != nil {
+				t.Fatalf("failed preflight returned handled=%v policy=%q close=%v", handled, policyProject, closeWebhook != nil)
+			}
+			if webhookStarts != 0 || clearCalls != 0 {
+				t.Fatalf("failed preflight external calls: webhook=%d clear=%d, want 0/0", webhookStarts, clearCalls)
+			}
+			if !bv.IsOperatorGatedLabel("previous-policy") {
+				t.Fatal("failed preflight replaced the previously installed policy")
+			}
+		})
+	}
+}
+
+func TestPrepareResolvedAssignCommandKeepsClearIndependent(t *testing.T) {
+	previousConfigFile := cfgFile
+	previousClear := assignClear
+	previousClearPane := assignClearPane
+	previousClearFailed := assignClearFailed
+	previousStartWebhook := startAssignWebhookForCommand
+	previousRunClear := runClearAssignmentsForCommand
+	t.Cleanup(func() {
+		cfgFile = previousConfigFile
+		assignClear = previousClear
+		assignClearPane = previousClearPane
+		assignClearFailed = previousClearFailed
+		startAssignWebhookForCommand = previousStartWebhook
+		runClearAssignmentsForCommand = previousRunClear
+	})
+	t.Setenv("NTM_CONFIG", "")
+	cfgFile = filepath.Join(t.TempDir(), "missing-selected-global.toml")
+	assignClear = "ntm-clear-independent"
+	assignClearPane = ""
+	assignClearFailed = false
+
+	webhookStarts := 0
+	clearCalls := 0
+	startAssignWebhookForCommand = func(_, _ string) (func() error, error) {
+		webhookStarts++
+		return nil, nil
+	}
+	runClearAssignmentsForCommand = func(_ *cobra.Command, session string) error {
+		clearCalls++
+		if session != "clear-session" {
+			t.Errorf("clear session = %q, want clear-session", session)
+		}
+		return nil
+	}
+
+	handled, policyProject, closeWebhook, err := prepareResolvedAssignCommand(&cobra.Command{}, "clear-session", t.TempDir())
+	if err != nil {
+		t.Fatalf("prepareResolvedAssignCommand(clear) error: %v", err)
+	}
+	if !handled || policyProject != "" || closeWebhook != nil {
+		t.Fatalf("clear preflight returned handled=%v policy=%q close=%v", handled, policyProject, closeWebhook != nil)
+	}
+	if clearCalls != 1 || webhookStarts != 0 {
+		t.Fatalf("clear preflight calls: clear=%d webhook=%d, want 1/0", clearCalls, webhookStarts)
+	}
+}
+
+func TestPrepareResolvedAssignCommandInstallsPolicyBeforeWebhook(t *testing.T) {
+	previousConfigFile := cfgFile
+	previousClear := assignClear
+	previousClearPane := assignClearPane
+	previousClearFailed := assignClearFailed
+	previousStartWebhook := startAssignWebhookForCommand
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() {
+		cfgFile = previousConfigFile
+		assignClear = previousClear
+		assignClearPane = previousClearPane
+		assignClearFailed = previousClearFailed
+		startAssignWebhookForCommand = previousStartWebhook
+		bv.ConfigureOperatorGatedLabels(previousLabels)
+	})
+	t.Setenv("NTM_CONFIG", "")
+	assignClear = ""
+	assignClearPane = ""
+	assignClearFailed = false
+
+	globalPath := filepath.Join(t.TempDir(), "global.toml")
+	if err := os.WriteFile(globalPath, []byte("[assign]\noperator_gated_labels = [\"pre-webhook-policy\"]\n"), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	cfgFile = globalPath
+	projectDir := t.TempDir()
+	webhookStarts := 0
+	webhookCloses := 0
+	startAssignWebhookForCommand = func(gotProject, gotSession string) (func() error, error) {
+		webhookStarts++
+		if gotProject != projectDir || gotSession != "ordered-preflight" {
+			t.Errorf("webhook project/session = %q/%q, want %q/ordered-preflight", gotProject, gotSession, projectDir)
+		}
+		if !bv.IsOperatorGatedLabel("pre-webhook-policy") {
+			t.Error("webhook started before authoritative policy was installed")
+		}
+		return func() error {
+			webhookCloses++
+			return nil
+		}, nil
+	}
+
+	handled, policyProject, closeWebhook, err := prepareResolvedAssignCommand(&cobra.Command{}, "ordered-preflight", projectDir)
+	if err != nil {
+		t.Fatalf("prepareResolvedAssignCommand() error: %v", err)
+	}
+	if handled || policyProject != filepath.Clean(projectDir) || closeWebhook == nil {
+		t.Fatalf("successful preflight returned handled=%v policy=%q close=%v", handled, policyProject, closeWebhook != nil)
+	}
+	if webhookStarts != 1 {
+		t.Fatalf("webhook starts=%d, want 1", webhookStarts)
+	}
+	if err := closeWebhook(); err != nil {
+		t.Fatalf("close webhook: %v", err)
+	}
+	if webhookCloses != 1 {
+		t.Fatalf("webhook closes=%d, want 1", webhookCloses)
+	}
+}
+
+func TestEnsureAuthoritativeAssignmentPolicyReusesExactProject(t *testing.T) {
+	previousConfigFile := cfgFile
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() {
+		cfgFile = previousConfigFile
+		bv.ConfigureOperatorGatedLabels(previousLabels)
+	})
+	t.Setenv("NTM_CONFIG", "")
+
+	globalPath := filepath.Join(t.TempDir(), "global.toml")
+	if err := os.WriteFile(globalPath, []byte("[assign]\noperator_gated_labels = [\"loaded-once\"]\n"), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	cfgFile = globalPath
+	projectDir := t.TempDir()
+	configuredProject := ""
+	if err := ensureAuthoritativeAssignmentPolicy(projectDir, &configuredProject); err != nil {
+		t.Fatalf("initial policy load: %v", err)
+	}
+	if configuredProject != filepath.Clean(projectDir) || !bv.IsOperatorGatedLabel("loaded-once") {
+		t.Fatalf("configured project=%q loaded policy=%v", configuredProject, bv.OperatorGatedLabels())
+	}
+
+	if err := os.WriteFile(globalPath, []byte("[assign\n"), 0o600); err != nil {
+		t.Fatalf("invalidate selected global config: %v", err)
+	}
+	if err := ensureAuthoritativeAssignmentPolicy(projectDir, &configuredProject); err != nil {
+		t.Fatalf("same-project policy was loaded twice: %v", err)
+	}
+	if err := ensureAuthoritativeAssignmentPolicy(t.TempDir(), &configuredProject); err == nil || !errors.Is(err, errCLIInvalidInput) {
+		t.Fatalf("different-project policy error = %v, want strict reload failure", err)
+	}
+}
+
+func TestWatchLoopShouldStopUsesFilteredActionableCandidates(t *testing.T) {
+	previousGetActionable := getActionableRecommendationsForWatch
+	previousGetIdle := getIdleAgentsForWatchStop
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() {
+		getActionableRecommendationsForWatch = previousGetActionable
+		getIdleAgentsForWatchStop = previousGetIdle
+		bv.ConfigureOperatorGatedLabels(previousLabels)
+	})
+	bv.ConfigureOperatorGatedLabels([]string{"operator-gated"})
+	getIdleAgentsForWatchStop = func(context.Context, string, string, bool) ([]assignAgentInfo, error) {
+		return []assignAgentInfo{}, nil
+	}
+
+	projectDir := t.TempDir()
+	for _, test := range []struct {
+		name     string
+		recs     []bv.TriageRecommendation
+		queryErr error
+		wantStop bool
+		wantErr  bool
+	}{
+		{
+			name:     "operator-gated-only queue is drained",
+			recs:     []bv.TriageRecommendation{{ID: "gated", Status: "open", Labels: []string{"operator-gated"}}},
+			wantStop: true,
+		},
+		{
+			name:     "blocked-only queue is drained",
+			recs:     []bv.TriageRecommendation{{ID: "blocked", Status: "open", BlockedBy: []string{"dependency"}}},
+			wantStop: true,
+		},
+		{
+			name:     "plan-only actionable item keeps watch running",
+			recs:     []bv.TriageRecommendation{{ID: "below-triage-cap", Status: "open"}},
+			wantStop: false,
+		},
+		{
+			name:     "unverified actionable surface fails closed",
+			queryErr: bv.ErrActionableLabelsUnverified,
+			wantStop: false,
+			wantErr:  true,
+		},
+		{
+			name:     "unverified actionable plan fails closed",
+			queryErr: bv.ErrActionablePlanUnverified,
+			wantStop: false,
+			wantErr:  true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			getActionableRecommendationsForWatch = func(_ context.Context, gotProject string, limit int) ([]bv.TriageRecommendation, error) {
+				calls++
+				if gotProject != projectDir || limit != 0 {
+					t.Errorf("actionable query project=%q limit=%d, want %q/0", gotProject, limit, projectDir)
+				}
+				return test.recs, test.queryErr
+			}
+			store := assignment.NewStore("watch-actionable-stop")
+			opts := &AutoReassignOptions{
+				Session:       "watch-actionable-stop",
+				ProjectDir:    projectDir,
+				Quiet:         true,
+				policyProject: filepath.Clean(projectDir),
+			}
+			loop := NewWatchLoop(opts.Session, store, opts)
+			stop, err := loop.shouldStop(t.Context())
+			if (err != nil) != test.wantErr {
+				t.Fatalf("shouldStop() error = %v, wantErr=%v", err, test.wantErr)
+			}
+			if stop != test.wantStop {
+				t.Fatalf("shouldStop() = %v, want %v", stop, test.wantStop)
+			}
+			if calls != 1 {
+				t.Fatalf("actionable query calls=%d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestFilterNewlyUnblockedByVerifiedPlan(t *testing.T) {
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() { bv.ConfigureOperatorGatedLabels(previousLabels) })
+	bv.ConfigureOperatorGatedLabels([]string{"operator-gated"})
+
+	newly := []UnblockedBead{
+		{ID: "authorized", Title: "stale title", Priority: 4, PrevBlockers: []string{"done"}, UnblockedByID: "done"},
+		{ID: "missing", Title: "not planned", Priority: 2},
+		{ID: "gated", Title: "stale gated", Priority: 3},
+		{ID: "occupied", Title: "already owned", Priority: 1},
+	}
+	verified := []bv.TriageRecommendation{
+		{ID: "authorized", Title: "live title", Priority: 1, Status: "open"},
+		{ID: "gated", Title: "live gated", Priority: 0, Status: "open", Labels: []string{"operator-gated"}},
+		{ID: "occupied", Title: "live occupied", Priority: 1, Status: "ready"},
+		{ID: " ", Title: "ignored blank", Status: "open"},
+	}
+	active := map[string]struct{}{"occupied": {}}
+	authorized, skipped := filterNewlyUnblockedByVerifiedPlan(newly, verified, active, nil)
+
+	if len(authorized) != 1 {
+		t.Fatalf("authorized newly-unblocked work=%+v, want one item", authorized)
+	}
+	got := authorized[0]
+	if got.ID != "authorized" || got.Title != "live title" || got.Priority != 1 ||
+		!reflect.DeepEqual(got.PrevBlockers, []string{"done"}) || got.UnblockedByID != "done" {
+		t.Fatalf("authorized item=%+v, want live plan fields with dependency provenance preserved", got)
+	}
+	wantReasons := map[string]string{
+		"missing":  "not_in_actionable_plan",
+		"gated":    "operator_gated",
+		"occupied": "already_assigned",
+	}
+	if len(skipped) != len(wantReasons) {
+		t.Fatalf("skipped=%+v, want %d items", skipped, len(wantReasons))
+	}
+	for _, skip := range skipped {
+		if want := wantReasons[skip.BeadID]; skip.Reason != want {
+			t.Fatalf("skip=%+v, want reason %q", skip, want)
+		}
+		delete(wantReasons, skip.BeadID)
+	}
+	if len(wantReasons) != 0 {
+		t.Fatalf("missing skipped items: %v", wantReasons)
+	}
+}
+
+func TestWatchLoopRunStopsOnAutomatedAssignmentSafetyErrors(t *testing.T) {
+	isolateSessionAgentStorage(t)
+	for _, safetyErr := range []error{
+		bv.ErrActionablePlanUnverified,
+		bv.ErrActionableLabelsUnverified,
+		markCLIInvalidInput(errors.New("invalid watch policy")),
+	} {
+		t.Run(safetyErr.Error(), func(t *testing.T) {
+			store := assignment.NewStore("watch-safety-failure")
+			loop := NewWatchLoop("watch-safety-failure", store, &AutoReassignOptions{
+				Session: "watch-safety-failure",
+				Quiet:   true,
+			})
+			loop.stopWhenDone = false
+			loop.scanInterval = time.Millisecond
+			loop.scanFn = func(context.Context) error {
+				return fmt.Errorf("unsafe recurring scan: %w", safetyErr)
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			err := loop.Run(ctx)
+			if !errors.Is(err, safetyErr) {
+				t.Fatalf("WatchLoop.Run() error = %v, want safety error %v", err, safetyErr)
 			}
 		})
 	}
@@ -2697,6 +3315,125 @@ func TestWatchLoopRenewsCompletionLeaseAcrossSlowHandler(t *testing.T) {
 	}
 }
 
+func TestWatchLoopBlockedReadyScanDoesNotDelayCompletionConsumption(t *testing.T) {
+	isolateSessionAgentStorage(t)
+	const (
+		session = "watch-blocked-ready-scan"
+		beadID  = "ntm-watch-blocked-ready-scan"
+		eventID = "completion-watch-blocked-ready-scan"
+	)
+
+	previousInterval := assignWatchInterval
+	assignWatchInterval = 10 * time.Millisecond
+	defer func() {
+		assignWatchInterval = previousInterval
+	}()
+
+	detectedAt := time.Now().UTC()
+	store := assignment.NewStore(session)
+	store.Assignments[beadID] = &assignment.Assignment{
+		BeadID:                   beadID,
+		Status:                   assignment.StatusCompleted,
+		AssignedAt:               detectedAt.Add(-time.Second),
+		Pane:                     1,
+		DispatchTarget:           "%901",
+		OccupancyKey:             "%901",
+		PendingCompletionEventID: eventID,
+		CompletionDetectedAt:     &detectedAt,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed pending completion event: %v", err)
+	}
+
+	loop := NewWatchLoop(session, store, &AutoReassignOptions{
+		Session: session,
+		Quiet:   true,
+		DryRun:  true,
+	})
+	loop.scanInterval = time.Millisecond
+	scanStarted := make(chan struct{})
+	var scanCalls atomic.Int32
+	loop.scanFn = func(ctx context.Context) error {
+		if scanCalls.Add(1) == 1 {
+			close(scanStarted)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	handled := make(chan completion.CompletionEvent, 1)
+	loop.handleCompletionFn = func(_ context.Context, event completion.CompletionEvent) error {
+		handled <- event
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- loop.Run(ctx)
+	}()
+	joined := false
+	defer func() {
+		if joined {
+			return
+		}
+		cancel()
+		select {
+		case <-runResult:
+		case <-time.After(2 * time.Second):
+			t.Errorf("watch loop did not stop during test cleanup")
+		}
+	}()
+
+	select {
+	case <-scanStarted:
+	case <-time.After(time.Second):
+		t.Fatal("periodic ready-work scan did not start")
+	}
+	time.Sleep(5 * loop.scanInterval)
+	if got := scanCalls.Load(); got != 1 {
+		t.Fatalf("blocked ready-work scan launched %d concurrent passes, want 1", got)
+	}
+
+	select {
+	case event := <-handled:
+		if event.BeadID != beadID || event.EventID != eventID || event.ConsumerToken == "" {
+			t.Fatalf("handled completion event = %+v", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("completion handling was blocked behind the ready-work scan")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		reloaded, err := assignment.LoadStoreStrict(session)
+		if err == nil {
+			current := reloaded.Get(beadID)
+			if current != nil && current.PendingCompletionEventID == "" &&
+				current.CompletionConsumerToken == "" && current.CompletionLeaseExpiresAt == nil {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("completion event was not durably acknowledged while scan was blocked: load_error=%v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := scanCalls.Load(); got != 1 {
+		t.Fatalf("blocked ready-work scan launched %d concurrent passes before acknowledgement, want 1", got)
+	}
+
+	cancel()
+	select {
+	case err := <-runResult:
+		joined = true
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("WatchLoop.Run() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch loop did not stop after cancellation")
+	}
+}
+
 func TestWatchLoopLostCompletionLeaseCancelsHandlerWithoutAck(t *testing.T) {
 	loop := &WatchLoop{handledCompletionEvents: make(map[string]struct{})}
 	handlerCanceled := false
@@ -2965,8 +3702,17 @@ func TestTriggerCompletionCheckCompletesExactGenerationBeforeReassignment(t *tes
 	if err != nil {
 		t.Fatalf("assign exact generation: %v", err)
 	}
+	originalLeaseRelease := releaseAssignmentLeases
 	original := performAutoReassignmentForTrigger
+	releaseCalls := 0
 	var calls int
+	releaseAssignmentLeases = func(_ context.Context, gotSession string, current *assignment.Assignment) ([]string, error) {
+		releaseCalls++
+		if gotSession != session || current == nil || current.BeadID != observed.BeadID {
+			t.Fatalf("release assignment leases session=%q assignment=%+v", gotSession, current)
+		}
+		return nil, nil
+	}
 	performAutoReassignmentForTrigger = func(_ context.Context, beadID string, opts *AutoReassignOptions) (*AutoReassignResult, error) {
 		calls++
 		current, loadErr := assignment.LoadStoreStrict(session)
@@ -2978,11 +3724,14 @@ func TestTriggerCompletionCheckCompletesExactGenerationBeforeReassignment(t *tes
 		}
 		return &AutoReassignResult{TriggerBeadID: beadID}, nil
 	}
-	t.Cleanup(func() { performAutoReassignmentForTrigger = original })
+	t.Cleanup(func() {
+		releaseAssignmentLeases = originalLeaseRelease
+		performAutoReassignmentForTrigger = original
+	})
 
 	result, err := TriggerCompletionCheck(t.Context(), session, observed.BeadID, &AutoReassignOptions{})
-	if err != nil || result == nil || result.TriggerBeadID != observed.BeadID || calls != 1 {
-		t.Fatalf("TriggerCompletionCheck result=%+v error=%v calls=%d", result, err, calls)
+	if err != nil || result == nil || result.TriggerBeadID != observed.BeadID || releaseCalls != 1 || calls != 1 {
+		t.Fatalf("TriggerCompletionCheck result=%+v error=%v release calls=%d reassignment calls=%d", result, err, releaseCalls, calls)
 	}
 }
 

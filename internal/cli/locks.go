@@ -150,7 +150,7 @@ Examples:
 				}
 				session = res.Session
 			}
-			return runLocksCheck(session, path, paneFlag, taskID)
+			return runLocksCheck(cmd.Context(), session, path, paneFlag, taskID)
 		},
 	}
 
@@ -161,8 +161,8 @@ Examples:
 	return cmd
 }
 
-func runLocksCheck(session, path string, pane int, taskID string) error {
-	session, projectKey, err := resolveAgentMailScope(session)
+func runLocksCheck(ctx context.Context, session, path string, pane int, taskID string) error {
+	session, projectKey, err := resolveAgentMailScope(ctx, session)
 	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	result := LocksCheckResult{
 		Session:    session,
@@ -469,7 +469,7 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
-			return runLocks(session, allAgents)
+			return runLocks(cmd.Context(), session, allAgents)
 		},
 	}
 
@@ -491,7 +491,7 @@ narrow reservation, inspect worktree, or ask human. It never force-releases
 reservations and never removes worktrees.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLocksAdvise(args[0], allAgents)
+			return runLocksAdvise(cmd.Context(), args[0], allAgents)
 		},
 	}
 
@@ -526,8 +526,14 @@ type LocksAdviceLogRow struct {
 	Action        string  `json:"action"`
 }
 
-func runLocksAdvise(session string, allAgents bool) error {
-	session, projectKey, err := resolveAgentMailScope(session)
+func runLocksAdvise(ctx context.Context, session string, allAgents bool) error {
+	if ctx == nil {
+		return errors.New("locks advise requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	session, projectKey, err := resolveAgentMailScope(ctx, session)
 	if err != nil {
 		return err
 	}
@@ -555,9 +561,9 @@ func runLocksAdvise(session string, allAgents bool) error {
 		agentMailErr = "Agent Mail server unavailable"
 		warnings = append(warnings, agentMailErr)
 	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		mailCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		reservations, err = fetchActiveReservations(ctx, client, projectKey, agentName, allAgents)
+		reservations, err = fetchActiveReservations(mailCtx, client, projectKey, agentName, allAgents)
 		if err != nil {
 			agentMailUnavailable = true
 			agentMailErr = err.Error()
@@ -566,12 +572,16 @@ func runLocksAdvise(session string, allAgents bool) error {
 	}
 
 	manager := worktrees.NewManager(projectKey, session)
-	worktreeList, err := manager.ListWorktrees()
+	worktreeList, err := manager.ListWorktrees(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		warnings = append(warnings, "listing worktrees: "+err.Error())
 	}
 
-	result := buildLocksAdviceResult(
+	result, err := buildLocksAdviceResult(
+		ctx,
 		session,
 		agentName,
 		projectKey,
@@ -582,6 +592,9 @@ func runLocksAdvise(session string, allAgents bool) error {
 		agentMailUnavailable,
 		agentMailErr,
 	)
+	if err != nil {
+		return err
+	}
 
 	if IsJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
@@ -596,6 +609,7 @@ func runLocksAdvise(session string, allAgents bool) error {
 }
 
 func buildLocksAdviceResult(
+	ctx context.Context,
 	session string,
 	agentName string,
 	projectKey string,
@@ -605,7 +619,13 @@ func buildLocksAdviceResult(
 	now time.Time,
 	agentMailUnavailable bool,
 	agentMailErr string,
-) LocksAdviceResult {
+) (LocksAdviceResult, error) {
+	if ctx == nil {
+		return LocksAdviceResult{}, errors.New("build locks advice requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return LocksAdviceResult{}, err
+	}
 	reservationInputs := make([]reservationsim.ReservationRiskInput, 0, len(reservations))
 	for _, r := range reservations {
 		reservationInputs = append(reservationInputs, reservationsim.ReservationRiskInput{
@@ -621,7 +641,11 @@ func buildLocksAdviceResult(
 
 	worktreeInputs := make([]worktrees.WorktreeRiskInput, 0, len(worktreeList))
 	for _, wt := range worktreeList {
-		worktreeInputs = append(worktreeInputs, worktrees.InspectRiskInput(wt, projectKey))
+		input, err := worktrees.InspectRiskInput(ctx, wt, projectKey)
+		if err != nil {
+			return LocksAdviceResult{}, err
+		}
+		worktreeInputs = append(worktreeInputs, input)
 	}
 
 	reservationReport := reservationsim.AdviseReservations(reservationInputs, reservationsim.ReservationAdvisorOptions{
@@ -670,7 +694,7 @@ func buildLocksAdviceResult(
 		Worktrees:           worktreeReport,
 		LogRows:             logRows,
 		RecommendationCount: len(reservationReport.Recommendations) + len(worktreeReport.Recommendations),
-	}
+	}, nil
 }
 
 func sortLocksAdviceLogRows(rows []LocksAdviceLogRow) {
@@ -758,8 +782,8 @@ func classifyLocksFailure(err error) string {
 	}
 }
 
-func runLocks(session string, allAgents bool) error {
-	session, projectKey, err := resolveAgentMailScope(session)
+func runLocks(ctx context.Context, session string, allAgents bool) error {
+	session, projectKey, err := resolveAgentMailScope(ctx, session)
 	if err != nil {
 		return err
 	}
@@ -947,7 +971,7 @@ Examples:
 				return fmt.Errorf("invalid reservation ID '%s': must be a positive number", reservationIDStr)
 			}
 
-			return runForceRelease(session, reservationID, note, !noNotify, skipConfirm)
+			return runForceRelease(cmd.Context(), session, reservationID, note, !noNotify, skipConfirm)
 		},
 	}
 
@@ -971,8 +995,8 @@ type ForceReleaseResult struct {
 	Error          string     `json:"error,omitempty"`
 }
 
-func runForceRelease(session string, reservationID int, note string, notify, skipConfirm bool) error {
-	session, projectKey, err := resolveAgentMailScope(session)
+func runForceRelease(ctx context.Context, session string, reservationID int, note string, notify, skipConfirm bool) error {
+	session, projectKey, err := resolveAgentMailScope(ctx, session)
 	if err != nil {
 		return err
 	}
@@ -1115,7 +1139,7 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
-			return runRenewLocks(session, extendMinutes)
+			return runRenewLocks(cmd.Context(), session, extendMinutes)
 		},
 	}
 
@@ -1134,12 +1158,12 @@ type RenewResult struct {
 	Error         string `json:"error,omitempty"`
 }
 
-func runRenewLocks(session string, extendMinutes int) error {
+func runRenewLocks(ctx context.Context, session string, extendMinutes int) error {
 	if extendMinutes < 1 {
 		return fmt.Errorf("extend time must be at least 1 minute")
 	}
 
-	session, projectKey, err := resolveAgentMailScope(session)
+	session, projectKey, err := resolveAgentMailScope(ctx, session)
 	if err != nil {
 		return err
 	}

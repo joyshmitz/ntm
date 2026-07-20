@@ -4,9 +4,11 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -23,6 +25,7 @@ type MockPaneSpawner struct {
 	killError    error
 	sendError    error
 	panesError   error
+	getPanesFunc func(string) ([]tmux.Pane, error)
 }
 
 func NewMockPaneSpawner() *MockPaneSpawner {
@@ -68,6 +71,9 @@ func (m *MockPaneSpawner) SendBuffer(paneID, text string, enter bool) error {
 
 func (m *MockPaneSpawner) GetPanes(session string) ([]tmux.Pane, error) {
 	m.getPanesFor = append(m.getPanesFor, session)
+	if m.getPanesFunc != nil {
+		return m.getPanesFunc(session)
+	}
 	if m.panesError != nil {
 		return nil, m.panesError
 	}
@@ -176,6 +182,38 @@ func TestCheckAndRotate_NoAgentsAboveThreshold(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Errorf("expected 0 results, got %d", len(results))
+	}
+}
+
+func TestCheckAndRotate_MixedGrokBatchIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	monitor.RegisterAgent("custom-claude-pane", "%1", "claude-opus-4")
+	monitor.RegisterAgent("custom-grok-pane", "%2", "grok-build")
+	for i := 0; i < 200; i++ {
+		monitor.RecordMessage("custom-claude-pane", 1000, 1000)
+		monitor.RecordMessage("custom-grok-pane", 1000, 1000)
+	}
+
+	spawner := NewMockPaneSpawner()
+	spawner.panes = []tmux.Pane{
+		{ID: "%1", Index: 1, Title: "custom-claude-pane", Type: tmux.AgentClaude},
+		{ID: "%2", Index: 2, Title: "custom-grok-pane", Type: tmux.AgentGrok},
+	}
+	cfg := config.DefaultContextRotationConfig()
+	cfg.RotateThreshold = 0.50
+	r := NewRotator(RotatorConfig{Monitor: monitor, Spawner: spawner, Config: cfg})
+
+	results, err := r.CheckAndRotate("test", "/tmp")
+	if !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("CheckAndRotate() error = %v, want relaunch sentinel", err)
+	}
+	if results != nil {
+		t.Fatalf("CheckAndRotate() results = %+v, want nil rejected batch", results)
+	}
+	if len(spawner.sentKeys) != 0 || len(spawner.sentBuffers) != 0 || len(spawner.spawnedPanes) != 0 || len(spawner.killedPanes) != 0 {
+		t.Fatalf("mixed Grok batch mutated panes: keys=%v buffers=%v spawned=%v killed=%v", spawner.sentKeys, spawner.sentBuffers, spawner.spawnedPanes, spawner.killedPanes)
 	}
 }
 
@@ -508,6 +546,57 @@ func TestManualRotate_NoSpawner(t *testing.T) {
 	}
 }
 
+func TestManualRotate_GrokFailsBeforeAnyLifecycleMutation(t *testing.T) {
+	t.Parallel()
+
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	monitor.RegisterAgent("test__grok_1", "%7", "grok-build")
+	monitor.RecordMessage("test__grok_1", 1000, 1000)
+
+	spawner := NewMockPaneSpawner()
+	spawner.panes = []tmux.Pane{{
+		ID:       "%7",
+		Title:    "test__grok_1",
+		Type:     agent.AgentTypeGrok,
+		NTMIndex: 1,
+	}}
+
+	r := NewRotator(RotatorConfig{
+		Monitor: monitor,
+		Spawner: spawner,
+		Config:  config.DefaultContextRotationConfig(),
+	})
+	result := r.ManualRotate("test", "test__grok_1", "/tmp")
+
+	if result.Success || result.State != RotationStateFailed {
+		t.Fatalf("ManualRotate() result = %+v, want failed", result)
+	}
+	if !strings.Contains(result.Error, agent.GrokPhaseOneCapabilityHint) {
+		t.Fatalf("ManualRotate() error = %q, want Grok capability hint", result.Error)
+	}
+	if len(spawner.sentKeys) != 0 || len(spawner.sentBuffers) != 0 {
+		t.Fatalf("Grok rotation sent input: keys=%v buffers=%v", spawner.sentKeys, spawner.sentBuffers)
+	}
+	if len(spawner.spawnedPanes) != 0 {
+		t.Fatalf("Grok rotation spawned panes: %v", spawner.spawnedPanes)
+	}
+	if len(spawner.killedPanes) != 0 {
+		t.Fatalf("Grok rotation killed panes: %v", spawner.killedPanes)
+	}
+}
+
+func TestDefaultPaneSpawnerRejectsGrokBeforeCreatingPane(t *testing.T) {
+	t.Parallel()
+
+	spawner := NewDefaultPaneSpawner(nil)
+	if _, err := spawner.SpawnAgent("test", "grok-build", 1, "", "/tmp"); !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("SpawnAgent(grok-build) error = %v, want relaunch sentinel", err)
+	}
+	if got := spawner.getAgentCommand("grok-build"); got != "" {
+		t.Fatalf("getAgentCommand(grok-build) = %q, want fail-closed empty command", got)
+	}
+}
+
 func TestDefaultPaneSpawnerGetAgentCommand(t *testing.T) {
 	t.Parallel()
 
@@ -659,7 +748,7 @@ func TestTryCompaction_ExhaustsFallbackCommandsViaSpawner(t *testing.T) {
 		Config:    config.DefaultContextRotationConfig(),
 	})
 
-	result := r.tryCompaction("test__cc_1", "%0")
+	result := r.tryCompaction("test__cc_1", "%0", tmux.AgentClaude)
 	if result == nil {
 		t.Fatal("expected compaction result, got nil")
 	}
@@ -772,7 +861,7 @@ func TestCheckAndRotate_RequireConfirmCreatesPendingRotation(t *testing.T) {
 
 	monitor := NewContextMonitor(DefaultMonitorConfig())
 	spawner := NewMockPaneSpawner()
-	spawner.panes = []tmux.Pane{{ID: "%0", Title: "test__cc_1"}}
+	spawner.panes = []tmux.Pane{{ID: "%0", Title: "test__cc_1", Type: tmux.AgentClaude}}
 
 	monitor.RegisterAgent("test__cc_1", "%0", "claude-opus-4")
 	for i := 0; i < 200; i++ {
@@ -852,8 +941,209 @@ func TestProcessExpiredPending_UsesStoredSession(t *testing.T) {
 	if spawner.getPanesFor[0] != "stored-session" {
 		t.Fatalf("GetPanes session = %q, want %q", spawner.getPanesFor[0], "stored-session")
 	}
-	if r.HasPendingRotation(pending.AgentID) {
-		t.Fatal("expected expired pending rotation to be removed")
+	if !r.HasPendingRotation(pending.AgentID) {
+		t.Fatal("failed live-pane preflight removed the expired pending rotation")
+	}
+}
+
+func TestProcessExpiredPending_MixedGrokBatchIsAtomic(t *testing.T) {
+	oldStore := DefaultPendingRotationStore
+	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
+	t.Cleanup(func() {
+		DefaultPendingRotationStore = oldStore
+	})
+
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	monitor.RegisterAgent("custom-claude-pane", "%1", "claude-opus-4")
+	monitor.RegisterAgent("custom-grok-pane", "%2", "grok-3")
+	spawner := NewMockPaneSpawner()
+	spawner.panes = []tmux.Pane{
+		{ID: "%1", Index: 1, Title: "custom-claude-pane", Type: tmux.AgentClaude},
+		{ID: "%2", Index: 2, Title: "custom-grok-pane", Type: tmux.AgentGrok},
+	}
+	r := NewRotator(RotatorConfig{
+		Monitor: monitor,
+		Spawner: spawner,
+		Config:  config.DefaultContextRotationConfig(),
+	})
+	now := time.Now()
+	pending := []*PendingRotation{
+		{
+			AgentID:       "custom-claude-pane",
+			SessionName:   "test",
+			PaneID:        "%1",
+			TimeoutAt:     now.Add(-2 * time.Minute),
+			DefaultAction: ConfirmRotate,
+			WorkDir:       "/tmp",
+		},
+		{
+			AgentID:       "custom-grok-pane",
+			SessionName:   "test",
+			PaneID:        "%2",
+			TimeoutAt:     now.Add(-time.Minute),
+			DefaultAction: ConfirmCompact,
+			WorkDir:       "/tmp",
+		},
+	}
+	for _, item := range pending {
+		r.pending[item.AgentID] = item
+		stored := clonePendingRotation(item)
+		stored.TimeoutAt = now.Add(time.Hour)
+		if err := AddPendingRotation(stored); err != nil {
+			t.Fatalf("AddPendingRotation(%s) error = %v", item.AgentID, err)
+		}
+	}
+
+	r.processExpiredPending("caller-session", "/caller/workdir")
+
+	for _, item := range pending {
+		got := r.GetPendingRotation(item.AgentID)
+		if got == nil {
+			t.Fatalf("pending rotation %s was deleted before batch preflight completed", item.AgentID)
+		}
+		if !got.TimeoutAt.Equal(item.TimeoutAt) {
+			t.Fatalf("pending rotation %s timeout changed from %s to %s", item.AgentID, item.TimeoutAt, got.TimeoutAt)
+		}
+		stored, err := GetPendingRotationByID(item.AgentID)
+		if err != nil {
+			t.Fatalf("GetPendingRotationByID(%s) error = %v", item.AgentID, err)
+		}
+		if stored == nil {
+			t.Fatalf("persisted pending rotation %s was deleted", item.AgentID)
+		}
+	}
+	if len(spawner.sentKeys) != 0 || len(spawner.sentBuffers) != 0 || len(spawner.spawnedPanes) != 0 || len(spawner.killedPanes) != 0 {
+		t.Fatalf("expired mixed batch mutated panes: keys=%v buffers=%v spawned=%v killed=%v", spawner.sentKeys, spawner.sentBuffers, spawner.spawnedPanes, spawner.killedPanes)
+	}
+}
+
+func TestProcessExpiredPendingDoesNotActAfterConcurrentPostpone(t *testing.T) {
+	oldStore := DefaultPendingRotationStore
+	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
+	t.Cleanup(func() {
+		DefaultPendingRotationStore = oldStore
+	})
+
+	const agentID = "test__cc_1"
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	monitor.RegisterAgent(agentID, "%1", "claude-opus-4")
+
+	preflightStarted := make(chan struct{})
+	releasePreflight := make(chan struct{})
+	var getPanesCalls atomic.Int32
+	spawner := NewMockPaneSpawner()
+	spawner.panes = []tmux.Pane{{
+		ID:    "%1",
+		Index: 1,
+		Title: agentID,
+		Type:  tmux.AgentClaude,
+	}}
+	spawner.sendError = errors.New("stale rotation reached pane mutation")
+	spawner.getPanesFunc = func(string) ([]tmux.Pane, error) {
+		if getPanesCalls.Add(1) == 1 {
+			close(preflightStarted)
+			<-releasePreflight
+		}
+		return spawner.panes, nil
+	}
+
+	r := NewRotator(RotatorConfig{
+		Monitor: monitor,
+		Spawner: spawner,
+		Config:  config.DefaultContextRotationConfig(),
+	})
+	pending := &PendingRotation{
+		AgentID:       agentID,
+		SessionName:   "test-session",
+		PaneID:        "%1",
+		TimeoutAt:     time.Now().Add(-time.Minute),
+		DefaultAction: ConfirmRotate,
+		WorkDir:       "/tmp",
+	}
+	r.pending[agentID] = pending
+	if err := AddPendingRotation(clonePendingRotation(pending)); err != nil {
+		t.Fatalf("AddPendingRotation error = %v", err)
+	}
+
+	expiredDone := make(chan struct{})
+	go func() {
+		defer close(expiredDone)
+		r.processExpiredPending("caller-session", "/caller/workdir")
+	}()
+
+	select {
+	case <-preflightStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expired rotation preflight did not start")
+	}
+	result := r.ConfirmRotation(agentID, ConfirmPostpone, 10)
+	if !result.Success || result.State != RotationStatePending {
+		t.Fatalf("ConfirmRotation(postpone) result = %+v", result)
+	}
+	close(releasePreflight)
+	select {
+	case <-expiredDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expired rotation processing did not finish")
+	}
+
+	if got := getPanesCalls.Load(); got != 1 {
+		t.Fatalf("GetPanes calls = %d, want only the blocked preflight", got)
+	}
+	if len(spawner.sentKeys) != 0 || len(spawner.sentBuffers) != 0 || len(spawner.spawnedPanes) != 0 || len(spawner.killedPanes) != 0 {
+		t.Fatalf("stale expired action mutated panes: keys=%v buffers=%v spawned=%v killed=%v",
+			spawner.sentKeys, spawner.sentBuffers, spawner.spawnedPanes, spawner.killedPanes)
+	}
+	inMemory := r.GetPendingRotation(agentID)
+	if inMemory == nil || !inMemory.TimeoutAt.After(time.Now().Add(9*time.Minute)) {
+		t.Fatalf("postponed in-memory rotation = %+v, want timeout about 10 minutes ahead", inMemory)
+	}
+	stored, err := GetPendingRotationByID(agentID)
+	if err != nil {
+		t.Fatalf("GetPendingRotationByID error = %v", err)
+	}
+	if stored == nil || !stored.TimeoutAt.Equal(inMemory.TimeoutAt) {
+		t.Fatalf("persisted postponed rotation = %+v, want timeout %s", stored, inMemory.TimeoutAt)
+	}
+}
+
+func TestProcessExpiredPending_AllowsIgnoreAndPostpone(t *testing.T) {
+	oldStore := DefaultPendingRotationStore
+	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
+	t.Cleanup(func() {
+		DefaultPendingRotationStore = oldStore
+	})
+
+	spawner := NewMockPaneSpawner()
+	r := NewRotator(RotatorConfig{Spawner: spawner, Config: config.DefaultContextRotationConfig()})
+	now := time.Now()
+	r.pending["test__grok_1"] = &PendingRotation{
+		AgentID:       "test__grok_1",
+		SessionName:   "test",
+		TimeoutAt:     now.Add(-time.Minute),
+		DefaultAction: ConfirmIgnore,
+	}
+	r.pending["test__grok_2"] = &PendingRotation{
+		AgentID:       "test__grok_2",
+		SessionName:   "test",
+		TimeoutAt:     now.Add(-time.Minute),
+		DefaultAction: ConfirmPostpone,
+	}
+
+	r.processExpiredPending("test", "/tmp")
+
+	if r.HasPendingRotation("test__grok_1") {
+		t.Fatal("expired ignore action should remove the pending rotation")
+	}
+	postponed := r.GetPendingRotation("test__grok_2")
+	if postponed == nil {
+		t.Fatal("expired postpone action should retain the pending rotation")
+	}
+	if !postponed.TimeoutAt.After(now.Add(29 * time.Minute)) {
+		t.Fatalf("postponed timeout = %s, want about 30 minutes in the future", postponed.TimeoutAt)
+	}
+	if len(spawner.sentKeys) != 0 || len(spawner.sentBuffers) != 0 || len(spawner.spawnedPanes) != 0 || len(spawner.killedPanes) != 0 {
+		t.Fatalf("ignore/postpone mutated panes: keys=%v buffers=%v spawned=%v killed=%v", spawner.sentKeys, spawner.sentBuffers, spawner.spawnedPanes, spawner.killedPanes)
 	}
 }
 
@@ -908,6 +1198,38 @@ func TestConfirmRotation_CompactWithoutPaneKeepsPending(t *testing.T) {
 	}
 	if !r.HasPendingRotation("agent-1") {
 		t.Fatal("expected pending rotation to remain when compaction cannot run")
+	}
+}
+
+func TestConfirmRotation_CustomTitleGrokKeepsPending(t *testing.T) {
+	for _, tt := range []struct {
+		action ConfirmAction
+		hint   string
+	}{
+		{action: ConfirmRotate, hint: agent.GrokPhaseOneCapabilityHint},
+		{action: ConfirmCompact, hint: agent.GrokPromptDeliveryCapabilityHint},
+	} {
+		t.Run(string(tt.action), func(t *testing.T) {
+			spawner := NewMockPaneSpawner()
+			spawner.panes = []tmux.Pane{{
+				ID: "%7", Index: 7, Title: "operator-selected-title", Type: tmux.AgentGrok,
+			}}
+			r := NewRotator(RotatorConfig{Spawner: spawner})
+			r.pending["operator-selected-title"] = &PendingRotation{
+				AgentID: "operator-selected-title", SessionName: "test-session", PaneID: "%7",
+			}
+
+			result := r.ConfirmRotation("operator-selected-title", tt.action, 0)
+			if result.State != RotationStateFailed || !strings.Contains(result.Error, tt.hint) {
+				t.Fatalf("ConfirmRotation(%s) result = %+v, want Grok capability failure", tt.action, result)
+			}
+			if !r.HasPendingRotation("operator-selected-title") {
+				t.Fatalf("ConfirmRotation(%s) removed pending state before capability admission", tt.action)
+			}
+			if len(spawner.sentKeys) != 0 || len(spawner.sentBuffers) != 0 || len(spawner.spawnedPanes) != 0 || len(spawner.killedPanes) != 0 {
+				t.Fatalf("ConfirmRotation(%s) mutated panes: %+v", tt.action, spawner)
+			}
+		})
 	}
 }
 

@@ -752,6 +752,10 @@ func (m *Monitor) handleCrash(ctx context.Context, agent *AgentState, reason str
 
 	// Attempt restart if enabled and under the limit
 	if m.autoRestart && agent.RestartCount < m.cfg.Resilience.MaxRestarts {
+		if err := validateAutomatedMonitorRestart(agent.AgentType); err != nil {
+			log.Printf("[resilience] Refusing to auto-restart agent %s (type %s): %v", agent.PaneID, agent.AgentType, err)
+			return
+		}
 		// Schedule restart
 		m.wg.Add(1)
 		go func() {
@@ -777,8 +781,20 @@ func (m *Monitor) suggestManualRespawn(agent *AgentState) {
 	displayTmuxMessage(m.session, fmt.Sprintf("⚠️ Agent crashed (pane %d). Run: %s", agent.PaneIndex, respawnCmd))
 }
 
+func validateAutomatedMonitorRestart(agentType string) error {
+	if err := agent.AgentType(agentType).ValidateAutomatedRelaunch(); err != nil {
+		return fmt.Errorf("agent type %s does not support resilience auto-restart: %w", agent.AgentType(agentType).Canonical(), err)
+	}
+	return nil
+}
+
 // restartAgent restarts a crashed agent after the configured delay
 func (m *Monitor) restartAgent(ctx context.Context, agent *AgentState) {
+	if err := validateAutomatedMonitorRestart(agent.AgentType); err != nil {
+		log.Printf("[resilience] Refusing to restart agent %s: %v", agent.PaneID, err)
+		return
+	}
+
 	delay := time.Duration(m.cfg.Resilience.RestartDelaySeconds) * time.Second
 	log.Printf("[resilience] Restarting agent %s in %v...", agent.PaneID, delay)
 

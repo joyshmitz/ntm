@@ -932,7 +932,7 @@ func TestResolveCommandProjectDirForSession_ExplicitRejectsWorkspaceFallback(t *
 		t.Fatal(err)
 	}
 
-	if got := resolveCommandProjectDirForSession("ntm-explicit-missing-project-test", false); got != "" {
+	if got := resolveCommandProjectDirForSession(t.Context(), "ntm-explicit-missing-project-test", false); got != "" {
 		t.Fatalf("resolveCommandProjectDirForSession explicit = %q, want empty", got)
 	}
 }
@@ -960,7 +960,7 @@ func TestResolveCommandProjectDirForSession_InferredAllowsWorkspaceFallback(t *t
 		t.Fatal(err)
 	}
 
-	if got := resolveCommandProjectDirForSession("ntm", true); got != cwdRepo {
+	if got := resolveCommandProjectDirForSession(t.Context(), "ntm", true); got != cwdRepo {
 		t.Fatalf("resolveCommandProjectDirForSession inferred = %q, want %q", got, cwdRepo)
 	}
 }
@@ -1108,6 +1108,67 @@ func TestResolveExplicitProjectDirForSessionContext_PropagatesCancellation(t *te
 	}
 }
 
+func TestResolveExplicitProjectDirForSessionContext_RequiresContext(t *testing.T) {
+	_, err := resolveExplicitProjectDirForSessionContext(nil, "nil-context-live-project-test")
+	if err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("resolveExplicitProjectDirForSessionContext(nil) error = %v, want required-context error", err)
+	}
+}
+
+func TestResolveExplicitProjectDirForSessionContext_CancelsInFlightListPanes(t *testing.T) {
+	tempDir := t.TempDir()
+	marker := filepath.Join(tempDir, "list-panes-started")
+	wrapper := filepath.Join(tempDir, "tmux-block-list-panes")
+	script := `#!/bin/sh
+if [ "${1:-}" = "list-panes" ]; then
+  printf 'started\n' > "$NTM_TEST_LIST_PANES_STARTED"
+  exec sleep 30
+fi
+exit 97
+`
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux wrapper: %v", err)
+	}
+	t.Setenv("NTM_TMUX_BINARY", wrapper)
+	t.Setenv("NTM_TEST_LIST_PANES_STARTED", marker)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := resolveExplicitProjectDirForSessionContext(ctx, "in-flight-live-project-test")
+		result <- err
+	}()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat list-panes marker: %v", err)
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("list-panes call exited before wrapper marker: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for list-panes wrapper")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("resolveExplicitProjectDirForSessionContext(in-flight cancel) error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight list-panes did not join after cancellation")
+	}
+}
+
 func TestResolveExplicitProjectDirForSession_PropagatesLivePaneListingFailure(t *testing.T) {
 	wantErr := errors.New("tmux transport unavailable")
 	_, err := resolveExplicitProjectDirForSessionWithLookup(
@@ -1169,12 +1230,75 @@ func TestNormalizeProjectScopedSessionName_UsesConfiguredProjectPrefix(t *testin
 	}
 	cfg = &config.Config{ProjectsBase: projectsBase}
 
-	got, err := normalizeProjectScopedSessionName("mypro", true)
+	got, err := normalizeProjectScopedSessionName(t.Context(), "mypro", true)
 	if err != nil {
 		t.Fatalf("normalizeProjectScopedSessionName() error = %v", err)
 	}
 	if got != "myproject" {
 		t.Fatalf("normalizeProjectScopedSessionName() = %q, want %q", got, "myproject")
+	}
+}
+
+func TestNormalizeExplicitLiveSessionNameRequiresContext(t *testing.T) {
+	_, err := normalizeExplicitLiveSessionName(nil, "myproject", true)
+	if err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("normalizeExplicitLiveSessionName(nil) error = %v, want required-context error", err)
+	}
+}
+
+func TestNormalizeExplicitLiveSessionNameHonorsPreCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := normalizeExplicitLiveSessionName(ctx, "myproject", true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("normalizeExplicitLiveSessionName(canceled) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestNormalizeExplicitLiveSessionNameCancelsInFlightListSessions(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "list-sessions-started")
+	wrapper := filepath.Join(t.TempDir(), "tmux-block-list-sessions")
+	script := "#!/bin/sh\nprintf 'started\\n' > " + tmux.ShellQuote(marker) + "\nexec sleep 30\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux wrapper: %v", err)
+	}
+	t.Setenv("NTM_TMUX_BINARY", wrapper)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := normalizeExplicitLiveSessionName(ctx, "myproject", true)
+		result <- err
+	}()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat list-sessions marker: %v", err)
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("list-sessions call exited before wrapper marker: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for list-sessions wrapper")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("normalizeExplicitLiveSessionName(in-flight cancel) error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight list-sessions did not join after cancellation")
 	}
 }
 
@@ -1188,7 +1312,7 @@ func TestNormalizeProjectScopedSessionName_PreservesLabelWithConfiguredProjectPr
 	}
 	cfg = &config.Config{ProjectsBase: projectsBase}
 
-	got, err := normalizeProjectScopedSessionName("mypro--frontend", true)
+	got, err := normalizeProjectScopedSessionName(t.Context(), "mypro--frontend", true)
 	if err != nil {
 		t.Fatalf("normalizeProjectScopedSessionName() error = %v", err)
 	}
@@ -1209,7 +1333,7 @@ func TestNormalizeProjectScopedSessionName_RejectsAmbiguousConfiguredProjectPref
 	}
 	cfg = &config.Config{ProjectsBase: projectsBase}
 
-	_, err := normalizeProjectScopedSessionName("mypro", true)
+	_, err := normalizeProjectScopedSessionName(t.Context(), "mypro", true)
 	if err == nil {
 		t.Fatal("expected ambiguous configured project error")
 	}

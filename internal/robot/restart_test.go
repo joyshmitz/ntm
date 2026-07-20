@@ -2,8 +2,11 @@ package robot
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 func TestRestartConfig_Defaults(t *testing.T) {
@@ -127,6 +130,27 @@ func TestRestartManager_TryRestart_Disabled(t *testing.T) {
 	}
 	if result.Reason != "restarts disabled" {
 		t.Errorf("Reason = %q, want %q", result.Reason, "restarts disabled")
+	}
+}
+
+func TestRestartManagerTryRestartRejectsGrokBeforeLifecycleMutation(t *testing.T) {
+	manager := NewRestartManager("test-session", &RestartConfig{Enabled: true}, nil)
+	result := manager.TryRestart(context.Background(), "%1", "grok-build", HealthUnhealthy)
+	if result.Type != RestartNone || result.Success {
+		t.Fatalf("TryRestart() result = %+v, want non-mutating rejection", result)
+	}
+	if !strings.Contains(result.Reason, agent.ErrAutomatedRelaunchNotImplemented.Error()) {
+		t.Fatalf("TryRestart() reason = %q, want Grok capability boundary", result.Reason)
+	}
+}
+
+func TestAutoRestartUnhealthyAgentRejectsGrokBeforeHealthMutation(t *testing.T) {
+	result := AutoRestartUnhealthyAgent(context.Background(), "test-session", "%1", "grok", 0, nil)
+	if result.Type != RestartNone || result.Success {
+		t.Fatalf("AutoRestartUnhealthyAgent() result = %+v, want non-mutating rejection", result)
+	}
+	if !strings.Contains(result.Reason, agent.ErrAutomatedRelaunchNotImplemented.Error()) {
+		t.Fatalf("AutoRestartUnhealthyAgent() reason = %q, want Grok capability boundary", result.Reason)
 	}
 }
 

@@ -123,6 +123,31 @@ func TestApplyModelCommands_NilConfigSafe(t *testing.T) {
 	}
 }
 
+func TestValidateSessionsAutomatedRelaunchOnlyGatesLaunch(t *testing.T) {
+	state := &session.SessionState{Panes: []session.PaneState{{Index: 1, AgentType: "grok"}}}
+
+	if err := validateSessionsAutomatedRelaunch(state, false); err != nil {
+		t.Fatalf("topology-only restore validation error = %v, want nil", err)
+	}
+	if err := validateSessionsAutomatedRelaunch(state, true); !errors.Is(err, session.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("launching restore validation error = %v, want Grok relaunch sentinel", err)
+	}
+}
+
+func TestSessionsRestoreOperationErrorIncludesAgentLaunchFailure(t *testing.T) {
+	launchErr := errors.New("agent relaunch failed")
+	if got := sessionsRestoreOperationError(launchErr, nil); !errors.Is(got, launchErr) {
+		t.Fatalf("restore operation error = %v, want launch error", got)
+	}
+	promptErr := errors.New("prompt dispatch failed")
+	if got := sessionsRestoreOperationError(launchErr, promptErr); !errors.Is(got, promptErr) {
+		t.Fatalf("restore operation error = %v, want prompt error", got)
+	}
+	if got := sessionsRestoreOperationError(nil, nil); got != nil {
+		t.Fatalf("successful restore operation error = %v, want nil", got)
+	}
+}
+
 // TestRunSessionsShow_LoadFailureRoutesThroughJSONEnvelope covers bd-1yws7:
 // when --json is set, runSessionsShow's session.Load failure path must emit
 // a parseable JSON envelope and propagate errJSONFailure so automation

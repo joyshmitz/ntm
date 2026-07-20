@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -803,6 +806,142 @@ func TestAssignOptions_Defaults(t *testing.T) {
 	}
 	if len(opts.Beads) != 0 {
 		t.Error("Beads should default to empty")
+	}
+}
+
+func TestFilterAssignableActionableRecommendationsAppliesSafetyBeforeLimit(t *testing.T) {
+	recommendations := []bv.TriageRecommendation{
+		{ID: "blocked", Status: "open", BlockedBy: []string{"dependency"}},
+		{ID: "gated", Status: "open", Labels: []string{"  OPERATOR-GATED  "}},
+		{ID: "closed", Status: "closed"},
+		{ID: "   ", Status: "open"},
+		{ID: "missing-status", Title: "Must not assign", Priority: 0},
+		{ID: " first ", Title: " First ", Type: " task ", Status: "ready", Priority: 1},
+		{ID: "second", Title: "Second", Status: " OPEN ", Priority: 2},
+		{ID: " second ", Title: "Duplicate", Status: "ready", Priority: 0},
+		{ID: "third", Title: "Third", Status: "ready", Priority: 3},
+	}
+
+	filtered := filterAssignableActionableRecommendations(recommendations, 2)
+	if len(filtered) != 2 {
+		t.Fatalf("filtered recommendation count = %d, want 2", len(filtered))
+	}
+	if got := []string{filtered[0].ID, filtered[1].ID}; !reflect.DeepEqual(got, []string{"first", "second"}) {
+		t.Fatalf("filtered IDs = %v, want eligible rows after safety filtering", got)
+	}
+	if filtered[0].Title != "First" || filtered[0].Type != "task" {
+		t.Fatalf("trimmed first recommendation = %+v", filtered[0])
+	}
+
+	all := filterAssignableActionableRecommendations(recommendations, 0)
+	if len(all) != 3 {
+		t.Fatalf("uncapped filtered recommendation count = %d, want 3", len(all))
+	}
+	if got := []string{all[0].ID, all[1].ID, all[2].ID}; !reflect.DeepEqual(got, []string{"first", "second", "third"}) {
+		t.Fatalf("uncapped filtered IDs = %v", got)
+	}
+	for _, recommendation := range all {
+		if recommendation.ID == "missing-status" {
+			t.Fatalf("blank-status recommendation escaped robot assignment safety boundary: %+v", recommendation)
+		}
+	}
+	previews := filterAssignableBeadPreviews(recommendations, 2)
+	if got := []bv.BeadPreview{
+		{ID: "first", Title: "First", Priority: "P1", Type: "task"},
+		{ID: "second", Title: "Second", Priority: "P2"},
+	}; !reflect.DeepEqual(previews, got) {
+		t.Fatalf("assignable previews = %+v, want %+v", previews, got)
+	}
+}
+
+func TestFilterAssignableActionableRecommendationsIsolatesConcurrentProjectPolicies(t *testing.T) {
+	projectA := t.TempDir()
+	projectB := t.TempDir()
+	if err := bv.ConfigureProjectOperatorGatedLabels(projectA, []string{"project-a-gate"}); err != nil {
+		t.Fatalf("configure project A gates: %v", err)
+	}
+	if err := bv.ConfigureProjectOperatorGatedLabels(projectB, []string{"project-b-gate"}); err != nil {
+		t.Fatalf("configure project B gates: %v", err)
+	}
+	recommendations := []bv.TriageRecommendation{
+		{ID: "a-only", Status: "open", Labels: []string{"project-a-gate"}},
+		{ID: "b-only", Status: "open", Labels: []string{"project-b-gate"}},
+		{ID: "safe", Status: "open"},
+	}
+
+	assertIDs := func(projectDir string, want []string) error {
+		for range 100 {
+			filtered := filterAssignableActionableRecommendationsForProject(projectDir, recommendations, 0)
+			got := make([]string, 0, len(filtered))
+			for _, recommendation := range filtered {
+				got = append(got, recommendation.ID)
+			}
+			if !reflect.DeepEqual(got, want) {
+				return fmt.Errorf("project %s filtered IDs = %v, want %v", projectDir, got, want)
+			}
+		}
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, check := range []struct {
+		project string
+		want    []string
+	}{
+		{project: projectA, want: []string{"b-only", "safe"}},
+		{project: projectB, want: []string{"a-only", "safe"}},
+	} {
+		check := check
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- assertIDs(check.project, check.want)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLoadAuthoritativeAssignmentPolicyInstallsConfiguredGatesAndFailsClosed(t *testing.T) {
+	previousLabels := bv.OperatorGatedLabels()
+	t.Cleanup(func() { bv.ConfigureOperatorGatedLabels(previousLabels) })
+	t.Setenv("NTM_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectDir := t.TempDir()
+	if effective, err := loadAuthoritativeAssignmentPolicy(projectDir, "", false); err != nil || effective == nil {
+		t.Fatalf("load default authoritative assignment policy: config=%v error=%v", effective, err)
+	}
+	globalPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(globalPath, []byte("[assign]\noperator_gated_labels = [\"release-approval\"]\n"), 0o600); err != nil {
+		t.Fatalf("write global assignment policy: %v", err)
+	}
+	effective, err := loadAuthoritativeAssignmentPolicy(projectDir, globalPath, true)
+	if err != nil {
+		t.Fatalf("load authoritative assignment policy: %v", err)
+	}
+	if effective == nil || !bv.IsOperatorGatedLabel("release-approval") || !bv.IsOperatorGatedLabel("operator-gated") {
+		t.Fatalf("installed operator gates = %v", bv.OperatorGatedLabels())
+	}
+	if !bv.IsOperatorGatedLabelForProject(projectDir, "release-approval") || !bv.IsOperatorGatedLabelForProject(projectDir, "operator-gated") {
+		t.Fatalf("installed project operator gates = %v", bv.OperatorGatedLabelsForProject(projectDir))
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	if _, err := loadAuthoritativeAssignmentPolicy(projectDir, missing, true); err == nil || !strings.Contains(err.Error(), "explicitly selected config") {
+		t.Fatalf("missing required global policy error = %v", err)
+	}
+	if !bv.IsOperatorGatedLabel("release-approval") {
+		t.Fatal("failed policy load mutated the previously installed gate vocabulary")
+	}
+	if !bv.IsOperatorGatedLabelForProject(projectDir, "release-approval") {
+		t.Fatal("failed policy load mutated the previously installed project gate vocabulary")
 	}
 }
 

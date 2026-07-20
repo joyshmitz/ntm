@@ -270,6 +270,76 @@ func TestFindUpgradeAssetRejectsPackageArtifacts(t *testing.T) {
 	}
 }
 
+func TestFindUpgradeAssetStrictAcceptsDSRDarwinContracts(t *testing.T) {
+	t.Parallel()
+
+	const version = "1.20.0"
+	tests := []struct {
+		name       string
+		targetArch string
+		asset      string
+		strategy   string
+	}{
+		{
+			name:       "native arm64 archive",
+			targetArch: "arm64",
+			asset:      "ntm_1.20.0_darwin_arm64.tar.gz",
+			strategy:   "exact_archive",
+		},
+		{
+			name:       "native amd64 archive",
+			targetArch: "amd64",
+			asset:      "ntm_1.20.0_darwin_amd64.tar.gz",
+			strategy:   "exact_archive",
+		},
+		{
+			name:       "native arm64 binary",
+			targetArch: "arm64",
+			asset:      "ntm_darwin_arm64",
+			strategy:   "exact_binary",
+		},
+		{
+			name:       "legacy universal archive",
+			targetArch: "arm64",
+			asset:      "ntm_1.20.0_darwin_all.tar.gz",
+			strategy:   "exact_archive",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			match, tried := findUpgradeAsset(
+				[]GitHubAsset{{Name: tc.asset}}, "darwin", tc.targetArch, version, true,
+			)
+			if match == nil || match.Asset == nil {
+				t.Fatalf("findUpgradeAsset() = nil; tried %v", tried)
+			}
+			if match.Asset.Name != tc.asset || match.Strategy != tc.strategy {
+				t.Fatalf("findUpgradeAsset() = (%q, %q), want (%q, %q)",
+					match.Asset.Name, match.Strategy, tc.asset, tc.strategy)
+			}
+			if !strings.Contains(strings.Join(tried, "\n"), "darwin_"+tc.targetArch) {
+				t.Fatalf("strict candidates %v omit native architecture %q", tried, tc.targetArch)
+			}
+		})
+	}
+}
+
+func TestFindUpgradeAssetStrictRejectsWrongDSRDarwinArchitecture(t *testing.T) {
+	t.Parallel()
+
+	assets := []GitHubAsset{{Name: "ntm_1.20.0_darwin_amd64.tar.gz"}}
+	match, tried := findUpgradeAsset(assets, "darwin", "arm64", "1.20.0", true)
+	if match != nil {
+		t.Fatalf("findUpgradeAsset() picked %q for darwin/arm64, want nil", match.Asset.Name)
+	}
+	if !strings.Contains(strings.Join(tried, "\n"), "ntm_1.20.0_darwin_arm64.tar.gz") {
+		t.Fatalf("strict candidates %v omit the required arm64 archive", tried)
+	}
+}
+
 func TestRunUpgradeCheckStrictRequiresReleaseAndExactPlatformAsset(t *testing.T) {
 	originalFetch := fetchReleaseForUpgrade
 	originalVersion := Version

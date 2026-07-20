@@ -21,6 +21,7 @@ func TestCompletionAgentID(t *testing.T) {
 	}{
 		{name: "canonical claude", pane: tmux.Pane{Type: tmux.AgentClaude, NTMIndex: 1}, want: "cc_1", ok: true},
 		{name: "aliased codex", pane: tmux.Pane{Type: tmux.AgentType("openai-codex"), NTMIndex: 2}, want: "cod_2", ok: true},
+		{name: "aliased grok", pane: tmux.Pane{Type: tmux.AgentType("xai-grok-build"), NTMIndex: 5}, want: "grok_5", ok: true},
 		{name: "aliased windsurf", pane: tmux.Pane{Type: tmux.AgentType("ws"), NTMIndex: 3}, want: "windsurf_3", ok: true},
 		{name: "ollama included", pane: tmux.Pane{Type: tmux.AgentOllama, NTMIndex: 4}, want: "ollama_4", ok: true},
 		{name: "controller ignored", pane: tmux.Pane{Type: tmux.AgentType("controller_codex"), NTMIndex: 1}, want: "", ok: false},
@@ -35,6 +36,28 @@ func TestCompletionAgentID(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("completionAgentID(%+v) = %q, want %q", tc.pane, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProfileSwitchCompletionAgentID(t *testing.T) {
+	tests := []struct {
+		name string
+		pane tmux.Pane
+		want string
+		ok   bool
+	}{
+		{name: "supported claude", pane: tmux.Pane{Type: tmux.AgentClaude, NTMIndex: 1}, want: "cc_1", ok: true},
+		{name: "supported codex alias", pane: tmux.Pane{Type: tmux.AgentType("openai-codex"), NTMIndex: 2}, want: "cod_2", ok: true},
+		{name: "unsupported grok", pane: tmux.Pane{Type: tmux.AgentType("xai-grok-build"), NTMIndex: 3}, ok: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := profileSwitchCompletionAgentID(tc.pane)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("profileSwitchCompletionAgentID(%+v) = (%q, %v), want (%q, %v)", tc.pane, got, ok, tc.want, tc.ok)
 			}
 		})
 	}

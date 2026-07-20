@@ -98,16 +98,22 @@ func TestParseTargetTypes(t *testing.T) {
 		{"cc", []string{"claude"}},
 		{"cod", []string{"codex"}},
 		{"gmi", []string{"gemini"}},
+		{"xai_grok_build", []string{"grok"}},
 		{"cc,cod", []string{"claude", "codex"}},
-		{"all", []string{"claude", "codex", "gemini"}},
-		{"agents", []string{"claude", "codex", "gemini"}},
+		{"all", []string{"claude", "codex", "gemini", "grok"}},
+		{"agents", []string{"claude", "codex", "gemini", "grok"}},
 		{"", []string{}},
 	}
 
 	for _, tt := range tests {
 		result := parseTargetTypes(tt.input)
 		if len(result) != len(tt.expected) {
-			t.Errorf("parseTargetTypes(%q) = %v, want %v", tt.input, result, tt.expected)
+			t.Fatalf("parseTargetTypes(%q) = %v, want %v", tt.input, result, tt.expected)
+		}
+		for i, want := range tt.expected {
+			if result[i] != want {
+				t.Errorf("parseTargetTypes(%q)[%d] = %q, want %q", tt.input, i, result[i], want)
+			}
 		}
 	}
 }
@@ -282,6 +288,25 @@ func TestAggregateStats_GeminiAgents(t *testing.T) {
 	}
 }
 
+func TestAggregateStats_GrokAgents(t *testing.T) {
+	now := time.Now().UTC()
+	testEvents := []events.Event{
+		{Timestamp: now, Type: events.EventSessionCreate, Session: "s1", Data: map[string]interface{}{"grok_count": float64(3)}},
+	}
+
+	stats := aggregateStats(testEvents, 30, "", now.AddDate(0, 0, -30))
+	if stats.TotalAgents != 3 {
+		t.Fatalf("TotalAgents = %d, want 3", stats.TotalAgents)
+	}
+	grok, ok := stats.AgentBreakdown["grok"]
+	if !ok {
+		t.Fatal("Missing grok in agent breakdown")
+	}
+	if grok.Count != 3 {
+		t.Fatalf("grok.Count = %d, want 3", grok.Count)
+	}
+}
+
 func TestParseTargetTypes_FullNames(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -290,6 +315,7 @@ func TestParseTargetTypes_FullNames(t *testing.T) {
 		{"claude", []string{"claude"}},
 		{"codex", []string{"codex"}},
 		{"gemini", []string{"gemini"}},
+		{"grok-build", []string{"grok"}},
 		{"CLAUDE,CODEX", []string{"claude", "codex"}},
 		{"Claude,Gemini", []string{"claude", "gemini"}},
 	}
@@ -421,6 +447,7 @@ func TestBuildSessionDetails_AgentCounts(t *testing.T) {
 			"claude_count": float64(2),
 			"codex_count":  float64(1),
 			"gemini_count": float64(3),
+			"grok_count":   float64(4),
 		}},
 	}
 
@@ -428,8 +455,8 @@ func TestBuildSessionDetails_AgentCounts(t *testing.T) {
 	if len(details) != 1 {
 		t.Fatalf("Got %d sessions, want 1", len(details))
 	}
-	if details[0].AgentCount != 6 {
-		t.Errorf("AgentCount = %d, want 6", details[0].AgentCount)
+	if details[0].AgentCount != 10 {
+		t.Errorf("AgentCount = %d, want 10", details[0].AgentCount)
 	}
 }
 

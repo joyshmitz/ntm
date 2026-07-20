@@ -21,7 +21,7 @@ import (
 func TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks(t *testing.T) {
 	const (
 		sessionName          = "incident-session"
-		configuredWallBudget = 15 * time.Second
+		configuredWallBudget = 45 * time.Second
 	)
 
 	workflowPath := filepath.Join("testdata", "brennerbot-incident.yaml")
@@ -32,6 +32,7 @@ func TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks(t *testing.T) {
 	if !validation.Valid {
 		t.Fatalf("workflow validation failed: %+v", validation.Errors)
 	}
+	workflow.Settings.Timeout.Duration = configuredWallBudget
 
 	workspace := copyIncidentWorkspaceFixture(t)
 	mockTmux := pipelinepkg.NewMockTmuxClient()

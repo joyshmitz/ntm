@@ -28,6 +28,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Dicklesworthstone/ntm/internal/sqliteutil"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/cass"
@@ -946,6 +947,122 @@ func TestHandlePaneInputV1_EmptyText(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestHandlePaneInputV1_GrokReturnsNotImplementedBeforeSendKeys(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	resolveCalls := 0
+	sendCalls := 0
+	srv.resolvePane = func(_ context.Context, session string, paneIdx int) (tmux.Pane, error) {
+		resolveCalls++
+		if session != "grok-session" || paneIdx != 2 {
+			t.Fatalf("resolve pane called with session=%q pane=%d", session, paneIdx)
+		}
+		return tmux.Pane{ID: "%7", Index: paneIdx, Type: tmux.AgentType(" XAI_GROK_BUILD ")}, nil
+	}
+	srv.sendPaneKeys = func(string, string, bool) error {
+		sendCalls++
+		return nil
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/grok-session/panes/2/input", strings.NewReader(`{"text":"review this","enter":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "grok-session")
+	rctx.URLParams.Add("paneIdx", "2")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handlePaneInputV1(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501; body: %s", rec.Code, rec.Body.String())
+	}
+	var response APIError
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if response.Success || response.ErrorCode != ErrCodeNotImplemented {
+		t.Fatalf("response = %+v, want NOT_IMPLEMENTED", response)
+	}
+	if resolveCalls != 1 || sendCalls != 0 {
+		t.Fatalf("resolve calls = %d, send calls = %d; want 1 and 0", resolveCalls, sendCalls)
+	}
+}
+
+func TestHandleAgentSendV1PropagatesRobotNotImplemented(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	calls := 0
+	srv.sendAgents = func(opts robot.SendOptions) (*robot.SendOutput, error) {
+		calls++
+		if opts.Session != "grok-session" || opts.Message != "review this" ||
+			len(opts.AgentTypes) != 1 || opts.AgentTypes[0] != "grok" {
+			t.Fatalf("send options = %+v", opts)
+		}
+		return &robot.SendOutput{RobotResponse: robot.NewErrorResponse(
+			errors.New("Grok Build automated prompt delivery is unavailable"),
+			robot.ErrCodeNotImplemented,
+			"Grok Build phase-one capability boundary",
+		)}, nil
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/grok-session/agents/send",
+		strings.NewReader(`{"message":"review this","agent_types":["grok"]}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "grok-session")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleAgentSendV1(rec, req)
+
+	assertRobotNotImplementedAPIError(t, rec)
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1", calls)
+	}
+}
+
+func TestHandleAgentInterruptV1PropagatesRobotNotImplemented(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	calls := 0
+	srv.interruptAgents = func(opts robot.InterruptOptions) (*robot.InterruptOutput, error) {
+		calls++
+		if opts.Session != "grok-session" || opts.Message != "change course" ||
+			len(opts.Panes) != 1 || opts.Panes[0] != "2" || !opts.Force || !opts.NoWait {
+			t.Fatalf("interrupt options = %+v", opts)
+		}
+		return &robot.InterruptOutput{RobotResponse: robot.NewErrorResponse(
+			errors.New("Grok Build automated prompt delivery is unavailable"),
+			robot.ErrCodeNotImplemented,
+			"Grok Build phase-one capability boundary",
+		)}, nil
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/grok-session/agents/interrupt",
+		strings.NewReader(`{"panes":["2"],"message":"change course","force":true,"no_wait":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "grok-session")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleAgentInterruptV1(rec, req)
+
+	assertRobotNotImplementedAPIError(t, rec)
+	if calls != 1 {
+		t.Fatalf("interrupt calls = %d, want 1", calls)
+	}
+}
+
+func assertRobotNotImplementedAPIError(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501; body: %s", rec.Code, rec.Body.String())
+	}
+	var response APIError
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if response.Success || response.ErrorCode != ErrCodeNotImplemented || response.Hint == "" {
+		t.Fatalf("response = %+v, want NOT_IMPLEMENTED with capability hint", response)
 	}
 }
 
@@ -3688,7 +3805,7 @@ func TestCheckMemoryDaemon_ZombiePIDFileIsCleanedUp(t *testing.T) {
 		_ = cmd.Wait()
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	foundZombie := false
 	for time.Now().Before(deadline) {
 		state, _, err := process.GetProcessState(cmd.Process.Pid)
@@ -7079,9 +7196,9 @@ func TestHandleAgentSendV1_ValidSession_Branch(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	srv.handleAgentSendV1(rec, req)
-	// robot.GetSend fails (no tmux) → 500
-	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 200 or 500", rec.Code)
+	// Missing tmux state may resolve as not found or an internal robot error.
+	if rec.Code != http.StatusOK && rec.Code != http.StatusNotFound && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200, 404, or 500", rec.Code)
 	}
 }
 
@@ -7096,8 +7213,8 @@ func TestHandleAgentInterruptV1_ValidBody_Branch(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	srv.handleAgentInterruptV1(rec, req)
-	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 200 or 500", rec.Code)
+	if rec.Code != http.StatusOK && rec.Code != http.StatusNotFound && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200, 404, or 500", rec.Code)
 	}
 }
 

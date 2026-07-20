@@ -1092,7 +1092,6 @@ func TestListTimelines_IgnoresNonJSONL(t *testing.T) {
 }
 
 func TestStartCheckpointAndStop(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	persister, err := NewTimelinePersister(&TimelinePersistConfig{
 		BaseDir:            tmpDir,
@@ -1115,17 +1114,24 @@ func TestStartCheckpointAndStop(t *testing.T) {
 
 	// Start checkpointing
 	persister.StartCheckpoint(sessionID, tracker)
+	defer persister.Stop()
 
-	// Wait for at least one checkpoint to fire
-	time.Sleep(120 * time.Millisecond)
-
-	// Verify timeline was saved via checkpoint
-	loaded, err := persister.LoadTimeline(sessionID)
-	if err != nil {
-		t.Fatalf("LoadTimeline: %v", err)
-	}
-	if len(loaded) == 0 {
-		t.Error("expected events to be checkpointed")
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		loaded, err := persister.LoadTimeline(sessionID)
+		if err != nil {
+			t.Fatalf("LoadTimeline: %v", err)
+		}
+		if len(loaded) > 0 {
+			if loaded[0].AgentID != "cc_1" || loaded[0].SessionID != sessionID {
+				t.Fatalf("checkpointed unexpected event: %+v", loaded[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expected events to be checkpointed within 30s")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 
 	// Stop should clean up all checkpoints

@@ -1,9 +1,14 @@
 package robot
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 )
 
@@ -238,6 +243,150 @@ func TestBuildAutoRestartStuckOutput(t *testing.T) {
 			if out.Threshold != c.want {
 				t.Errorf("Threshold for %v = %q, want %q", c.dur, out.Threshold, c.want)
 			}
+		}
+	})
+}
+
+func TestValidateAutoRestartStuckAgentsRejectsGrokInMixedBatch(t *testing.T) {
+	agents := []SessionAgentHealth{
+		{Pane: 1, AgentType: "claude", Health: "unhealthy", IdleSinceSeconds: 600},
+		{Pane: 2, AgentType: "grok-build", Health: "unhealthy", IdleSinceSeconds: 600},
+	}
+	err := validateAutoRestartStuckAgents(agents, []int{1, 2})
+	if !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("validateAutoRestartStuckAgents() error = %v, want Grok relaunch sentinel", err)
+	}
+
+	if err := validateAutoRestartStuckAgents(agents, []int{1}); err != nil {
+		t.Fatalf("non-target Grok pane should not block supported target: %v", err)
+	}
+}
+
+func TestRestartAutoRestartStuckPanesPreflightsWholeBatch(t *testing.T) {
+	agents := []SessionAgentHealth{
+		{Pane: 1, AgentType: "claude"},
+		{Pane: 2, AgentType: "grok"},
+	}
+	calls := 0
+	restarted, failed, err := restartAutoRestartStuckPanes(
+		t.Context(),
+		AutoRestartStuckOptions{Session: "mixed"},
+		agents,
+		[]int{1, 2},
+		func(context.Context, RestartPaneOptions) (*RestartPaneOutput, error) {
+			calls++
+			return &RestartPaneOutput{RobotResponse: NewRobotResponse(true)}, nil
+		},
+	)
+	if !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("restartAutoRestartStuckPanes() error = %v, want Grok relaunch sentinel", err)
+	}
+	if calls != 0 {
+		t.Fatalf("restart callback called %d times, want zero before mixed-batch rejection", calls)
+	}
+	if restarted != nil || failed != nil {
+		t.Fatalf("results = restarted %v failed %v, want nil after preflight rejection", restarted, failed)
+	}
+}
+
+func TestRestartAutoRestartStuckPanesTreatsTerminalResponseAsFailure(t *testing.T) {
+	agents := []SessionAgentHealth{{Pane: 1, AgentType: "claude"}, {Pane: 2, AgentType: "codex"}}
+	restarted, failed, err := restartAutoRestartStuckPanes(
+		t.Context(),
+		AutoRestartStuckOptions{Session: "supported"},
+		agents,
+		[]int{1, 2},
+		func(_ context.Context, opts RestartPaneOptions) (*RestartPaneOutput, error) {
+			if opts.Panes[0] == "1" {
+				return &RestartPaneOutput{RobotResponse: NewRobotResponse(true)}, nil
+			}
+			return &RestartPaneOutput{
+				RobotResponse: NewErrorResponse(errors.New("unavailable"), ErrCodeNotImplemented, "hint"),
+			}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("restartAutoRestartStuckPanes() error = %v", err)
+	}
+	if !intSlicesEqual(restarted, []int{1}) || !intSlicesEqual(failed, []int{2}) {
+		t.Fatalf("results = restarted %v failed %v, want [1] and [2]", restarted, failed)
+	}
+}
+
+func TestRestartAutoRestartStuckPanesRejectsPreCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	calls := 0
+	restarted, failed, err := restartAutoRestartStuckPanes(
+		ctx,
+		AutoRestartStuckOptions{Session: "canceled"},
+		[]SessionAgentHealth{{Pane: 1, AgentType: "claude"}},
+		[]int{1},
+		func(context.Context, RestartPaneOptions) (*RestartPaneOutput, error) {
+			calls++
+			return &RestartPaneOutput{RobotResponse: NewRobotResponse(true)}, nil
+		},
+	)
+	if !errors.Is(err, context.Canceled) || calls != 0 || restarted != nil || failed != nil {
+		t.Fatalf("pre-canceled restart result restarted=%v failed=%v calls=%d err=%v", restarted, failed, calls, err)
+	}
+}
+
+func TestRestartAutoRestartStuckPanesStopsAfterCallbackCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	calls := 0
+	restarted, failed, err := restartAutoRestartStuckPanes(
+		ctx,
+		AutoRestartStuckOptions{Session: "cancel-in-flight"},
+		[]SessionAgentHealth{{Pane: 1, AgentType: "claude"}, {Pane: 2, AgentType: "codex"}},
+		[]int{1, 2},
+		func(gotCtx context.Context, opts RestartPaneOptions) (*RestartPaneOutput, error) {
+			calls++
+			if gotCtx != ctx {
+				t.Fatal("auto-restart-stuck replaced the caller context")
+			}
+			cancel()
+			return GetRestartPaneContext(gotCtx, opts)
+		},
+	)
+	if !errors.Is(err, context.Canceled) || calls != 1 || len(restarted) != 0 || !intSlicesEqual(failed, []int{1}) {
+		t.Fatalf("callback-canceled restart result restarted=%v failed=%v calls=%d err=%v", restarted, failed, calls, err)
+	}
+}
+
+func TestRestartAutoRestartStuckPanesStopsOnCallbackCancellationError(t *testing.T) {
+	calls := 0
+	restarted, failed, err := restartAutoRestartStuckPanes(
+		t.Context(),
+		AutoRestartStuckOptions{Session: "callback-canceled"},
+		[]SessionAgentHealth{{Pane: 1, AgentType: "claude"}, {Pane: 2, AgentType: "codex"}},
+		[]int{1, 2},
+		func(context.Context, RestartPaneOptions) (*RestartPaneOutput, error) {
+			calls++
+			return nil, fmt.Errorf("restart transport: %w", context.Canceled)
+		},
+	)
+	if !errors.Is(err, context.Canceled) || calls != 1 || len(restarted) != 0 || !intSlicesEqual(failed, []int{1}) {
+		t.Fatalf("callback error cancellation result restarted=%v failed=%v calls=%d err=%v", restarted, failed, calls, err)
+	}
+}
+
+func TestGetAutoRestartStuckRejectsMissingAndCanceledContexts(t *testing.T) {
+	t.Run("nil", func(t *testing.T) {
+		output, err := GetAutoRestartStuck(nil, AutoRestartStuckOptions{Session: "nil-context"})
+		if err != nil || output == nil || output.Success || output.ErrorCode != ErrCodeInternalError ||
+			!strings.Contains(output.Error, "context is required") {
+			t.Fatalf("nil-context output=%+v err=%v", output, err)
+		}
+	})
+
+	t.Run("pre-canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		output, err := GetAutoRestartStuck(ctx, AutoRestartStuckOptions{Session: "pre-canceled"})
+		if err != nil || output == nil || output.Success || output.ErrorCode != ErrCodeTimeout ||
+			!strings.Contains(strings.ToLower(output.Error), "canceled") {
+			t.Fatalf("pre-canceled output=%+v err=%v", output, err)
 		}
 	})
 }

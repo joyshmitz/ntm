@@ -200,7 +200,7 @@ func (c *Client) IsAvailable() bool {
 // without a lifecycle context.
 func (c *Client) IsAvailableContext(ctx context.Context) bool {
 	if ctx == nil {
-		ctx = context.Background()
+		return false
 	}
 	if ctx.Err() != nil {
 		return false
@@ -237,11 +237,14 @@ func (c *Client) IsAvailableContext(ctx context.Context) bool {
 	}
 
 	// Perform health check
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	_, err := c.HealthCheck(ctx)
+	_, err := c.HealthCheck(probeCtx)
 	available := err == nil
+	if ctx.Err() != nil || probeCtx.Err() != nil {
+		return false
+	}
 
 	// Cache the result
 	c.availableCache.Store(available)

@@ -2,13 +2,16 @@ package swarm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -36,6 +39,38 @@ type sendKeysCall struct {
 	paneID string
 	text   string
 	enter  bool
+}
+
+type synchronizedLogBuffer struct {
+	mu      sync.Mutex
+	content strings.Builder
+}
+
+func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.content.Write(p)
+}
+
+func (b *synchronizedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.content.String()
+}
+
+type mockAutoRespawnPromptInjector struct {
+	injectCalls   int
+	templateCalls int
+}
+
+func (m *mockAutoRespawnPromptInjector) InjectPrompt(_, _, _ string) error {
+	m.injectCalls++
+	return nil
+}
+
+func (m *mockAutoRespawnPromptInjector) GetTemplate(_ string) string {
+	m.templateCalls++
+	return "test marching orders"
 }
 
 func (m *mockPaneSpawner) SpawnAgent(session, agentType string, index int, variant string, workDir string) (string, error) {
@@ -235,6 +270,171 @@ func TestNewAutoRespawner(t *testing.T) {
 
 	if r.retryState == nil {
 		t.Error("expected retryState to be initialized")
+	}
+
+	if injector := r.promptInjector(); injector != nil {
+		t.Fatalf("expected unset prompt injector to remain a nil interface, got %T", injector)
+	}
+}
+
+func TestAutoRespawnerRejectsGrokBeforeLifecycleMutation(t *testing.T) {
+	t.Parallel()
+
+	tmuxClient := &mockTmuxClient{}
+	accountRotator := newMockAccountRotator()
+	promptInjector := &mockAutoRespawnPromptInjector{}
+	respawner := NewAutoRespawner().
+		WithTmuxClient(tmuxClient).
+		WithAccountRotator(accountRotator)
+	respawner.promptInjectorOverride = promptInjector
+	respawner.Config.AutoRotateAccounts = true
+	forceKillCalls := 0
+	respawner.forceKillFn = func(string) error {
+		forceKillCalls++
+		return nil
+	}
+
+	result := respawner.Respawn(LimitEvent{
+		SessionPane: "test:1.2",
+		AgentType:   "xai-grok-build",
+		Pattern:     "limit",
+		DetectedAt:  time.Now(),
+	})
+	if result.Success {
+		t.Fatalf("Respawn(grok) result = %+v, want failure", result)
+	}
+	if !strings.Contains(result.Error, agent.GrokPhaseOneCapabilityHint) {
+		t.Fatalf("Respawn(grok) error = %q, want Grok capability hint", result.Error)
+	}
+	if len(tmuxClient.sendKeysCalls) != 0 || len(tmuxClient.runCalls) != 0 || tmuxClient.captureIndex != 0 {
+		t.Fatalf("Respawn(grok) touched tmux: sends=%v runs=%v captures=%d", tmuxClient.sendKeysCalls, tmuxClient.runCalls, tmuxClient.captureIndex)
+	}
+	if forceKillCalls != 0 {
+		t.Fatalf("Respawn(grok) force-kill calls = %d, want 0", forceKillCalls)
+	}
+	if len(accountRotator.rotateCalls) != 0 {
+		t.Fatalf("Respawn(grok) account rotations = %v, want none", accountRotator.rotateCalls)
+	}
+	if promptInjector.injectCalls != 0 || promptInjector.templateCalls != 0 {
+		t.Fatalf("Respawn(grok) prompt calls = inject:%d template:%d, want 0", promptInjector.injectCalls, promptInjector.templateCalls)
+	}
+}
+
+func TestAutoRespawnerProcessLimitEventsRejectsGrokBeforeRetryOrLifecycleMutation(t *testing.T) {
+	t.Parallel()
+
+	const sessionPane = "test:1.2"
+	var logs synchronizedLogBuffer
+	tmuxClient := &mockTmuxClient{}
+	accountRotator := newMockAccountRotator()
+	promptInjector := &mockAutoRespawnPromptInjector{}
+	limitDetector := NewLimitDetector()
+	respawner := NewAutoRespawner().
+		WithLimitDetector(limitDetector).
+		WithTmuxClient(tmuxClient).
+		WithAccountRotator(accountRotator).
+		WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	respawner.promptInjectorOverride = promptInjector
+	respawner.Config.AutoRotateAccounts = true
+	forceKillCalls := 0
+	respawner.forceKillFn = func(string) error {
+		forceKillCalls++
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		limitDetector.Stop()
+		respawner.Stop()
+	})
+	if err := respawner.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := limitDetector.StartPane(ctx, sessionPane, "xai-grok-build"); err != nil {
+		t.Fatalf("StartPane() error = %v", err)
+	}
+
+	limitDetector.handleLimitEvent(&LimitEvent{
+		SessionPane: sessionPane,
+		AgentType:   "xai-grok-build",
+		Pattern:     "limit",
+		RawOutput:   "limit",
+		DetectedAt:  time.Now(),
+	})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for !strings.Contains(logs.String(), "[AutoRespawner] capability_rejected") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	respawner.Stop()
+
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, "[AutoRespawner] capability_rejected") || !strings.Contains(logOutput, agent.GrokPhaseOneCapabilityHint) {
+		t.Fatalf("process loop logs = %q, want explicit Grok capability rejection", logOutput)
+	}
+	if got := respawner.GetRetryCount(sessionPane); got != 0 {
+		t.Fatalf("retry count = %d, want 0 after rejected capability", got)
+	}
+
+	tmuxClient.mu.Lock()
+	sendCount := len(tmuxClient.sendKeysCalls)
+	runCount := len(tmuxClient.runCalls)
+	captureCount := tmuxClient.captureIndex
+	tmuxClient.mu.Unlock()
+	if sendCount != 0 || runCount != 0 || captureCount != 0 {
+		t.Fatalf("process loop touched tmux: sends=%d runs=%d captures=%d", sendCount, runCount, captureCount)
+	}
+	if forceKillCalls != 0 {
+		t.Fatalf("process loop force-kill calls = %d, want 0", forceKillCalls)
+	}
+	accountRotator.mu.Lock()
+	rotationCount := len(accountRotator.rotateCalls)
+	accountRotator.mu.Unlock()
+	if rotationCount != 0 {
+		t.Fatalf("process loop account rotations = %d, want 0", rotationCount)
+	}
+	if promptInjector.injectCalls != 0 || promptInjector.templateCalls != 0 {
+		t.Fatalf("process loop prompt calls = inject:%d template:%d, want 0", promptInjector.injectCalls, promptInjector.templateCalls)
+	}
+}
+
+func TestAutoRespawnerDirectLifecycleHelpersRejectGrokBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	for _, alias := range []string{"grok", "grok-build", "xai_grok_build"} {
+		alias := alias
+		t.Run(alias, func(t *testing.T) {
+			t.Parallel()
+
+			for _, call := range []struct {
+				name string
+				fn   func(*AutoRespawner) error
+			}{
+				{name: "kill", fn: func(r *AutoRespawner) error { return r.killAgent(context.Background(), "test:1.3", alias) }},
+				{name: "kill-with-fallback", fn: func(r *AutoRespawner) error {
+					return r.killWithFallback(context.Background(), "test:1.3", alias)
+				}},
+				{name: "spawn", fn: func(r *AutoRespawner) error { return r.spawnAgent("test:1.3", alias) }},
+			} {
+				t.Run(call.name, func(t *testing.T) {
+					tmuxClient := &mockTmuxClient{}
+					respawner := NewAutoRespawner().WithTmuxClient(tmuxClient)
+					forceKillCalls := 0
+					respawner.forceKillFn = func(string) error {
+						forceKillCalls++
+						return nil
+					}
+
+					if err := call.fn(respawner); !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+						t.Fatalf("%s(%s) error = %v, want relaunch sentinel", call.name, alias, err)
+					}
+					if len(tmuxClient.sendKeysCalls) != 0 || len(tmuxClient.runCalls) != 0 || tmuxClient.captureIndex != 0 || forceKillCalls != 0 {
+						t.Fatalf("%s(%s) mutated lifecycle: sends=%v runs=%v captures=%d force-kills=%d", call.name, alias, tmuxClient.sendKeysCalls, tmuxClient.runCalls, tmuxClient.captureIndex, forceKillCalls)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -839,6 +1039,8 @@ func TestGetAgentCommand(t *testing.T) {
 		{"gemini", "gmi"},
 		{"gemini_cli", "gmi"},
 		{"google-gemini", "gmi"},
+		{"grok", ""},
+		{"grok-build", ""},
 		{"ws", "windsurf"},
 		{"unknown", "unknown"},
 	}

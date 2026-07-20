@@ -1,6 +1,9 @@
 package robot
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -139,6 +142,7 @@ func TestAggregateTokenStats(t *testing.T) {
 					"claude_count": float64(3),
 					"codex_count":  float64(2),
 					"gemini_count": float64(1),
+					"grok_count":   float64(5),
 					"ollama_count": float64(4),
 				},
 			},
@@ -169,6 +173,15 @@ func TestAggregateTokenStats(t *testing.T) {
 					"target_types":     "ollama",
 				},
 			},
+			{
+				Type:      events.EventPromptSend,
+				Timestamp: time.Date(2026, 1, 15, 10, 20, 0, 0, time.UTC),
+				Data: map[string]interface{}{
+					"estimated_tokens": float64(125),
+					"prompt_length":    float64(438),
+					"target_types":     "xai_grok_build",
+				},
+			},
 		}
 
 		output := aggregateTokenStats(eventList, 7, "", "agent")
@@ -177,6 +190,9 @@ func TestAggregateTokenStats(t *testing.T) {
 		}
 		if output.AgentStats["codex"].Spawned != 2 {
 			t.Errorf("expected 2 codex spawns, got %d", output.AgentStats["codex"].Spawned)
+		}
+		if output.AgentStats["grok"].Spawned != 5 {
+			t.Errorf("expected 5 grok spawns, got %d", output.AgentStats["grok"].Spawned)
 		}
 		if output.AgentStats["ollama"].Spawned != 4 {
 			t.Errorf("expected 4 ollama spawns, got %d", output.AgentStats["ollama"].Spawned)
@@ -268,4 +284,61 @@ func TestAggregateTokenStats(t *testing.T) {
 				output.Breakdown[0].Tokens, output.Breakdown[1].Tokens)
 		}
 	})
+}
+
+func TestParseAgentTypes_GrokAndLegacyAll(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{input: "grok", want: []string{"grok"}},
+		{input: "grok-build", want: []string{"grok"}},
+		{input: "xai_grok_build", want: []string{"grok"}},
+		{input: "all", want: []string{"claude", "codex", "gemini", "grok"}},
+	}
+
+	for _, tt := range tests {
+		got := parseAgentTypes(tt.input)
+		if len(got) != len(tt.want) {
+			t.Fatalf("parseAgentTypes(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+		for i, want := range tt.want {
+			if got[i] != want {
+				t.Fatalf("parseAgentTypes(%q)[%d] = %q, want %q", tt.input, i, got[i], want)
+			}
+		}
+	}
+}
+
+func TestReadTokenEvents_NormalizesGrokFilter(t *testing.T) {
+	now := time.Now().UTC()
+	eventList := []events.Event{
+		{Timestamp: now, Type: events.EventPromptSend, Session: "s1", Data: map[string]interface{}{"target_types": "grok"}},
+		{Timestamp: now, Type: events.EventPromptSend, Session: "s1", Data: map[string]interface{}{"target_types": "cod"}},
+	}
+
+	var data []byte
+	for _, event := range eventList {
+		line, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("json.Marshal() error = %v", err)
+		}
+		data = append(data, line...)
+		data = append(data, '\n')
+	}
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	got, err := readTokenEvents(path, now.Add(-time.Hour), "", "xai-grok-build")
+	if err != nil {
+		t.Fatalf("readTokenEvents() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("readTokenEvents() returned %d events, want 1", len(got))
+	}
+	if targets, _ := got[0].Data["target_types"].(string); targets != "grok" {
+		t.Fatalf("matched target_types = %q, want grok", targets)
+	}
 }

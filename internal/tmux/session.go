@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -914,6 +915,180 @@ func GetPanes(session string) ([]Pane, error) {
 // GetPanesContext returns all panes in a session with cancellation support (default client).
 func GetPanesContext(ctx context.Context, session string) ([]Pane, error) {
 	return DefaultClient.GetPanesContext(ctx, session)
+}
+
+const (
+	defaultPaneProcessStartTimeout = 10 * time.Second
+	defaultPaneProcessStartPoll    = 100 * time.Millisecond
+	paneProcessStableObservations  = 2
+)
+
+// PaneCommandIsShell reports whether tmux still observes an interactive shell
+// rather than the process sent to the pane.
+func PaneCommandIsShell(command string) bool {
+	command = strings.ToLower(filepath.Base(strings.TrimSpace(command)))
+	switch command {
+	case "sh", "bash", "ash", "dash", "zsh", "fish", "ksh", "mksh", "pdksh", "csh", "tcsh",
+		"yash", "xonsh", "elvish", "ion", "nu", "oil", "osh", "cmd", "cmd.exe",
+		"pwsh", "pwsh.exe", "powershell", "powershell.exe":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidatePaneLaunchBaseline rejects a pane that was already occupied before
+// an agent launch. Without this preflight, a stable pre-existing process could
+// be mistaken for the process that the launch command was meant to start.
+func ValidatePaneLaunchBaseline(pane Pane) error {
+	command := strings.TrimSpace(pane.Command)
+	if command == "" || PaneCommandIsShell(command) {
+		return nil
+	}
+
+	paneID := strings.TrimSpace(pane.ID)
+	if paneID == "" {
+		paneID = pane.Ref().Physical()
+	}
+	return fmt.Errorf(
+		"pane %s pre-launch current command %q is already a non-shell process; use an idle shell pane",
+		paneID,
+		command,
+	)
+}
+
+type paneProcessLister func(context.Context, string) ([]Pane, error)
+
+// WaitForPaneProcessStartContext waits until the same non-shell process is
+// observed in the pane twice in succession. The stability requirement prevents
+// a command that exits immediately from being reported as a successful launch.
+func WaitForPaneProcessStartContext(ctx context.Context, session, paneID string) (Pane, error) {
+	return waitForPaneProcessStartContext(
+		ctx,
+		session,
+		paneID,
+		defaultPaneProcessStartTimeout,
+		defaultPaneProcessStartPoll,
+		paneProcessStableObservations,
+		GetPanesContext,
+	)
+}
+
+func waitForPaneProcessStartContext(
+	ctx context.Context,
+	session, paneID string,
+	timeout, pollInterval time.Duration,
+	requiredStableObservations int,
+	listPanes paneProcessLister,
+) (Pane, error) {
+	if ctx == nil {
+		return Pane{}, errors.New("waiting for pane process start requires a context")
+	}
+	if session == "" || paneID == "" {
+		return Pane{}, errors.New("waiting for pane process start requires a session and pane ID")
+	}
+	if listPanes == nil {
+		return Pane{}, errors.New("waiting for pane process start requires a pane lister")
+	}
+	if timeout <= 0 {
+		timeout = defaultPaneProcessStartTimeout
+	}
+	if pollInterval <= 0 {
+		pollInterval = defaultPaneProcessStartPoll
+	}
+	if requiredStableObservations < 1 {
+		requiredStableObservations = paneProcessStableObservations
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	deadline, _ := waitCtx.Deadline()
+	stableCommand := ""
+	stableObservations := 0
+	lastCommand := ""
+	foundPane := false
+	var lastErr error
+
+	for {
+		panes, err := listPanes(waitCtx, session)
+		if err != nil {
+			lastErr = err
+			stableCommand = ""
+			stableObservations = 0
+		} else {
+			lastErr = nil
+			foundPane = false
+			for _, pane := range panes {
+				if pane.ID != paneID {
+					continue
+				}
+				foundPane = true
+				lastCommand = strings.TrimSpace(pane.Command)
+				observedCommand := strings.ToLower(filepath.Base(lastCommand))
+				if observedCommand == "" || PaneCommandIsShell(observedCommand) {
+					stableCommand = ""
+					stableObservations = 0
+					break
+				}
+				if observedCommand != stableCommand {
+					stableCommand = observedCommand
+					stableObservations = 1
+				} else {
+					stableObservations++
+				}
+				if stableObservations >= requiredStableObservations {
+					return pane, nil
+				}
+				break
+			}
+			if !foundPane {
+				stableCommand = ""
+				stableObservations = 0
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return Pane{}, fmt.Errorf("waiting for pane %s process start: %w", paneID, err)
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		if pollInterval < remaining {
+			remaining = pollInterval
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-waitCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if ctx.Err() != nil {
+				return Pane{}, fmt.Errorf("waiting for pane %s process start: %w", paneID, ctx.Err())
+			}
+			remaining = 0
+		case <-timer.C:
+		}
+		if remaining <= 0 {
+			break
+		}
+	}
+
+	detail := "pane was not found"
+	if lastErr != nil {
+		detail = "last pane observation failed: " + lastErr.Error()
+	} else if foundPane && lastCommand == "" {
+		detail = "tmux reported an empty current command"
+	} else if foundPane {
+		detail = fmt.Sprintf("tmux still reported current command %q", lastCommand)
+	}
+	return Pane{}, fmt.Errorf(
+		"pane %s did not keep a non-shell process running for %s: %s; the pane may still exist",
+		paneID, timeout, detail,
+	)
 }
 
 // GetAllPanesContext returns all panes from all sessions, grouped by session name.

@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Dicklesworthstone/ntm/internal/tui/icons"
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 func TestAgentBadge(t *testing.T) {
@@ -22,6 +25,8 @@ func TestAgentBadge(t *testing.T) {
 		{"gemini", "gemini"},
 		{"gmi", "gemini"},
 		{"google-gemini", "gemini"},
+		{"grok", "grok"},
+		{"grok-build", "grok"},
 		{"ws", "windsurf"},
 		{"user", "user"},
 		{"unknown", "unknown"},
@@ -41,6 +46,16 @@ func TestAgentBadge(t *testing.T) {
 	}
 }
 
+func TestAgentBadgeMeta_Grok(t *testing.T) {
+	currentTheme := theme.Current()
+	currentIcons := icons.Current()
+
+	label, color, icon := agentBadgeMeta("grok-build", currentTheme, currentIcons)
+	if label != "grok" || color != currentTheme.Pink || icon != currentIcons.Robot {
+		t.Fatalf("agentBadgeMeta(grok-build) = (%q, %q, %q), want (%q, %q, %q)", label, color, icon, "grok", currentTheme.Pink, currentIcons.Robot)
+	}
+}
+
 func TestAgentBadgeWithCount(t *testing.T) {
 	tests := []struct {
 		agentType string
@@ -52,6 +67,7 @@ func TestAgentBadgeWithCount(t *testing.T) {
 		{"openai-codex", 4},
 		{"gemini", 5},
 		{"google-gemini", 6},
+		{"grok-build", 2},
 		{"user", 0},
 	}
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -472,70 +473,100 @@ func TestWaitForApprovalCleansWaiterBucketOnCheckError(t *testing.T) {
 // then re-check status; either the second Check sees the decision or
 // any future decision arrives via the registered channel.
 //
-// This test races Approve() against WaitForApproval with no artificial
-// delay, then asserts the call returns well within timeout (waitCh
-// unblocked OR second Check caught the decision). The test runs many
-// iterations to flush out the race window pre-fix.
+// This test restricts the store to one connection and checks that connection
+// out before starting WaitForApproval. That deterministically blocks the
+// initial Check while allowing the test to verify that the waiter is already
+// registered. The assertion directly proves the ordering that closes the race
+// instead of inferring it from goroutine scheduling latency.
 func TestWaitForApproval_NoRaceWithApproveBetweenCheckAndRegister(t *testing.T) {
 	store := setupTestStore(t)
 	engine := New(store, nil, nil, DefaultConfig())
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	const iterations = 200
-	const waitTimeout = 200 * time.Millisecond
-	// Acceptable delay after Approve has committed the decision. Pre-fix,
-	// when the race triggered, Approve completed promptly but WaitForApproval
-	// still slept until waitTimeout. Do not measure from before the goroutine
-	// is scheduled; busy CI can legitimately delay the approving goroutine.
-	const acceptableAfterApprove = 50 * time.Millisecond
+	approval, err := engine.Request(ctx, RequestParams{
+		Action:      "race_action",
+		Resource:    "race_resource",
+		RequestedBy: "requester",
+	})
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
 
-	for i := 0; i < iterations; i++ {
-		approval, err := engine.Request(ctx, RequestParams{
-			Action:      "race_action",
-			Resource:    "race_resource",
-			RequestedBy: "requester",
-		})
-		if err != nil {
-			t.Fatalf("iter %d Request: %v", i, err)
+	db := store.DB()
+	db.SetMaxOpenConns(1)
+	blockingConn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("check out blocking database connection: %v", err)
+	}
+	connectionOpen := true
+	defer func() {
+		if connectionOpen {
+			_ = blockingConn.Close()
 		}
+	}()
 
-		type approveResult struct {
-			at  time.Time
-			err error
-		}
-		approved := make(chan approveResult, 1)
+	type waitResult struct {
+		approval *state.Approval
+		err      error
+	}
+	done := make(chan waitResult, 1)
+	waitCountBefore := db.Stats().WaitCount
+	go func() {
+		result, waitErr := engine.WaitForApproval(ctx, approval.ID, 30*time.Second)
+		done <- waitResult{approval: result, err: waitErr}
+	}()
 
-		// Race: approve immediately, no delay. Half the time this fires
-		// before WaitForApproval registers the waitCh; the fix makes
-		// the second Check catch the decision.
-		go func(id string) {
-			err := engine.Approve(ctx, id, "approver")
-			approved <- approveResult{at: time.Now(), err: err}
-		}(approval.ID)
-
-		start := time.Now()
-		result, err := engine.WaitForApproval(ctx, approval.ID, waitTimeout)
-		returnedAt := time.Now()
-		elapsed := time.Since(start)
-		if err != nil {
-			t.Fatalf("iter %d WaitForApproval: %v", i, err)
-		}
-		approve := <-approved
-		if approve.err != nil {
-			t.Fatalf("iter %d Approve: %v", i, approve.err)
-		}
-		if result.Status != state.ApprovalApproved {
-			t.Errorf("iter %d: status = %s, want approved", i, result.Status)
-		}
-		// Pre-fix: when the race triggered, this would equal waitTimeout.
-		// Post-fix: after Approve commits, WaitForApproval returns promptly
-		// because the second Check catches the decision or the waiter is
-		// notified. A slow approval goroutine is not itself a missed-wakeup bug.
-		if afterApprove := returnedAt.Sub(approve.at); afterApprove > acceptableAfterApprove {
-			t.Errorf("iter %d: WaitForApproval returned %v after Approve completed (total %v), want < %v",
-				i, afterApprove, elapsed, acceptableAfterApprove)
+	// WaitCount is incremented only after WaitForApproval reaches its initial
+	// database read and blocks for the sole connection held above.
+	blockedDeadline := time.NewTimer(10 * time.Second)
+	defer blockedDeadline.Stop()
+	for db.Stats().WaitCount == waitCountBefore {
+		select {
+		case result := <-done:
+			t.Fatalf("WaitForApproval returned before its status read blocked: approval=%v err=%v", result.approval, result.err)
+		case <-blockedDeadline.C:
+			t.Fatal("WaitForApproval did not reach its blocked status read")
+		default:
+			runtime.Gosched()
 		}
 	}
+
+	engine.waitersMu.Lock()
+	waiterCount := len(engine.waiters[approval.ID])
+	engine.waitersMu.Unlock()
+	registeredBeforeCheck := waiterCount == 1
+
+	if err := blockingConn.Close(); err != nil {
+		t.Fatalf("release blocking database connection: %v", err)
+	}
+	connectionOpen = false
+
+	if err := engine.Approve(ctx, approval.ID, "approver"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	completionDeadline := time.NewTimer(10 * time.Second)
+	defer completionDeadline.Stop()
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("WaitForApproval: %v", result.err)
+		}
+		if result.approval == nil {
+			t.Fatal("WaitForApproval returned nil approval")
+		}
+		if result.approval.Status != state.ApprovalApproved {
+			t.Errorf("status = %s, want approved", result.approval.Status)
+		}
+	case <-completionDeadline.C:
+		t.Fatal("WaitForApproval did not return after approval notification")
+	}
+
+	if !registeredBeforeCheck {
+		t.Errorf("waiter count before initial status check = %d, want 1", waiterCount)
+	}
+	assertNoWaiterBucket(t, engine, approval.ID)
 }
 
 func assertNoWaiterBucket(t *testing.T, engine *Engine, id string) {

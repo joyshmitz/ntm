@@ -60,7 +60,7 @@ func init() {
 		if strings.TrimSpace(opts.Session) == "" {
 			return nil, fmt.Errorf("session is required")
 		}
-		return buildViewResponse(opts.Session)
+		return buildViewResponse(ctx, opts.Session)
 	})
 }
 
@@ -161,11 +161,11 @@ func coerceSuccessResponse(result any, command string) (output.SuccessResponse, 
 	}
 }
 
-func buildViewResponse(session string) (output.SuccessResponse, error) {
+func buildViewResponse(ctx context.Context, session string) (output.SuccessResponse, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return output.SuccessResponse{}, err
 	}
-	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	resolvedSession, err := normalizeExplicitLiveSessionName(ctx, session, true)
 	if err != nil {
 		return output.SuccessResponse{}, err
 	}

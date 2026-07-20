@@ -167,6 +167,15 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		output.CompletedAt = time.Now().UTC()
 		return finalizeTerminalInterruptActuation(trace, opts, targetKeys, output), nil
 	}
+	if err := validateInterruptFollowUpTargets(panes, targetPanes, opts); err != nil {
+		output.RobotResponse = robotDispatchPrepareErrorResponse(err)
+		output.Failed = append(output.Failed, InterruptError{
+			Pane:   "dispatch",
+			Reason: fmt.Sprintf("follow-up message is unavailable: %v", err),
+		})
+		output.CompletedAt = time.Now().UTC()
+		return finalizeTerminalInterruptActuation(trace, opts, targetKeys, output), nil
+	}
 
 	// Capture previous state for each pane before interrupting
 	for _, pane := range targetPanes {
@@ -332,6 +341,7 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 					robotPreparedDispatchRequest(dispatchPanes, messageTargets, sendOpts, opts.Message, true),
 				)
 				if prepareErr != nil {
+					output.RobotResponse = robotDispatchPrepareErrorResponse(prepareErr)
 					output.Failed = append(output.Failed, InterruptError{Pane: "dispatch", Reason: fmt.Sprintf("failed to prepare follow-up message: %v", prepareErr)})
 				} else {
 					result, _ := service.Dispatch(context.Background(), prepared)
@@ -380,6 +390,14 @@ func interruptMessageBlocked(opts *InterruptOptions, output *InterruptOutput) bo
 	)
 	output.Failed = append(output.Failed, InterruptError{Pane: "dispatch", Reason: errMsg})
 	return true
+}
+
+func validateInterruptFollowUpTargets(allPanes, targetPanes []tmux.Pane, opts InterruptOptions) error {
+	if opts.Message == "" {
+		return nil
+	}
+	sendOpts := SendOptions{Session: opts.Session, Message: opts.Message}
+	return validateRobotPromptDeliveryTargets(allPanes, targetPanes, sendOpts, opts.Message, true)
 }
 
 func observeInterruptPoll(

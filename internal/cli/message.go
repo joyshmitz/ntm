@@ -34,7 +34,7 @@ func newMessageInboxCmd() *cobra.Command {
 		Use:   "inbox",
 		Short: "View unified inbox",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			projectDir, agentName, err := resolveMessageCommandScope(cmd)
 			if err != nil {
 				return err
 			}
@@ -42,7 +42,7 @@ func newMessageInboxCmd() *cobra.Command {
 			amClient := newAgentMailClient(projectDir)
 			unified := agentmail.NewUnifiedMessenger(amClient, nil, projectDir, agentName)
 
-			msgs, err := unified.Inbox(context.Background())
+			msgs, err := unified.Inbox(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -71,7 +71,7 @@ func newMessageSendCmd() *cobra.Command {
 			to := args[0]
 			body := args[1]
 
-			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			projectDir, agentName, err := resolveMessageCommandScope(cmd)
 			if err != nil {
 				return err
 			}
@@ -79,7 +79,7 @@ func newMessageSendCmd() *cobra.Command {
 			amClient := newAgentMailClient(projectDir)
 			unified := agentmail.NewUnifiedMessenger(amClient, nil, projectDir, agentName)
 
-			return unified.Send(context.Background(), to, subject, body)
+			return unified.Send(cmd.Context(), to, subject, body)
 		},
 	}
 	cmd.Flags().StringVar(&subject, "subject", "(No Subject)", "Message subject")
@@ -96,7 +96,7 @@ This marks the message as read.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 
-			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			projectDir, agentName, err := resolveMessageCommandScope(cmd)
 			if err != nil {
 				return err
 			}
@@ -104,7 +104,7 @@ This marks the message as read.`,
 			amClient := newAgentMailClient(projectDir)
 			unified := agentmail.NewUnifiedMessenger(amClient, nil, projectDir, agentName)
 
-			msg, err := unified.Read(context.Background(), id)
+			msg, err := unified.Read(cmd.Context(), id)
 			if err != nil {
 				return err
 			}
@@ -142,7 +142,7 @@ This marks the message as both read and acknowledged.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 
-			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			projectDir, agentName, err := resolveMessageCommandScope(cmd)
 			if err != nil {
 				return err
 			}
@@ -150,7 +150,7 @@ This marks the message as both read and acknowledged.`,
 			amClient := newAgentMailClient(projectDir)
 			unified := agentmail.NewUnifiedMessenger(amClient, nil, projectDir, agentName)
 
-			if err := unified.Ack(context.Background(), id); err != nil {
+			if err := unified.Ack(cmd.Context(), id); err != nil {
 				return err
 			}
 
@@ -160,10 +160,25 @@ This marks the message as both read and acknowledged.`,
 	}
 }
 
-func resolveMessageScope(session string) (string, string, error) {
+func resolveMessageCommandScope(cmd *cobra.Command) (string, string, error) {
+	if cmd == nil || cmd.Context() == nil {
+		return "", "", fmt.Errorf("message command requires a command context")
+	}
+	ctx := cmd.Context()
+	if err := ctx.Err(); err != nil {
+		return "", "", fmt.Errorf("message command canceled: %w", err)
+	}
+	session, err := tmux.GetCurrentSessionContext(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("getting current tmux session: %w", err)
+	}
+	return resolveMessageScope(ctx, session)
+}
+
+func resolveMessageScope(ctx context.Context, session string) (string, string, error) {
 	session = strings.TrimSpace(session)
 	if session != "" {
-		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+		resolved, err := normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 		if err != nil {
 			return "", "", err
 		}
@@ -173,7 +188,7 @@ func resolveMessageScope(session string) (string, string, error) {
 	projectDir := ""
 	var err error
 	if session != "" {
-		projectDir, err = resolveExplicitProjectDirForSession(session)
+		projectDir, err = resolveExplicitProjectDirForSessionContext(ctx, session)
 		if err != nil {
 			return "", "", err
 		}
@@ -190,13 +205,19 @@ func resolveMessageScope(session string) (string, string, error) {
 	}
 	projectDir = refineAgentMailProjectKey(session, projectDir)
 
-	if agentName := resolveSessionPaneAgentName(session, projectDir); agentName != "" {
+	if agentName := resolveSessionPaneAgentName(ctx, session, projectDir); agentName != "" {
 		return projectDir, agentName, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", "", fmt.Errorf("resolving message identity: %w", err)
 	}
 
 	agentName := fmt.Sprintf("ntm_%s", session)
 	if info, err := agentmail.LoadBestSessionAgent(session, projectDir); err == nil && info != nil && strings.TrimSpace(info.AgentName) != "" {
 		agentName = info.AgentName
+	}
+	if err := ctx.Err(); err != nil {
+		return "", "", fmt.Errorf("resolving message identity: %w", err)
 	}
 
 	return projectDir, agentName, nil

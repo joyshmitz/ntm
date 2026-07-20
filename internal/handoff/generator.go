@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
@@ -22,9 +21,12 @@ import (
 )
 
 const (
-	defaultCASSLimit   = 5
-	defaultCASSTimeout = 3 * time.Second
+	defaultCASSLimit          = 5
+	defaultCASSTimeout        = 3 * time.Second
+	generatorCommandWaitDelay = 250 * time.Millisecond
 )
+
+type generatorCommandRunner func(context.Context, string, time.Duration, string, ...string) ([]byte, error)
 
 // CASSSearcher defines the minimal CASS client surface needed for handoff enrichment.
 type CASSSearcher interface {
@@ -34,17 +36,17 @@ type CASSSearcher interface {
 
 // Generator creates handoff content from various sources.
 type Generator struct {
-	projectDir string
-	logger     *slog.Logger
-	gitProbe   sync.Once
-	gitReady   bool
+	projectDir    string
+	logger        *slog.Logger
+	commandOutput generatorCommandRunner
 }
 
 // NewGenerator creates a Generator for the given project directory.
 func NewGenerator(projectDir string) *Generator {
 	return &Generator{
-		projectDir: projectDir,
-		logger:     slog.Default().With("component", "handoff.generator"),
+		projectDir:    projectDir,
+		logger:        slog.Default().With("component", "handoff.generator"),
+		commandOutput: runGeneratorCommand,
 	}
 }
 
@@ -54,13 +56,61 @@ func NewGeneratorWithLogger(projectDir string, logger *slog.Logger) *Generator {
 		logger = slog.Default()
 	}
 	return &Generator{
-		projectDir: projectDir,
-		logger:     logger.With("component", "handoff.generator"),
+		projectDir:    projectDir,
+		logger:        logger.With("component", "handoff.generator"),
+		commandOutput: runGeneratorCommand,
 	}
 }
 
+func requireGeneratorContext(ctx context.Context, operation string) error {
+	if ctx == nil {
+		return fmt.Errorf("%s: context is required", operation)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return nil
+}
+
+func generatorCancellationError(ctx context.Context, err error, operation string) error {
+	if ctx != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("%s: %w", operation, ctxErr)
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return nil
+}
+
+func runGeneratorCommand(ctx context.Context, dir string, timeout time.Duration, name string, args ...string) ([]byte, error) {
+	if err := requireGeneratorContext(ctx, "run handoff command"); err != nil {
+		return nil, err
+	}
+
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(commandCtx, name, args...)
+	cmd.Dir = dir
+	cmd.WaitDelay = generatorCommandWaitDelay
+	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if commandCtx.Err() != nil {
+		return nil, fmt.Errorf("%s command exceeded %s timeout", name, timeout)
+	}
+	return out, err
+}
+
 // GenerateFromOutput creates a handoff by analyzing agent output text.
-func (g *Generator) GenerateFromOutput(sessionName string, output []byte) (*Handoff, error) {
+func (g *Generator) GenerateFromOutput(ctx context.Context, sessionName string, output []byte) (*Handoff, error) {
+	if err := requireGeneratorContext(ctx, "generate handoff from output"); err != nil {
+		return nil, err
+	}
+
 	g.logger.Debug("generating handoff from output",
 		"session", sessionName,
 		"output_size", len(output),
@@ -69,6 +119,9 @@ func (g *Generator) GenerateFromOutput(sessionName string, output []byte) (*Hand
 	h := New(sessionName)
 
 	analysis := g.analyzeOutput(output)
+	if err := requireGeneratorContext(ctx, "generate handoff from output"); err != nil {
+		return nil, err
+	}
 
 	// Map analysis to handoff fields
 	h.Goal = analysis.accomplishment
@@ -91,7 +144,10 @@ func (g *Generator) GenerateFromOutput(sessionName string, output []byte) (*Hand
 	}
 
 	// Enrich with git state
-	if err := g.EnrichWithGitState(h); err != nil {
+	if err := g.EnrichWithGitState(ctx, h); err != nil {
+		if cancelErr := generatorCancellationError(ctx, err, "generate handoff from output"); cancelErr != nil {
+			return nil, cancelErr
+		}
 		g.logger.Warn("git enrichment failed", "error", err)
 		// Non-fatal - continue without git info
 	}
@@ -104,13 +160,20 @@ func (g *Generator) GenerateFromOutput(sessionName string, output []byte) (*Hand
 		"blocker_count", len(h.Blockers),
 	)
 
+	if err := requireGeneratorContext(ctx, "generate handoff from output"); err != nil {
+		return nil, err
+	}
 	h.UpdateQuality(time.Now())
 	return h, nil
 }
 
 // GenerateFromTranscript creates handoff from Claude Code transcript.
 // Transcript path: ~/.claude/projects/.../session.jsonl
-func (g *Generator) GenerateFromTranscript(sessionName, transcriptPath string) (*Handoff, error) {
+func (g *Generator) GenerateFromTranscript(ctx context.Context, sessionName, transcriptPath string) (*Handoff, error) {
+	if err := requireGeneratorContext(ctx, "generate handoff from transcript"); err != nil {
+		return nil, err
+	}
+
 	g.logger.Debug("generating handoff from transcript",
 		"session", sessionName,
 		"path", transcriptPath,
@@ -140,6 +203,9 @@ func (g *Generator) GenerateFromTranscript(sessionName, transcriptPath string) (
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 
 	for scanner.Scan() {
+		if err := requireGeneratorContext(ctx, "generate handoff from transcript"); err != nil {
+			return nil, err
+		}
 		var entry map[string]interface{}
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue // Skip malformed lines
@@ -231,23 +297,40 @@ func (g *Generator) GenerateFromTranscript(sessionName, transcriptPath string) (
 	)
 
 	// Enrich with git state
-	if err := g.EnrichWithGitState(h); err != nil {
+	if err := g.EnrichWithGitState(ctx, h); err != nil {
+		if cancelErr := generatorCancellationError(ctx, err, "generate handoff from transcript"); cancelErr != nil {
+			return nil, cancelErr
+		}
 		g.logger.Warn("git enrichment failed", "error", err)
 	}
 
+	if err := requireGeneratorContext(ctx, "generate handoff from transcript"); err != nil {
+		return nil, err
+	}
 	h.UpdateQuality(time.Now())
 	return h, nil
 }
 
 // EnrichWithGitState adds git information to handoff.
-func (g *Generator) EnrichWithGitState(h *Handoff) error {
+func (g *Generator) EnrichWithGitState(ctx context.Context, h *Handoff) error {
+	if err := requireGeneratorContext(ctx, "enrich handoff with git state"); err != nil {
+		return err
+	}
+	if h == nil {
+		return errors.New("enrich handoff with git state: handoff is required")
+	}
+
 	g.logger.Debug("enriching handoff with git state")
-	if !g.hasGitContext() {
+	hasGit, err := g.hasGitContext(ctx)
+	if err != nil {
+		return fmt.Errorf("git probe: %w", err)
+	}
+	if !hasGit {
 		return nil
 	}
 
 	// Get modified files from git diff
-	modified, err := g.getGitModified()
+	modified, err := g.getGitModified(ctx)
 	if err != nil {
 		return fmt.Errorf("git modified: %w", err)
 	}
@@ -255,20 +338,26 @@ func (g *Generator) EnrichWithGitState(h *Handoff) error {
 	h.Files.Modified = uniqueStrings(append(h.Files.Modified, modified...))
 
 	// Get new files from git status
-	created, err := g.getGitUntracked()
+	created, err := g.getGitUntracked(ctx)
 	if err != nil {
 		return fmt.Errorf("git untracked: %w", err)
 	}
 	h.Files.Created = uniqueStrings(append(h.Files.Created, created...))
 
 	// Get current branch for context
-	branch, _ := g.getGitBranch()
+	branch, err := g.getGitBranch(ctx)
+	if cancelErr := generatorCancellationError(ctx, err, "get git branch"); cancelErr != nil {
+		return cancelErr
+	}
 	if branch != "" {
 		h.AddFinding("git_branch", branch)
 	}
 
 	// Get recent commits (session could have made commits)
-	commits, _ := g.getRecentCommits(5)
+	commits, err := g.getRecentCommits(ctx, 5)
+	if cancelErr := generatorCancellationError(ctx, err, "get recent git commits"); cancelErr != nil {
+		return cancelErr
+	}
 	if len(commits) > 0 {
 		h.AddFinding("recent_commits", strings.Join(commits, "; "))
 	}
@@ -279,7 +368,7 @@ func (g *Generator) EnrichWithGitState(h *Handoff) error {
 		"branch", branch,
 	)
 
-	return nil
+	return requireGeneratorContext(ctx, "enrich handoff with git state")
 }
 
 // analysisResult holds extracted information from output.
@@ -396,67 +485,56 @@ func (g *Generator) analyzeOutput(output []byte) analysisResult {
 
 // Git helper functions
 
-func (g *Generator) hasGitContext() bool {
-	g.gitProbe.Do(func() {
-		if strings.TrimSpace(g.projectDir) == "" {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
-		cmd.Dir = g.projectDir
-		out, err := cmd.Output()
-		if err != nil {
-			g.logger.Debug("git probe failed", "project_dir", g.projectDir, "error", err)
-			return
-		}
-		g.gitReady = strings.TrimSpace(string(out)) == "true"
-	})
-	return g.gitReady
+func (g *Generator) runCommand(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
+	runner := g.commandOutput
+	if runner == nil {
+		runner = runGeneratorCommand
+	}
+	return runner(ctx, g.projectDir, timeout, name, args...)
 }
 
-func (g *Generator) getGitModified() ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "HEAD")
-	cmd.Dir = g.projectDir
-	out, err := cmd.Output()
+func (g *Generator) hasGitContext(ctx context.Context) (bool, error) {
+	if err := requireGeneratorContext(ctx, "probe git context"); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(g.projectDir) == "" {
+		return false, nil
+	}
+
+	out, err := g.runCommand(ctx, 5*time.Second, "git", "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		g.logger.Debug("git probe failed", "project_dir", g.projectDir, "error", err)
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) == "true", nil
+}
+
+func (g *Generator) getGitModified(ctx context.Context) ([]string, error) {
+	out, err := g.runCommand(ctx, 10*time.Second, "git", "diff", "--name-only", "HEAD")
 	if err != nil {
 		return nil, err
 	}
 	return parseLines(out), nil
 }
 
-func (g *Generator) getGitUntracked() ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-files", "--others", "--exclude-standard")
-	cmd.Dir = g.projectDir
-	out, err := cmd.Output()
+func (g *Generator) getGitUntracked(ctx context.Context) ([]string, error) {
+	out, err := g.runCommand(ctx, 10*time.Second, "git", "ls-files", "--others", "--exclude-standard")
 	if err != nil {
 		return nil, err
 	}
 	return parseLines(out), nil
 }
 
-func (g *Generator) getGitBranch() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "branch", "--show-current")
-	cmd.Dir = g.projectDir
-	out, err := cmd.Output()
+func (g *Generator) getGitBranch(ctx context.Context) (string, error) {
+	out, err := g.runCommand(ctx, 5*time.Second, "git", "branch", "--show-current")
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (g *Generator) getRecentCommits(n int) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "log", fmt.Sprintf("-%d", n), "--oneline")
-	cmd.Dir = g.projectDir
-	out, err := cmd.Output()
+func (g *Generator) getRecentCommits(ctx context.Context, n int) ([]string, error) {
+	out, err := g.runCommand(ctx, 10*time.Second, "git", "log", fmt.Sprintf("-%d", n), "--oneline")
 	if err != nil {
 		return nil, err
 	}
@@ -531,7 +609,11 @@ func (g *Generator) ProjectDir() string {
 
 // GenerateAutoHandoff creates an auto-generated handoff suitable for pre-compact hooks.
 // It combines output analysis with git state for a complete picture.
-func (g *Generator) GenerateAutoHandoff(sessionName, agentType, paneID string, output []byte, tokensUsed, tokensMax int) (*Handoff, error) {
+func (g *Generator) GenerateAutoHandoff(ctx context.Context, sessionName, agentType, paneID string, output []byte, tokensUsed, tokensMax int) (*Handoff, error) {
+	if err := requireGeneratorContext(ctx, "generate automatic handoff"); err != nil {
+		return nil, err
+	}
+
 	g.logger.Debug("generating auto-handoff",
 		"session", sessionName,
 		"agent_type", agentType,
@@ -541,9 +623,12 @@ func (g *Generator) GenerateAutoHandoff(sessionName, agentType, paneID string, o
 		"tokens_max", tokensMax,
 	)
 
-	h, err := g.GenerateFromOutput(sessionName, output)
+	h, err := g.GenerateFromOutput(ctx, sessionName, output)
 	if err != nil {
 		return nil, fmt.Errorf("generate from output: %w", err)
+	}
+	if err := requireGeneratorContext(ctx, "generate automatic handoff"); err != nil {
+		return nil, err
 	}
 
 	// Set agent info
@@ -563,6 +648,9 @@ func (g *Generator) GenerateAutoHandoff(sessionName, agentType, paneID string, o
 		"goal", truncateGen(h.Goal, 50),
 	)
 
+	if err := requireGeneratorContext(ctx, "generate automatic handoff"); err != nil {
+		return nil, err
+	}
 	h.UpdateQuality(time.Now())
 	return h, nil
 }
@@ -646,6 +734,10 @@ type GenerateHandoffOptions struct {
 //
 // All integrations are optional and fail gracefully if unavailable.
 func (g *Generator) GenerateHandoff(ctx context.Context, opts GenerateHandoffOptions) (*Handoff, error) {
+	if err := requireGeneratorContext(ctx, "generate complete handoff"); err != nil {
+		return nil, err
+	}
+
 	g.logger.Debug("generating complete handoff",
 		"session", opts.SessionName,
 		"agent_name", opts.AgentName,
@@ -685,9 +777,15 @@ func (g *Generator) GenerateHandoff(ctx context.Context, opts GenerateHandoffOpt
 		h.Decisions = analysis.decisions
 		h.Next = analysis.todos
 	}
+	if err := requireGeneratorContext(ctx, "generate complete handoff"); err != nil {
+		return nil, err
+	}
 
 	// Enrich with git state
-	if err := g.EnrichWithGitState(h); err != nil {
+	if err := g.EnrichWithGitState(ctx, h); err != nil {
+		if cancelErr := generatorCancellationError(ctx, err, "generate complete handoff"); cancelErr != nil {
+			return nil, cancelErr
+		}
 		g.logger.Warn("git enrichment failed", "error", err)
 		// Non-fatal - continue without git info
 	}
@@ -696,6 +794,9 @@ func (g *Generator) GenerateHandoff(ctx context.Context, opts GenerateHandoffOpt
 	includeBeads := opts.IncludeBeads == nil || *opts.IncludeBeads
 	if includeBeads {
 		if err := g.enrichWithBeads(ctx, h, opts); err != nil {
+			if cancelErr := generatorCancellationError(ctx, err, "generate complete handoff"); cancelErr != nil {
+				return nil, cancelErr
+			}
 			g.logger.Warn("BV enrichment failed", "error", err)
 			// Non-fatal - continue without bead info
 		}
@@ -705,6 +806,9 @@ func (g *Generator) GenerateHandoff(ctx context.Context, opts GenerateHandoffOpt
 	includeAgentMail := opts.IncludeAgentMail == nil || *opts.IncludeAgentMail
 	if includeAgentMail && opts.AgentName != "" {
 		if err := g.enrichWithAgentMail(ctx, h, opts); err != nil {
+			if cancelErr := generatorCancellationError(ctx, err, "generate complete handoff"); cancelErr != nil {
+				return nil, cancelErr
+			}
 			g.logger.Warn("Agent Mail enrichment failed", "error", err)
 			// Non-fatal - continue without Agent Mail info
 		}
@@ -714,9 +818,16 @@ func (g *Generator) GenerateHandoff(ctx context.Context, opts GenerateHandoffOpt
 	includeCASS := opts.IncludeCASS == nil || *opts.IncludeCASS
 	if includeCASS {
 		if err := g.enrichWithCASS(ctx, h, opts); err != nil {
+			if cancelErr := generatorCancellationError(ctx, err, "generate complete handoff"); cancelErr != nil {
+				return nil, cancelErr
+			}
 			g.logger.Warn("CASS enrichment failed", "error", err)
 			// Non-fatal - continue without CASS context
 		}
+	}
+
+	if err := requireGeneratorContext(ctx, "generate complete handoff"); err != nil {
+		return nil, err
 	}
 
 	// Infer status if not set
@@ -744,12 +855,19 @@ func (g *Generator) GenerateHandoff(ctx context.Context, opts GenerateHandoffOpt
 		"status", h.Status,
 	)
 
+	if err := requireGeneratorContext(ctx, "generate complete handoff"); err != nil {
+		return nil, err
+	}
 	h.UpdateQuality(time.Now())
 	return h, nil
 }
 
 // enrichWithBeads adds BV bead information to the handoff.
 func (g *Generator) enrichWithBeads(ctx context.Context, h *Handoff, opts GenerateHandoffOptions) error {
+	if err := requireGeneratorContext(ctx, "enrich handoff with beads"); err != nil {
+		return err
+	}
+
 	// Use provided client or create default
 	client := opts.BVClient
 	if client == nil {
@@ -757,13 +875,19 @@ func (g *Generator) enrichWithBeads(ctx context.Context, h *Handoff, opts Genera
 	}
 
 	// Check if BV is available
-	if !client.IsAvailable() {
+	if !client.IsAvailableContext(ctx) {
+		if err := requireGeneratorContext(ctx, "check BV availability"); err != nil {
+			return err
+		}
 		g.logger.Debug("BV not available, skipping bead enrichment")
 		return nil
 	}
+	if err := requireGeneratorContext(ctx, "check BV availability"); err != nil {
+		return err
+	}
 
 	// Get in-progress beads using br CLI (more reliable than API for filtered queries)
-	beads, err := g.getInProgressBeads(opts.AgentName)
+	beads, err := g.getInProgressBeads(ctx, opts.AgentName)
 	if err != nil {
 		return fmt.Errorf("get in-progress beads: %w", err)
 	}
@@ -775,11 +899,15 @@ func (g *Generator) enrichWithBeads(ctx context.Context, h *Handoff, opts Genera
 		"count", len(beads),
 	)
 
-	return nil
+	return requireGeneratorContext(ctx, "enrich handoff with beads")
 }
 
 // getInProgressBeads queries br CLI for in-progress beads.
-func (g *Generator) getInProgressBeads(agentName string) ([]string, error) {
+func (g *Generator) getInProgressBeads(ctx context.Context, agentName string) ([]string, error) {
+	if err := requireGeneratorContext(ctx, "get in-progress beads"); err != nil {
+		return nil, err
+	}
+
 	args := []string{"list", "--status", "in_progress", "--format", "json"}
 
 	// If agent name provided, filter by assignee
@@ -787,13 +915,11 @@ func (g *Generator) getInProgressBeads(agentName string) ([]string, error) {
 		args = append(args, "--assignee", agentName)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "br", args...)
-	cmd.Dir = g.projectDir
-
-	out, err := cmd.Output()
+	out, err := g.runCommand(ctx, 10*time.Second, "br", args...)
 	if err != nil {
+		if cancelErr := generatorCancellationError(ctx, err, "get in-progress beads"); cancelErr != nil {
+			return nil, cancelErr
+		}
 		// br not installed or no beads - not an error
 		return nil, nil
 	}
@@ -819,11 +945,18 @@ func (g *Generator) getInProgressBeads(agentName string) ([]string, error) {
 		result = append(result, entry)
 	}
 
+	if err := requireGeneratorContext(ctx, "get in-progress beads"); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
 // enrichWithAgentMail adds Agent Mail information to the handoff.
 func (g *Generator) enrichWithAgentMail(ctx context.Context, h *Handoff, opts GenerateHandoffOptions) error {
+	if err := requireGeneratorContext(ctx, "enrich handoff with agent mail"); err != nil {
+		return err
+	}
+
 	// Use provided client or create default
 	client := opts.AgentMailClient
 	if client == nil {
@@ -835,9 +968,15 @@ func (g *Generator) enrichWithAgentMail(ctx context.Context, h *Handoff, opts Ge
 	}
 
 	// Check if Agent Mail is available
-	if !client.IsAvailable() {
+	if !client.IsAvailableContext(ctx) {
+		if err := requireGeneratorContext(ctx, "check agent mail availability"); err != nil {
+			return err
+		}
 		g.logger.Debug("Agent Mail not available, skipping enrichment")
 		return nil
+	}
+	if err := requireGeneratorContext(ctx, "check agent mail availability"); err != nil {
+		return err
 	}
 
 	projectKey := opts.ProjectKey
@@ -848,18 +987,30 @@ func (g *Generator) enrichWithAgentMail(ctx context.Context, h *Handoff, opts Ge
 	// Fetch inbox messages (recent threads)
 	threads, err := g.fetchAgentMailThreads(ctx, client, projectKey, opts.AgentName)
 	if err != nil {
+		if cancelErr := generatorCancellationError(ctx, err, "fetch agent mail threads"); cancelErr != nil {
+			return cancelErr
+		}
 		g.logger.Warn("failed to fetch Agent Mail threads", "error", err)
 		// Non-fatal
 	} else {
+		if err := requireGeneratorContext(ctx, "store agent mail threads"); err != nil {
+			return err
+		}
 		h.AgentMailThreads = threads
 	}
 
 	// Fetch file reservations
 	reservations, err := g.fetchFileReservations(ctx, client, projectKey, opts.AgentName)
 	if err != nil {
+		if cancelErr := generatorCancellationError(ctx, err, "fetch file reservations"); cancelErr != nil {
+			return cancelErr
+		}
 		g.logger.Warn("failed to fetch file reservations", "error", err)
 		// Non-fatal
 	} else if len(reservations) > 0 {
+		if err := requireGeneratorContext(ctx, "store file reservations"); err != nil {
+			return err
+		}
 		h.AddFinding("file_reservations", strings.Join(formatReservationSummary(reservations), "; "))
 		if opts.AgentName != "" {
 			h.ReservationTransfer = buildReservationTransfer(opts, projectKey, reservations)
@@ -871,17 +1022,23 @@ func (g *Generator) enrichWithAgentMail(ctx context.Context, h *Handoff, opts Ge
 		"reservations", len(reservations),
 	)
 
-	return nil
+	return requireGeneratorContext(ctx, "enrich handoff with agent mail")
 }
 
 // fetchAgentMailThreads retrieves recent inbox messages for the agent.
 func (g *Generator) fetchAgentMailThreads(ctx context.Context, client *agentmail.Client, projectKey, agentName string) ([]string, error) {
+	if err := requireGeneratorContext(ctx, "fetch agent mail threads"); err != nil {
+		return nil, err
+	}
 	messages, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
 		ProjectKey: projectKey,
 		AgentName:  agentName,
 		Limit:      10, // Limit to recent messages
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := requireGeneratorContext(ctx, "fetch agent mail threads"); err != nil {
 		return nil, err
 	}
 
@@ -893,6 +1050,9 @@ func (g *Generator) fetchAgentMailThreads(ctx context.Context, client *agentmail
 	seenThreads := make(map[string]bool)
 
 	for _, msg := range messages {
+		if err := requireGeneratorContext(ctx, "format agent mail threads"); err != nil {
+			return nil, err
+		}
 		// Format thread/message info
 		var entry string
 		if threadID := normalizeThreadID(msg.ThreadID); threadID != "" {
@@ -914,6 +1074,9 @@ func (g *Generator) fetchAgentMailThreads(ctx context.Context, client *agentmail
 		threads = append(threads, entry)
 	}
 
+	if err := requireGeneratorContext(ctx, "format agent mail threads"); err != nil {
+		return nil, err
+	}
 	return threads, nil
 }
 
@@ -926,8 +1089,14 @@ func normalizeThreadID(threadID *string) string {
 
 // fetchFileReservations retrieves active file reservations.
 func (g *Generator) fetchFileReservations(ctx context.Context, client *agentmail.Client, projectKey, agentName string) ([]agentmail.FileReservation, error) {
+	if err := requireGeneratorContext(ctx, "fetch file reservations"); err != nil {
+		return nil, err
+	}
 	reservations, err := client.ListReservations(ctx, projectKey, agentName, false)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireGeneratorContext(ctx, "fetch file reservations"); err != nil {
 		return nil, err
 	}
 	return reservations, nil
@@ -986,6 +1155,9 @@ func buildReservationTransfer(opts GenerateHandoffOptions, projectKey string, re
 
 // enrichWithCASS adds recent relevant CASS context snippets (with provenance) to the handoff.
 func (g *Generator) enrichWithCASS(ctx context.Context, h *Handoff, opts GenerateHandoffOptions) error {
+	if err := requireGeneratorContext(ctx, "enrich handoff with CASS"); err != nil {
+		return err
+	}
 	query := buildCASSQuery(h)
 	if query == "" {
 		return nil
@@ -996,6 +1168,9 @@ func (g *Generator) enrichWithCASS(ctx context.Context, h *Handoff, opts Generat
 		client = cass.NewClient(cass.WithTimeout(resolveCASSTimeout(opts.CASSTimeout)))
 	}
 	if client == nil || !client.IsInstalled() {
+		if err := requireGeneratorContext(ctx, "check CASS availability"); err != nil {
+			return err
+		}
 		g.logger.Debug("CASS not installed, skipping enrichment")
 		return nil
 	}
@@ -1026,10 +1201,16 @@ func (g *Generator) enrichWithCASS(ctx context.Context, h *Handoff, opts Generat
 		Fields:    "summary",
 	})
 	if err != nil {
+		if cancelErr := generatorCancellationError(ctx, err, "search CASS"); cancelErr != nil {
+			return cancelErr
+		}
 		if errors.Is(err, cass.ErrNotInstalled) || errors.Is(err, cass.ErrNotInitialized) {
 			g.logger.Debug("CASS unavailable or uninitialized, skipping enrichment", "error", err)
 			return nil
 		}
+		return err
+	}
+	if err := requireGeneratorContext(ctx, "search CASS"); err != nil {
 		return err
 	}
 	if resp == nil || len(resp.Hits) == 0 {
@@ -1039,6 +1220,9 @@ func (g *Generator) enrichWithCASS(ctx context.Context, h *Handoff, opts Generat
 	entries := buildCASSMemoryEntries(resp.Hits, limit)
 	if len(entries) == 0 {
 		return nil
+	}
+	if err := requireGeneratorContext(ctx, "store CASS results"); err != nil {
+		return err
 	}
 
 	h.CMMemories = uniqueStrings(append(h.CMMemories, entries...))
@@ -1050,7 +1234,7 @@ func (g *Generator) enrichWithCASS(ctx context.Context, h *Handoff, opts Generat
 		"entries", len(entries),
 	)
 
-	return nil
+	return requireGeneratorContext(ctx, "enrich handoff with CASS")
 }
 
 func resolveCASSTimeout(timeout time.Duration) time.Duration {

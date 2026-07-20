@@ -285,12 +285,18 @@ func StorageDir() string {
 
 // NewStore creates a new AssignmentStore for a session
 func NewStore(sessionName string) *AssignmentStore {
+	return newStore(sessionName, true)
+}
+
+func newStore(sessionName string, createSessionDir bool) *AssignmentStore {
 	// Store assignments inside the session directory: ~/.ntm/sessions/<session>/assignments.json
 	baseDir := StorageDir()
 	sessionDir := filepath.Join(baseDir, sessionName)
 
-	// Ensure session directory exists (it might not if we are just creating assignments before session save)
-	_ = os.MkdirAll(sessionDir, 0700)
+	if createSessionDir {
+		// Ensure session directory exists (it might not if we are just creating assignments before session save)
+		_ = os.MkdirAll(sessionDir, 0700)
+	}
 
 	return &AssignmentStore{
 		SessionName:           sessionName,
@@ -322,6 +328,22 @@ func LoadStoreStrict(sessionName string) (*AssignmentStore, error) {
 	store := NewStore(sessionName)
 	if err := store.LoadStrict(); err != nil {
 		return nil, err
+	}
+	return store, nil
+}
+
+// LoadStoreStrictReadOnly returns the same fail-closed durable snapshot that a
+// strict load would select without creating directories or lock files and
+// without promoting a newer backup into the primary. It is intended for
+// preview and inspection paths that must remain externally mutation-free.
+func LoadStoreStrictReadOnly(sessionName string) (*AssignmentStore, error) {
+	store := newStore(sessionName, false)
+	selection, err := selectAssignmentSnapshot(store.path, store.SessionName, true)
+	if err != nil {
+		return nil, &PersistenceError{Operation: "read-only load", Path: store.path, Cause: err}
+	}
+	if selection != nil {
+		store.applySnapshotLocked(selection.snapshot)
 	}
 	return store, nil
 }

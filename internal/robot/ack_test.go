@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -441,6 +442,24 @@ func TestSendAndAckToPaneUsesDerivedAgentAwareSender(t *testing.T) {
 	}
 	if gotAgentType != tmux.AgentCodex {
 		t.Fatalf("sendAndAckToPane() agentType = %v, want %v", gotAgentType, tmux.AgentCodex)
+	}
+}
+
+func TestTrackPreservesUnsupportedPromptClassification(t *testing.T) {
+	t.Parallel()
+	prepareErr := &dispatchsvc.Error{
+		Code: dispatchsvc.ErrPromptDeliveryUnsupported,
+		Err:  errors.New("prompt delivery is not implemented for Grok Build panes"),
+	}
+	output := SendOutput{
+		RobotResponse: robotDispatchPrepareErrorResponse(prepareErr),
+		Targets:       []string{"1"},
+		Successful:    []string{},
+		Failed:        []SendError{{Pane: "dispatch", Error: prepareErr.Error()}},
+	}
+	finalizeRobotSendDispatchStatus(&output)
+	if output.Success || output.ErrorCode != ErrCodeNotImplemented || ExitCodeForResponse(output.RobotResponse) != 2 {
+		t.Fatalf("track send output = %+v, want NOT_IMPLEMENTED / exit 2", output)
 	}
 }
 

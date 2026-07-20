@@ -28,6 +28,9 @@ const (
 	shellReturnPollInterval = 400 * time.Millisecond
 	// smartRestartMinReadyTimeout is the floor for the post-launch ready-gate.
 	smartRestartMinReadyTimeout = 10 * time.Second
+	// smartRestartMutationObservationTimeout bounds the independent observation
+	// performed after caller cancellation when launch actuation may have occurred.
+	smartRestartMutationObservationTimeout = 2 * time.Second
 )
 
 // =============================================================================
@@ -88,43 +91,48 @@ type smartRestartPromptDispatcher interface {
 // Production uses live tmux/process operations; tests inject a deterministic
 // executor so prompt outcomes can be exercised without launching real agents.
 type smartRestartExecutor interface {
-	exitAgent(session string, win, pane int, agentType string, seq *RestartSequence) error
-	waitForShellReturn(session string, win, pane int, timeout time.Duration) (bool, string)
-	hardKillAgent(session string, win, pane int, seq *RestartSequence) (*HardKillResult, error)
-	sendKeys(session string, win, pane int, keys string) error
-	getShellPID(session string, win, pane int) (int, error)
-	waitForPaneAgentReady(target string, shellPID int, agentType string, timeout time.Duration) bool
-	capturePaneOutput(target string, lines int) (string, error)
+	exitAgent(context.Context, string, int, int, string, *RestartSequence) error
+	waitForShellReturn(context.Context, string, int, int, time.Duration) (bool, string, error)
+	hardKillAgent(context.Context, string, int, int, *RestartSequence) (*HardKillResult, error)
+	sendKeys(context.Context, string, int, int, string) error
+	getShellPID(context.Context, string, int, int) (int, error)
+	waitForPaneAgentReady(context.Context, string, int, string, time.Duration) (bool, error)
+	capturePaneOutput(context.Context, string, int) (string, error)
+	hasChildAlive(int) bool
 }
 
 type liveSmartRestartExecutor struct{}
 
-func (liveSmartRestartExecutor) exitAgent(session string, win, pane int, agentType string, seq *RestartSequence) error {
-	return exitAgent(session, win, pane, agentType, seq)
+func (liveSmartRestartExecutor) exitAgent(ctx context.Context, session string, win, pane int, agentType string, seq *RestartSequence) error {
+	return exitAgent(ctx, session, win, pane, agentType, seq)
 }
 
-func (liveSmartRestartExecutor) waitForShellReturn(session string, win, pane int, timeout time.Duration) (bool, string) {
-	return waitForShellReturn(session, win, pane, timeout)
+func (liveSmartRestartExecutor) waitForShellReturn(ctx context.Context, session string, win, pane int, timeout time.Duration) (bool, string, error) {
+	return waitForShellReturn(ctx, session, win, pane, timeout)
 }
 
-func (liveSmartRestartExecutor) hardKillAgent(session string, win, pane int, seq *RestartSequence) (*HardKillResult, error) {
-	return hardKillAgent(session, win, pane, seq)
+func (liveSmartRestartExecutor) hardKillAgent(ctx context.Context, session string, win, pane int, seq *RestartSequence) (*HardKillResult, error) {
+	return hardKillAgent(ctx, session, win, pane, seq)
 }
 
-func (liveSmartRestartExecutor) sendKeys(session string, win, pane int, keys string) error {
-	return sendKeys(session, win, pane, keys)
+func (liveSmartRestartExecutor) sendKeys(ctx context.Context, session string, win, pane int, keys string) error {
+	return sendKeys(ctx, session, win, pane, keys)
 }
 
-func (liveSmartRestartExecutor) getShellPID(session string, win, pane int) (int, error) {
-	return getShellPID(session, win, pane)
+func (liveSmartRestartExecutor) getShellPID(ctx context.Context, session string, win, pane int) (int, error) {
+	return getShellPID(ctx, session, win, pane)
 }
 
-func (liveSmartRestartExecutor) waitForPaneAgentReady(target string, shellPID int, agentType string, timeout time.Duration) bool {
-	return waitForPaneAgentReady(target, shellPID, agentType, timeout)
+func (liveSmartRestartExecutor) waitForPaneAgentReady(ctx context.Context, target string, shellPID int, agentType string, timeout time.Duration) (bool, error) {
+	return waitForPaneAgentReadyContext(ctx, target, shellPID, agentType, timeout)
 }
 
-func (liveSmartRestartExecutor) capturePaneOutput(target string, lines int) (string, error) {
-	return tmux.CapturePaneOutput(target, lines)
+func (liveSmartRestartExecutor) capturePaneOutput(ctx context.Context, target string, lines int) (string, error) {
+	return tmux.CapturePaneOutputContext(ctx, target, lines)
+}
+
+func (liveSmartRestartExecutor) hasChildAlive(shellPID int) bool {
+	return process.HasChildAlive(shellPID)
 }
 
 // DefaultSmartRestartOptions returns sensible defaults.
@@ -175,17 +183,34 @@ type PromptDeliveryOutcome struct {
 	Error         string               `json:"error,omitempty"`
 }
 
+// SmartRestartLaunchStatus is the strongest known launch lifecycle fact.
+// Unknown means launch input may have reached the pane, so callers must inspect
+// the target before retrying. NotReady means an independent observation found
+// no ready agent child; LaunchAttempted distinguishes it from a pre-launch stop.
+type SmartRestartLaunchStatus string
+
+const (
+	SmartRestartLaunchReady    SmartRestartLaunchStatus = "ready"
+	SmartRestartLaunchNotReady SmartRestartLaunchStatus = "not_ready"
+	SmartRestartLaunchUnknown  SmartRestartLaunchStatus = "unknown"
+)
+
 // RestartSequence documents the restart execution steps.
 type RestartSequence struct {
-	ExitMethod     string                 `json:"exit_method"`
-	ExitDurationMs int                    `json:"exit_duration_ms"`
-	ShellConfirmed bool                   `json:"shell_confirmed"`
-	AgentLaunched  bool                   `json:"agent_launched"`
-	AgentType      string                 `json:"agent_type"`
-	PromptSent     bool                   `json:"prompt_sent,omitempty"`
-	PromptOutcome  *PromptDeliveryOutcome `json:"prompt_outcome,omitempty"`
-	HardKillUsed   bool                   `json:"hard_kill_used,omitempty"`   // True if hard kill was needed (bd-bh74z)
-	HardKillResult *HardKillResult        `json:"hard_kill_result,omitempty"` // Details of hard kill operation
+	ExitMethod             string                   `json:"exit_method"`
+	ExitDurationMs         int                      `json:"exit_duration_ms"`
+	ShellConfirmed         bool                     `json:"shell_confirmed"`
+	AgentLaunched          bool                     `json:"agent_launched"`
+	AgentLaunchStatus      SmartRestartLaunchStatus `json:"agent_launch_status"`
+	LaunchAttempted        bool                     `json:"launch_attempted"`
+	ProcessAlive           *bool                    `json:"process_alive,omitempty"`
+	ShellPID               int                      `json:"shell_pid,omitempty"`
+	LaunchObservationError string                   `json:"launch_observation_error,omitempty"`
+	AgentType              string                   `json:"agent_type"`
+	PromptSent             bool                     `json:"prompt_sent,omitempty"`
+	PromptOutcome          *PromptDeliveryOutcome   `json:"prompt_outcome,omitempty"`
+	HardKillUsed           bool                     `json:"hard_kill_used,omitempty"`   // True if hard kill was needed (bd-bh74z)
+	HardKillResult         *HardKillResult          `json:"hard_kill_result,omitempty"` // Details of hard kill operation
 }
 
 // PostStateInfo contains the verified state after restart.
@@ -242,9 +267,8 @@ type SmartRestartOutput struct {
 }
 
 // PrintSmartRestart outputs the smart restart result in JSON format.
-// This is a thin wrapper around GetSmartRestart() for CLI output.
-func PrintSmartRestart(opts SmartRestartOptions) error {
-	output, err := GetSmartRestart(opts)
+func PrintSmartRestart(ctx context.Context, opts SmartRestartOptions) error {
+	output, err := GetSmartRestart(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -253,7 +277,7 @@ func PrintSmartRestart(opts SmartRestartOptions) error {
 
 // GetSmartRestart performs intelligent agent restart with safety checks.
 // This function returns the data struct directly, enabling CLI/REST parity.
-func GetSmartRestart(opts SmartRestartOptions) (*SmartRestartOutput, error) {
+func GetSmartRestart(ctx context.Context, opts SmartRestartOptions) (*SmartRestartOutput, error) {
 	output := &SmartRestartOutput{
 		RobotResponse: NewRobotResponse(true),
 		Session:       opts.Session,
@@ -265,6 +289,14 @@ func GetSmartRestart(opts SmartRestartOptions) (*SmartRestartOutput, error) {
 			PanesByAction: make(map[string][]string),
 		},
 	}
+	if ctx == nil {
+		output.RobotResponse = NewErrorResponse(errors.New("smart-restart context is required"), ErrCodeInternalError, "Retry the command")
+		return output, nil
+	}
+	if err := ctx.Err(); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry after the cancellation or timeout condition clears")
+		return output, nil
+	}
 
 	// Step 1: Pre-check all panes using IsWorking
 	isWorkingOpts := IsWorkingOptions{
@@ -275,7 +307,7 @@ func GetSmartRestart(opts SmartRestartOptions) (*SmartRestartOutput, error) {
 		Verbose:       opts.Verbose,
 	}
 
-	isWorkingResult, err := GetIsWorking(isWorkingOpts)
+	isWorkingResult, err := GetIsWorking(ctx, isWorkingOpts)
 	if err != nil {
 		return output, err
 	}
@@ -286,9 +318,22 @@ func GetSmartRestart(opts SmartRestartOptions) (*SmartRestartOutput, error) {
 		output.Hint = isWorkingResult.Hint
 		return output, nil
 	}
+	if err := validateSmartRestartTargets(isWorkingResult.Panes); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeNotImplemented, agent.GrokPhaseOneCapabilityHint)
+		return output, nil
+	}
 
-	// Step 2: Process each pane
-	for paneStr, workStatus := range isWorkingResult.Panes {
+	// Step 2: Process each pane in canonical order. Deterministic actuation is a
+	// safety property: after cancellation, every later target must be known and
+	// reported as not attempted.
+	paneKeys := sortedSmartRestartPaneKeys(isWorkingResult.Panes)
+	for paneIndex, paneStr := range paneKeys {
+		workStatus := isWorkingResult.Panes[paneStr]
+		if err := ctx.Err(); err != nil {
+			materializeSmartRestartCancellationActions(output, isWorkingResult.Panes, paneKeys[paneIndex:], err)
+			setSmartRestartCancellation(output, err)
+			return output, nil
+		}
 		// The is-working map key is "window.pane" on multi-window sessions and a
 		// bare pane index on single-window sessions (#172). Parse both so the
 		// restart targets the real window instead of defaulting to window 0/1
@@ -296,18 +341,7 @@ func GetSmartRestart(opts SmartRestartOptions) (*SmartRestartOutput, error) {
 		// nonexistent pane while the envelope claimed success).
 		restartWin, paneNum := parseRestartPaneKey(paneStr)
 
-		action := RestartAction{
-			PreCheck: &PreCheckInfo{
-				Recommendation:   workStatus.Recommendation,
-				IsWorking:        workStatus.IsWorking,
-				IsIdle:           workStatus.IsIdle,
-				IsRateLimited:    workStatus.IsRateLimited,
-				IsContextLow:     workStatus.IsContextLow,
-				ContextRemaining: workStatus.ContextRemaining,
-				Confidence:       workStatus.Confidence,
-				AgentType:        workStatus.AgentType,
-			},
-		}
+		action := RestartAction{PreCheck: smartRestartPreCheck(workStatus)}
 
 		// Determine action based on pre-check
 		shouldRestart, reason, warning := decideRestart(&workStatus, opts.Force)
@@ -340,19 +374,29 @@ func GetSmartRestart(opts SmartRestartOptions) (*SmartRestartOutput, error) {
 			if warning != "" {
 				action.Warning = warning
 			}
-			restartResult, restartErr := executeRestart(opts.Session, restartWin, paneNum, workStatus.AgentType, opts)
-			applyRestartExecutionOutcome(
+			restartResult, restartErr := executeRestart(ctx, opts.Session, restartWin, paneNum, workStatus.AgentType, opts)
+			verificationErr := applyRestartExecutionOutcome(
 				output,
 				&action,
 				paneStr,
 				reason,
 				restartResult,
 				restartErr,
-				func() *PostStateInfo { return verifyRestart(opts.Session, restartWin, paneNum, opts) },
+				func() (*PostStateInfo, error) { return verifyRestart(ctx, opts.Session, restartWin, paneNum, opts) },
 			)
+			if cancelErr := restartPaneCancellationError(ctx, errors.Join(restartErr, verificationErr)); cancelErr != nil {
+				output.Actions[paneStr] = action
+				materializeSmartRestartCancellationActions(output, isWorkingResult.Panes, paneKeys[paneIndex+1:], cancelErr)
+				setSmartRestartCancellation(output, cancelErr)
+				return output, nil
+			}
 		}
 
 		output.Actions[paneStr] = action
+	}
+	if err := ctx.Err(); err != nil {
+		setSmartRestartCancellation(output, err)
+		return output, nil
 	}
 
 	// Fail loud (#172) instead of silently reporting success:true when the
@@ -375,6 +419,68 @@ func GetSmartRestart(opts SmartRestartOptions) (*SmartRestartOutput, error) {
 	return output, nil
 }
 
+func validateSmartRestartTargets(panes map[string]PaneWorkStatus) error {
+	for _, paneKey := range sortedSmartRestartPaneKeys(panes) {
+		status := panes[paneKey]
+		if err := agent.AgentType(status.AgentType).ValidateAutomatedRelaunch(); err != nil {
+			return fmt.Errorf("pane %s (%s): %w", paneKey, status.AgentType, err)
+		}
+	}
+	return nil
+}
+
+func sortedSmartRestartPaneKeys(panes map[string]PaneWorkStatus) []string {
+	keys := make([]string, 0, len(panes))
+	for paneKey := range panes {
+		keys = append(keys, paneKey)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func smartRestartPreCheck(workStatus PaneWorkStatus) *PreCheckInfo {
+	return &PreCheckInfo{
+		Recommendation:   workStatus.Recommendation,
+		IsWorking:        workStatus.IsWorking,
+		IsIdle:           workStatus.IsIdle,
+		IsRateLimited:    workStatus.IsRateLimited,
+		IsContextLow:     workStatus.IsContextLow,
+		ContextRemaining: workStatus.ContextRemaining,
+		Confidence:       workStatus.Confidence,
+		AgentType:        workStatus.AgentType,
+	}
+}
+
+func materializeSmartRestartCancellationActions(
+	output *SmartRestartOutput,
+	panes map[string]PaneWorkStatus,
+	paneKeys []string,
+	cancelErr error,
+) {
+	if output == nil || cancelErr == nil {
+		return
+	}
+	for _, paneKey := range paneKeys {
+		if _, exists := output.Actions[paneKey]; exists {
+			continue
+		}
+		output.Actions[paneKey] = RestartAction{
+			Action:   ActionSkipped,
+			Reason:   fmt.Sprintf("Restart not attempted because smart-restart was canceled before this pane: %v", cancelErr),
+			PreCheck: smartRestartPreCheck(panes[paneKey]),
+		}
+		output.Summary.Skipped++
+		appendPaneToAction(output.Summary.PanesByAction, "SKIPPED", paneKey)
+	}
+}
+
+func setSmartRestartCancellation(output *SmartRestartOutput, cancelErr error) {
+	if output == nil || cancelErr == nil {
+		return
+	}
+	output.RobotResponse = NewErrorResponse(cancelErr, ErrCodeTimeout, "Inspect completed pane actions before retrying")
+}
+
 func applyRestartExecutionOutcome(
 	output *SmartRestartOutput,
 	action *RestartAction,
@@ -382,8 +488,11 @@ func applyRestartExecutionOutcome(
 	reason string,
 	restartResult *RestartSequence,
 	restartErr error,
-	verify func() *PostStateInfo,
-) {
+	verify func() (*PostStateInfo, error),
+) error {
+	if restartResult != nil {
+		action.RestartSequence = restartResult
+	}
 	if restartErr != nil {
 		var structErr *StructuredError
 		isStructured := errors.As(restartErr, &structErr)
@@ -392,16 +501,25 @@ func applyRestartExecutionOutcome(
 			// surfacing the requested handoff failure separately.
 			action.Action = ActionRestarted
 			action.Reason = reason
-			action.RestartSequence = restartResult
 			if verify != nil {
-				action.PostState = verify()
+				postState, verifyErr := verify()
+				action.PostState = postState
+				if verifyErr != nil {
+					action.Error = fmt.Sprintf("post-restart verification canceled: %v", verifyErr)
+				}
+				action.PromptError = structErr
+				output.Summary.Restarted++
+				output.Summary.PromptFailed++
+				output.Summary.PanesWithPromptFailure = append(output.Summary.PanesWithPromptFailure, paneKey)
+				appendPaneToAction(output.Summary.PanesByAction, "RESTARTED", paneKey)
+				return verifyErr
 			}
 			action.PromptError = structErr
 			output.Summary.Restarted++
 			output.Summary.PromptFailed++
 			output.Summary.PanesWithPromptFailure = append(output.Summary.PanesWithPromptFailure, paneKey)
 			appendPaneToAction(output.Summary.PanesByAction, "RESTARTED", paneKey)
-			return
+			return nil
 		}
 
 		action.Action = ActionFailed
@@ -412,24 +530,32 @@ func applyRestartExecutionOutcome(
 		}
 		output.Summary.Failed++
 		appendPaneToAction(output.Summary.PanesByAction, "FAILED", paneKey)
-		return
+		return nil
 	}
 
 	action.Action = ActionRestarted
 	action.Reason = reason
-	action.RestartSequence = restartResult
+	var verifyErr error
 	if verify != nil {
-		action.PostState = verify()
+		action.PostState, verifyErr = verify()
+		if verifyErr != nil {
+			action.Error = fmt.Sprintf("post-restart verification canceled: %v", verifyErr)
+		}
 	}
 	output.Summary.Restarted++
 	if restartResult != nil && restartResult.PromptOutcome != nil && restartResult.PromptOutcome.Status == PromptDeliveryDelivered {
 		output.Summary.PromptDelivered++
 	}
 	appendPaneToAction(output.Summary.PanesByAction, "RESTARTED", paneKey)
+	return verifyErr
 }
 
 func finalizeSmartRestartOutput(output *SmartRestartOutput, opts SmartRestartOptions) {
 	if output == nil || opts.DryRun {
+		return
+	}
+	if output.ErrorCode == ErrCodeTimeout {
+		output.Success = false
 		return
 	}
 
@@ -612,9 +738,27 @@ func newRestartError(code, message, phase string, pane int, agentType string, at
 }
 
 // executeRestart performs the actual restart sequence for a pane.
-func executeRestart(session string, win, pane int, agentType string, opts SmartRestartOptions) (*RestartSequence, error) {
+func executeRestart(ctx context.Context, session string, win, pane int, agentType string, opts SmartRestartOptions) (*RestartSequence, error) {
 	seq := &RestartSequence{
-		AgentType: agentType,
+		AgentType:         agentType,
+		AgentLaunchStatus: SmartRestartLaunchNotReady,
+	}
+	if ctx == nil {
+		return seq, errors.New("smart-restart execution context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return seq, err
+	}
+	if err := agent.AgentType(agentType).ValidateAutomatedRelaunch(); err != nil {
+		return seq, newRestartError(
+			ErrCodeNotImplemented,
+			err.Error(),
+			"preflight",
+			pane,
+			agentType,
+			nil,
+			"",
+		).WithRecoveryHint(agent.GrokPhaseOneCapabilityHint)
 	}
 	executor := opts.executor
 	if executor == nil {
@@ -628,8 +772,11 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 	// window index (#172), so the target addresses the correct window instead
 	// of always window 1.
 	if win < 0 {
-		fw, err := tmux.GetFirstWindow(session)
+		fw, err := tmux.GetFirstWindowContext(ctx, session)
 		if err != nil {
+			if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+				return seq, cancelErr
+			}
 			fw = 1 // fallback
 		}
 		win = fw
@@ -639,8 +786,11 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 	// Step 1: Exit the current agent using agent-specific method (unless HardKillOnly)
 	if !opts.HardKillOnly {
 		attemptedActions = append(attemptedActions, "exit-agent-"+agentType)
-		exitErr := executor.exitAgent(session, win, pane, agentType, seq)
+		exitErr := executor.exitAgent(ctx, session, win, pane, agentType, seq)
 		if exitErr != nil {
+			if cancelErr := restartPaneCancellationError(ctx, exitErr); cancelErr != nil {
+				return seq, cancelErr
+			}
 			if opts.HardKill {
 				// Soft exit failed, but we're allowed to try hard kill
 				softExitFailed = true
@@ -657,6 +807,9 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 				return seq, structErr
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return seq, err
+		}
 
 		// Steps 2+3: Poll for the shell to return after the soft exit.
 		// Confirmation is primarily by PROCESS DEATH (no agent child under
@@ -666,9 +819,15 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 		// the glyph heuristic (#187).
 		attemptedActions = append(attemptedActions, "wait-shell-return")
 		waitStart := time.Now()
-		shellReturned, lastOutput := executor.waitForShellReturn(session, win, pane, shellReturnTimeout)
+		shellReturned, lastOutput, waitErr := executor.waitForShellReturn(ctx, session, win, pane, shellReturnTimeout)
 		seq.ExitDurationMs = int(time.Since(waitStart).Milliseconds())
 		seq.ShellConfirmed = shellReturned
+		if waitErr != nil {
+			if cancelErr := restartPaneCancellationError(ctx, waitErr); cancelErr != nil {
+				return seq, cancelErr
+			}
+			return seq, waitErr
+		}
 		if !shellReturned {
 			if !opts.HardKill {
 				structErr := newRestartError(
@@ -689,11 +848,14 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 	// Step 3b: Hard kill fallback if soft exit failed or HardKillOnly (bd-bh74z)
 	if opts.HardKillOnly || (opts.HardKill && softExitFailed) {
 		attemptedActions = append(attemptedActions, "hard-kill")
-		hardKillResult, err := executor.hardKillAgent(session, win, pane, seq)
+		hardKillResult, err := executor.hardKillAgent(ctx, session, win, pane, seq)
 		seq.HardKillUsed = true
 		seq.HardKillResult = hardKillResult
 
 		if err != nil {
+			if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+				return seq, cancelErr
+			}
 			structErr := newRestartError(
 				ErrCodeHardKillFailed,
 				"Hard kill (kill -9) failed: "+err.Error(),
@@ -714,8 +876,14 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 		// Poll for the shell to return after hard kill — same process-death
 		// confirmation as the soft-exit path (#187).
 		attemptedActions = append(attemptedActions, "wait-shell-return-after-kill")
-		shellReturned, lastOutput := executor.waitForShellReturn(session, win, pane, shellReturnTimeout)
+		shellReturned, lastOutput, waitErr := executor.waitForShellReturn(ctx, session, win, pane, shellReturnTimeout)
 		seq.ShellConfirmed = shellReturned
+		if waitErr != nil {
+			if cancelErr := restartPaneCancellationError(ctx, waitErr); cancelErr != nil {
+				return seq, cancelErr
+			}
+			return seq, waitErr
+		}
 		if !shellReturned {
 			structErr := newRestartError(
 				ErrCodeShellNotReturned,
@@ -732,10 +900,20 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 
 	// Step 4: Launch new agent using the canonical agent alias/command name.
 	alias := restartLaunchAlias(agentType)
+	if err := ctx.Err(); err != nil {
+		return seq, err
+	}
 
 	attemptedActions = append(attemptedActions, "launch-"+alias)
-	launchErr := executor.sendKeys(session, win, pane, alias+"\n")
+	seq.LaunchAttempted = true
+	seq.AgentLaunchStatus = SmartRestartLaunchUnknown
+	launchErr := executor.sendKeys(ctx, session, win, pane, alias+"\n")
 	if launchErr != nil {
+		if cancelErr := restartPaneCancellationError(ctx, launchErr); cancelErr != nil {
+			observeSmartRestartLaunchAfterCancellation(ctx, session, win, pane, agentType, target, executor, seq)
+			return seq, cancelErr
+		}
+		observeSmartRestartLaunchAfterCancellation(ctx, session, win, pane, agentType, target, executor, seq)
 		structErr := newRestartError(
 			ErrCodeCCLaunchFailed,
 			"Failed to launch agent: "+launchErr.Error(),
@@ -747,6 +925,10 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 		).WithRecoveryHint("Verify the agent CLI is installed and in PATH")
 		return seq, structErr
 	}
+	if err := ctx.Err(); err != nil {
+		observeSmartRestartLaunchAfterCancellation(ctx, session, win, pane, agentType, target, executor, seq)
+		return seq, err
+	}
 
 	// Step 5: Ready-gate — poll until the agent TUI is actually up instead of
 	// sleeping a fixed interval, so the prompt is never typed into a bare
@@ -756,13 +938,38 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 		readyTimeout = smartRestartMinReadyTimeout
 	}
 	attemptedActions = append(attemptedActions, "wait-agent-ready")
-	shellPID, pidErr := executor.getShellPID(session, win, pane)
+	shellPID, pidErr := executor.getShellPID(ctx, session, win, pane)
 	if pidErr != nil {
+		if cancelErr := restartPaneCancellationError(ctx, pidErr); cancelErr != nil {
+			observeSmartRestartLaunchAfterCancellation(ctx, session, win, pane, agentType, target, executor, seq)
+			return seq, cancelErr
+		}
 		shellPID = 0 // ready-gate falls back to content-only detection
+	} else if shellPID > 0 {
+		seq.ShellPID = shellPID
+		processAlive := executor.hasChildAlive(shellPID)
+		seq.ProcessAlive = &processAlive
 	}
-	agentReady := executor.waitForPaneAgentReady(target, shellPID, agentType, readyTimeout)
+	agentReady, readyErr := executor.waitForPaneAgentReady(ctx, target, shellPID, agentType, readyTimeout)
+	if readyErr != nil {
+		if cancelErr := restartPaneCancellationError(ctx, readyErr); cancelErr != nil {
+			observeSmartRestartLaunchAfterCancellation(ctx, session, win, pane, agentType, target, executor, seq)
+			return seq, cancelErr
+		}
+		updateSmartRestartLaunchObservation(seq, executor, shellPID, false)
+		return seq, readyErr
+	}
+	if cancelErr := restartPaneCancellationError(ctx, nil); cancelErr != nil {
+		observeSmartRestartLaunchAfterCancellation(ctx, session, win, pane, agentType, target, executor, seq)
+		return seq, cancelErr
+	}
 	if !agentReady {
-		lastOutput, _ := executor.capturePaneOutput(target, 10)
+		updateSmartRestartLaunchObservation(seq, executor, shellPID, false)
+		lastOutput, captureErr := executor.capturePaneOutput(ctx, target, 10)
+		if cancelErr := restartPaneCancellationError(ctx, captureErr); cancelErr != nil {
+			observeSmartRestartLaunchAfterCancellation(ctx, session, win, pane, agentType, target, executor, seq)
+			return seq, cancelErr
+		}
 		structErr := newRestartError(
 			ErrCodeCCLaunchFailed,
 			fmt.Sprintf("Agent did not become ready within %s after launch", readyTimeout),
@@ -779,10 +986,16 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 	// service. PromptSent is only true after the service returns one delivered
 	// receipt for this exact physical pane.
 	seq.AgentLaunched = true
+	seq.AgentLaunchStatus = SmartRestartLaunchReady
+	if shellPID > 0 {
+		seq.ShellPID = shellPID
+		processAlive := executor.hasChildAlive(shellPID)
+		seq.ProcessAlive = &processAlive
+	}
 	if opts.Prompt != "" {
 		attemptedActions = append(attemptedActions, "send-prompt")
 		promptOutcome, promptErr := dispatchSmartRestartPrompt(
-			context.Background(),
+			ctx,
 			session,
 			win,
 			pane,
@@ -793,12 +1006,84 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 		seq.PromptOutcome = &promptOutcome
 		seq.PromptSent = promptOutcome.Status == PromptDeliveryDelivered
 		if promptErr != nil {
+			if cancelErr := restartPaneCancellationError(ctx, promptErr); cancelErr != nil {
+				return seq, cancelErr
+			}
 			return seq, newPromptDeliveryError(pane, agentType, attemptedActions, promptOutcome, promptErr)
 		}
 	}
 
 	_ = attemptedActions // Used for error reporting in failure paths
 	return seq, nil
+}
+
+func observeSmartRestartLaunchAfterCancellation(
+	ctx context.Context,
+	session string,
+	win int,
+	pane int,
+	agentType string,
+	target string,
+	executor smartRestartExecutor,
+	seq *RestartSequence,
+) {
+	if ctx == nil || executor == nil || seq == nil || !seq.LaunchAttempted {
+		return
+	}
+	observationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), smartRestartMutationObservationTimeout)
+	defer cancel()
+
+	shellPID, pidErr := executor.getShellPID(observationCtx, session, win, pane)
+	if pidErr == nil && shellPID > 0 {
+		seq.ShellPID = shellPID
+	}
+	ready, readyErr := executor.waitForPaneAgentReady(
+		observationCtx,
+		target,
+		shellPID,
+		agentType,
+		smartRestartMutationObservationTimeout,
+	)
+	updateSmartRestartLaunchObservation(seq, executor, shellPID, ready)
+
+	var observationErrors []error
+	if pidErr != nil {
+		observationErrors = append(observationErrors, fmt.Errorf("observe shell PID: %w", pidErr))
+	} else if shellPID <= 0 {
+		observationErrors = append(observationErrors, errors.New("observe shell PID: pane PID is unavailable"))
+	}
+	if readyErr != nil {
+		observationErrors = append(observationErrors, fmt.Errorf("observe readiness: %w", readyErr))
+	}
+	if observationErr := errors.Join(observationErrors...); observationErr != nil {
+		seq.LaunchObservationError = observationErr.Error()
+	}
+}
+
+func updateSmartRestartLaunchObservation(
+	seq *RestartSequence,
+	executor smartRestartExecutor,
+	shellPID int,
+	ready bool,
+) {
+	if seq == nil || executor == nil {
+		return
+	}
+	seq.AgentLaunched = ready
+	if ready {
+		seq.AgentLaunchStatus = SmartRestartLaunchReady
+	} else {
+		seq.AgentLaunchStatus = SmartRestartLaunchUnknown
+	}
+	if shellPID <= 0 {
+		return
+	}
+	seq.ShellPID = shellPID
+	processAlive := executor.hasChildAlive(shellPID)
+	seq.ProcessAlive = &processAlive
+	if !ready && !processAlive {
+		seq.AgentLaunchStatus = SmartRestartLaunchNotReady
+	}
 }
 
 // dispatchSmartRestartPrompt performs the post-launch prompt handoff through
@@ -996,27 +1281,39 @@ func verifySmartRestartPromptReceipt(result dispatchsvc.Result, expected tmux.Pa
 // has no live child process. Pane-content heuristics are only used when the
 // process state is unknowable (#187). Returns confirmation plus the last
 // captured pane content for diagnostics.
-func waitForShellReturn(session string, win, pane int, timeout time.Duration) (bool, string) {
+func waitForShellReturn(ctx context.Context, session string, win, pane int, timeout time.Duration) (bool, string, error) {
+	if ctx == nil {
+		return false, "", errors.New("shell-return context is required")
+	}
 	target := formatTargetWin(session, win, pane)
 	deadline := time.Now().Add(timeout)
 	lastOutput := ""
 	for {
-		if content, err := tmux.CapturePaneOutput(target, 10); err == nil {
+		if err := ctx.Err(); err != nil {
+			return false, lastOutput, err
+		}
+		if content, err := tmux.CapturePaneOutputContext(ctx, target, 10); err == nil {
 			lastOutput = content
+		} else if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+			return false, lastOutput, cancelErr
 		}
 		childAlive := false
 		childKnown := false
-		if shellPID, err := getShellPID(session, win, pane); err == nil && shellPID > 0 {
+		if shellPID, err := getShellPID(ctx, session, win, pane); err == nil && shellPID > 0 {
 			childKnown = true
 			childAlive = process.HasChildAlive(shellPID)
+		} else if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+			return false, lastOutput, cancelErr
 		}
 		if confirmShellReturned(childAlive, childKnown, lastOutput) {
-			return true, lastOutput
+			return true, lastOutput, nil
 		}
 		if time.Now().After(deadline) {
-			return false, lastOutput
+			return false, lastOutput, nil
 		}
-		time.Sleep(shellReturnPollInterval)
+		if err := waitForExitSequenceDelay(ctx, shellReturnPollInterval); err != nil {
+			return false, lastOutput, err
+		}
 	}
 }
 
@@ -1054,6 +1351,7 @@ func restartCanonicalAgentType(agentType string) agent.AgentType {
 		agent.AgentTypeCodex,
 		agent.AgentTypeGemini,
 		agent.AgentTypeAntigravity,
+		agent.AgentTypeGrok,
 		agent.AgentTypeCursor,
 		agent.AgentTypeWindsurf,
 		agent.AgentTypeAider,
@@ -1069,6 +1367,8 @@ func restartCanonicalAgentType(agentType string) agent.AgentType {
 
 func restartLaunchAlias(agentType string) string {
 	switch canonical := restartCanonicalAgentType(agentType); canonical {
+	case agent.AgentTypeGrok:
+		return ""
 	case "", agent.AgentTypeUnknown:
 		return string(agent.AgentTypeClaudeCode)
 	default:
@@ -1079,22 +1379,41 @@ func restartLaunchAlias(agentType string) string {
 // verifyRestart checks the post-restart state of a pane. win is the pane's real
 // window index (#172); win < 0 falls back to the session's first window for the
 // single-window case.
-func verifyRestart(session string, win, pane int, opts SmartRestartOptions) *PostStateInfo {
+func verifyRestart(ctx context.Context, session string, win, pane int, opts SmartRestartOptions) (*PostStateInfo, error) {
+	if ctx == nil {
+		return nil, errors.New("smart-restart verification context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if win < 0 {
-		fw, err := tmux.GetFirstWindow(session)
+		fw, err := tmux.GetFirstWindowContext(ctx, session)
 		if err != nil {
+			if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+				return nil, cancelErr
+			}
 			fw = 1 // fallback
 		}
 		win = fw
 	}
 	// Capture current state
 	target := fmt.Sprintf("%s:%d.%d", session, win, pane)
-	content, err := tmux.CapturePaneOutput(target, 50)
+	executor := opts.executor
+	if executor == nil {
+		executor = liveSmartRestartExecutor{}
+	}
+	content, err := executor.capturePaneOutput(ctx, target, 50)
 	if err != nil {
+		if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+			return nil, cancelErr
+		}
 		return &PostStateInfo{
 			AgentRunning: false,
 			Confidence:   0.0,
-		}
+		}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Parse the output to determine agent state
@@ -1104,14 +1423,17 @@ func verifyRestart(session string, win, pane int, opts SmartRestartOptions) *Pos
 		return &PostStateInfo{
 			AgentRunning: false,
 			Confidence:   0.0,
-		}
+		}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	return &PostStateInfo{
 		AgentRunning: state.Type != agent.AgentTypeUnknown,
 		AgentType:    string(state.Type),
 		Confidence:   state.Confidence,
-	}
+	}, nil
 }
 
 // looksLikeShellPrompt checks if output appears to be at a shell prompt.

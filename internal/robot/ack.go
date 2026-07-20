@@ -706,7 +706,7 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 				sendOutput.Warnings = finalWarnings
 			}
 			if prepareErr != nil {
-				sendOutput.RobotResponse = NewErrorResponse(prepareErr, ErrCodeInvalidFlag, "Inspect robot send target and message options")
+				sendOutput.RobotResponse = robotDispatchPrepareErrorResponse(prepareErr)
 				sendOutput.Failed = append(sendOutput.Failed, SendError{Pane: "dispatch", Error: prepareErr.Error()})
 			} else if opts.DryRun {
 				result, dispatchErr := service.Dispatch(context.Background(), prepared)
@@ -726,14 +726,8 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 		}
 	}
 
-	// Update success based on send results
-	if !sendOutput.DryRun {
-		sendOutput.Success = len(sendOutput.Failed) == 0 && len(sendOutput.Successful) > 0
-	}
-	if len(sendOutput.Failed) > 0 {
-		sendOutput.Error = fmt.Sprintf("%d of %d sends failed", len(sendOutput.Failed), len(sendOutput.Targets))
-		sendOutput.ErrorCode = ErrCodeInternalError
-	}
+	// Update success based on send results without clobbering typed preflight errors.
+	finalizeRobotSendDispatchStatus(&sendOutput)
 	publishSendActuationOutcome(trace, opts.SendOptions, sendOutput)
 	if opts.DryRun {
 		ackOutput := AckOutput{

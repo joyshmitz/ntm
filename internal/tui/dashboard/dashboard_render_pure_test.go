@@ -786,6 +786,14 @@ func TestRenderStatsBar(t *testing.T) {
 		}
 	})
 
+	t.Run("with grok agents", func(t *testing.T) {
+		m := Model{theme: th, icons: ic, grokCount: 4}
+		got := m.renderStatsBar()
+		if !strings.Contains(got, "GRK 4") {
+			t.Errorf("expected explicit Grok count in stats bar, got %q", got)
+		}
+	})
+
 	t.Run("with user panes", func(t *testing.T) {
 		m := Model{theme: th, icons: ic, userCount: 1}
 		got := m.renderStatsBar()
@@ -801,6 +809,7 @@ func TestRenderStatsBar(t *testing.T) {
 			claudeCount:        2,
 			codexCount:         1,
 			geminiCount:        1,
+			grokCount:          1,
 			userCount:          1,
 			healthStatus:       "ok",
 			scanStatus:         "clean",

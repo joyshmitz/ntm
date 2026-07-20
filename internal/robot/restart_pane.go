@@ -1,16 +1,22 @@
 package robot
 
 import (
-	"encoding/json"
+	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
+	"github.com/Dicklesworthstone/ntm/internal/assignment"
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/process"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -23,27 +29,73 @@ const (
 	restartPaneReadyTimeout = 15 * time.Second
 	// restartPaneReadyPollInterval is the ready-gate poll cadence.
 	restartPaneReadyPollInterval = 400 * time.Millisecond
+	// restartPaneDispatchReadyTimeout bounds the canonical idle observation gate
+	// that runs after relaunch readiness but before an atomic bead claim.
+	restartPaneDispatchReadyTimeout = 15 * time.Second
+	// restartPaneMutationObservationTimeout bounds the independent PID probe used
+	// after a canceled tmux command. The caller context is already canceled at
+	// that point, but we still need a short observation window to report whether
+	// respawn-pane changed the pane before returning the cancellation error.
+	restartPaneMutationObservationTimeout = 2 * time.Second
 )
 
 // RestartPaneOutput is the structured output for --robot-restart-pane
 type RestartPaneOutput struct {
 	RobotResponse
-	Session      string          `json:"session"`
-	RestartedAt  time.Time       `json:"restarted_at"`
-	Restarted    []string        `json:"restarted"`
-	Failed       []RestartError  `json:"failed"`
-	DryRun       bool            `json:"dry_run,omitempty"`
-	WouldAffect  []string        `json:"would_affect,omitempty"`
-	BeadAssigned string          `json:"bead_assigned,omitempty"` // Bead ID if --bead was used
-	PromptSent   bool            `json:"prompt_sent,omitempty"`   // True if prompt was delivered after the agent ready-gate passed
-	PromptError  string          `json:"prompt_error,omitempty"`  // Non-fatal prompt send error
-	ProcessAlive map[string]bool `json:"process_alive,omitempty"` // Post-restart liveness per pane (agent panes require a live agent child, not just the shell)
+	Session             string                                 `json:"session"`
+	RestartedAt         time.Time                              `json:"restarted_at"`
+	Restarted           []string                               `json:"restarted"`
+	Failed              []RestartError                         `json:"failed"`
+	DryRun              bool                                   `json:"dry_run,omitempty"`
+	WouldAffect         []string                               `json:"would_affect,omitempty"`
+	BeadAssigned        string                                 `json:"bead_assigned,omitempty"` // Bead ID if --bead was used
+	PromptSent          bool                                   `json:"prompt_sent,omitempty"`   // True only when every attempted ordinary prompt or the atomic bead prompt has confirmed delivery
+	PromptError         string                                 `json:"prompt_error,omitempty"`  // Non-fatal prompt send error
+	PromptDelivery      map[string]RestartPromptDeliveryStatus `json:"prompt_delivery,omitempty"`
+	ProcessAlive        map[string]bool                        `json:"process_alive,omitempty"` // Post-restart liveness per pane (agent panes require a live agent child, not just the shell)
+	ClaimActor          string                                 `json:"claim_actor,omitempty"`
+	IdempotencyKey      string                                 `json:"idempotency_key,omitempty"`
+	DispatchReceiptID   string                                 `json:"dispatch_receipt_id,omitempty"`
+	AssignmentReplayed  bool                                   `json:"assignment_replayed,omitempty"`
+	AssignmentRecovered bool                                   `json:"assignment_recovered,omitempty"`
 	// AgentRelaunched reports, per agent pane, whether the agent CLI was
 	// relaunched after respawn and became ready. respawn-pane -k only restores
 	// the pane's default command (the login shell); in ntm sessions the agent
 	// CLI is started by keystroke after spawn, so it must be relaunched
 	// explicitly (#187). User/unknown panes are not included.
-	AgentRelaunched map[string]bool `json:"agent_relaunched,omitempty"`
+	AgentRelaunched     map[string]bool                       `json:"agent_relaunched,omitempty"`
+	AgentRelaunchStatus map[string]RestartAgentRelaunchStatus `json:"agent_relaunch_status,omitempty"`
+}
+
+// RestartAgentRelaunchStatus distinguishes confirmed readiness from a live
+// child whose readiness could not be confirmed after cancellation.
+type RestartAgentRelaunchStatus string
+
+const (
+	RestartAgentRelaunchReady    RestartAgentRelaunchStatus = "ready"
+	RestartAgentRelaunchNotReady RestartAgentRelaunchStatus = "not_ready"
+	RestartAgentRelaunchUnknown  RestartAgentRelaunchStatus = "unknown"
+	RestartAgentRelaunchFailed   RestartAgentRelaunchStatus = "failed"
+)
+
+// RestartPromptDeliveryStatus is the strongest fact known about an ordinary
+// post-restart prompt. Unknown means text or an Enter may already have reached
+// the pane, so callers must inspect it before retrying.
+type RestartPromptDeliveryStatus string
+
+const (
+	RestartPromptDelivered RestartPromptDeliveryStatus = "delivered"
+	RestartPromptFailed    RestartPromptDeliveryStatus = "failed"
+	RestartPromptSkipped   RestartPromptDeliveryStatus = "skipped"
+	RestartPromptUnknown   RestartPromptDeliveryStatus = "unknown"
+)
+
+type restartAgentRelaunchOutcome struct {
+	Status           RestartAgentRelaunchStatus
+	Ready            bool
+	ProcessAlive     bool
+	ShellPID         int
+	ObservationError error
 }
 
 // RestartError represents a failed restart attempt
@@ -54,14 +106,47 @@ type RestartError struct {
 
 // RestartPaneOptions configures the PrintRestartPane operation
 type RestartPaneOptions struct {
-	Session string         // Target session name
-	Panes   []string       // Specific pane indices to restart (empty = all agents)
-	Type    string         // Filter by agent type (e.g., "claude", "cc")
-	All     bool           // Include all panes (including user)
-	DryRun  bool           // Preview mode
-	Bead    string         // Bead ID to assign after restart (fetches info via br show --json)
-	Prompt  string         // Custom prompt to send after restart (overrides --bead template)
-	Config  *config.Config // Effective caller config; nil loads the merged config from disk
+	Session       string         // Target session name
+	Panes         []string       // Specific pane indices to restart (empty = all agents)
+	Type          string         // Filter by agent type (e.g., "claude", "cc")
+	All           bool           // Include all panes (including user)
+	DryRun        bool           // Preview mode
+	Bead          string         // Bead ID to assign after restart
+	Prompt        string         // Custom prompt to send after restart (overrides --bead template)
+	Config        *config.Config // Effective caller config; nil loads the merged config from disk
+	ProjectDir    string         // Authoritative project directory resolved from the explicit session
+	ConfigPath    string         // Selected global config used for assignment policy
+	RequireConfig bool           // ConfigPath was explicitly selected and must exist
+	Deps          *RestartPaneDependencies
+}
+
+// RestartPaneDependencies exposes assignment ports for focused safety tests.
+// Production callers leave this nil.
+type RestartPaneDependencies struct {
+	LoadAssignmentPolicy   func(string, string, bool) (*config.Config, error)
+	FetchActionable        func(context.Context, string, int) ([]bv.TriageRecommendation, error)
+	FetchBeadDetails       func(context.Context, string, string) (*bv.BeadAssignmentDetails, error)
+	AssignmentLedgerExists func(string) (bool, error)
+	LoadStore              func(string) (*assignment.AssignmentStore, error)
+	LoadStoreReadOnly      func(string) (*assignment.AssignmentStore, error)
+	ClaimBead              func(context.Context, string, string, string) (bv.BeadClaimResult, error)
+	ClaimBeadWithPolicy    func(context.Context, string, string, string, []string) (bv.BeadClaimResult, error)
+	GetBeadStatus          func(context.Context, string, string) (string, error)
+	NewIdempotencyKey      func() (string, error)
+	ListPanes              func(context.Context, string) ([]tmux.Pane, error)
+	ObserveSession         func(context.Context, string) (statuspkg.SessionObservation, error)
+	DispatchDeliverer      dispatchsvc.Deliverer
+	DispatchPacer          dispatchsvc.Pacer
+}
+
+type restartBeadPreflight struct {
+	Details     *bv.BeadAssignmentDetails
+	Prompt      string
+	Policy      *config.Config
+	Store       *assignment.AssignmentStore
+	Recovery    *assignment.Assignment
+	Request     assignment.AtomicRequest
+	Coordinator *assignment.AtomicCoordinator
 }
 
 type restartPromptTarget struct {
@@ -69,11 +154,40 @@ type restartPromptTarget struct {
 	Target       string
 	AgentType    tmux.AgentType
 	ResolvedType string // restartPaneAgentType result: "claude", "codex", ..., "user", "unknown"
+	Variant      string // Model alias (or persona name) parsed from the pane title
 }
 
-// GetRestartPane restarts panes (respawn-pane -k) and returns the result.
-// This function returns the data struct directly, enabling CLI/REST parity.
-func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
+func restartPaneCancellationError(ctx context.Context, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
+}
+
+func setRestartPaneCancellation(output *RestartPaneOutput, err error, stage string) {
+	if output == nil || err == nil {
+		return
+	}
+	stage = strings.TrimSpace(stage)
+	if stage == "" {
+		stage = "restart canceled"
+	}
+	wrapped := fmt.Errorf("%s: %w", stage, err)
+	if output.PromptError == "" {
+		output.PromptError = wrapped.Error()
+	}
+	output.RobotResponse = NewErrorResponse(
+		wrapped,
+		ErrCodeTimeout,
+		"Inspect the restarted and failed pane lists, then retry after cancellation clears",
+	)
+}
+
+// GetRestartPaneContext is the cancellation-aware restart implementation.
+func GetRestartPaneContext(ctx context.Context, opts RestartPaneOptions) (*RestartPaneOutput, error) {
 	output := &RestartPaneOutput{
 		RobotResponse: NewRobotResponse(true),
 		Session:       opts.Session,
@@ -81,29 +195,26 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 		Restarted:     []string{},
 		Failed:        []RestartError{},
 	}
+	if ctx == nil {
+		output.RobotResponse = NewErrorResponse(errors.New("restart-pane context is required"), ErrCodeInternalError, "Retry the command")
+		return output, nil
+	}
+	if err := ctx.Err(); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry after the cancellation or timeout condition clears")
+		return output, nil
+	}
+	deps := restartPaneDeps(opts.Deps)
 
-	// If --bead is provided, validate it before restarting anything
-	var beadPrompt string
-	if opts.Bead != "" {
-		prompt, err := buildBeadPrompt(opts.Bead)
-		if err != nil {
-			output.RobotResponse = NewErrorResponse(
-				err,
-				ErrCodeInvalidFlag,
-				fmt.Sprintf("Bead %s not found or not readable. Use: br show %s", opts.Bead, opts.Bead),
-			)
+	exists, err := tmux.SessionExistsContext(ctx, opts.Session)
+	if err != nil {
+		if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+			setRestartPaneCancellation(output, cancelErr, "restart canceled while checking session")
 			return output, nil
 		}
-		beadPrompt = prompt
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux session state")
+		return output, nil
 	}
-
-	// Determine which prompt to send (explicit --prompt overrides --bead template)
-	promptToSend := opts.Prompt
-	if promptToSend == "" && beadPrompt != "" {
-		promptToSend = beadPrompt
-	}
-
-	if !tmux.SessionExists(opts.Session) {
+	if !exists {
 		output.Failed = append(output.Failed, RestartError{
 			Pane:   "session",
 			Reason: fmt.Sprintf("session '%s' not found", opts.Session),
@@ -116,12 +227,16 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 		return output, nil
 	}
 
-	panes, err := tmux.GetPanes(opts.Session)
+	panes, err := deps.ListPanes(ctx, opts.Session)
 	if err != nil {
 		output.Failed = append(output.Failed, RestartError{
 			Pane:   "panes",
 			Reason: fmt.Sprintf("failed to get panes: %v", err),
 		})
+		if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+			setRestartPaneCancellation(output, cancelErr, "restart canceled while reading pane topology")
+			return output, nil
+		}
 		output.RobotResponse = NewErrorResponse(
 			err,
 			ErrCodeInternalError,
@@ -140,6 +255,44 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 	targetPanes := selectRestartPaneTargets(panes, paneFilterMap, opts.Type, opts.All)
 
 	if len(targetPanes) == 0 {
+		if strings.TrimSpace(opts.Bead) != "" {
+			err := errors.New("--restart-bead requires exactly one target pane, resolved none")
+			output.RobotResponse = NewErrorResponse(err, ErrCodeInvalidFlag, "Use --panes with one canonical agent-pane selector")
+		}
+		return output, nil
+	}
+	if err := validateRestartPaneTargets(targetPanes); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeNotImplemented, agent.GrokPhaseOneCapabilityHint)
+		return output, nil
+	}
+
+	var beadPreflight *restartBeadPreflight
+	promptToSend := strings.TrimSpace(opts.Prompt)
+	if beadID := strings.TrimSpace(opts.Bead); beadID != "" {
+		if err := validateRestartBeadTargets(targetPanes); err != nil {
+			output.RobotResponse = NewErrorResponse(err, ErrCodeInvalidFlag, "Select exactly one supported agent pane")
+			return output, nil
+		}
+		beadPreflight, err = preflightRestartBead(ctx, opts, targetPanes[0], deps)
+		if err != nil {
+			errorCode := ErrCodeInvalidFlag
+			hint := "Fix assignment policy, bv plan integrity, or live Beads eligibility before retrying"
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				errorCode = ErrCodeTimeout
+				hint = "Retry after the cancellation or timeout condition clears"
+			}
+			output.RobotResponse = NewErrorResponse(
+				fmt.Errorf("authorize restart assignment for %s: %w", beadID, err),
+				errorCode,
+				hint,
+			)
+			return output, nil
+		}
+		promptToSend = beadPreflight.Prompt
+		output.BeadAssigned = beadID
+	}
+	if err := ctx.Err(); err != nil {
+		setRestartPaneCancellation(output, err, "restart canceled after assignment preflight")
 		return output, nil
 	}
 
@@ -150,33 +303,31 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 			paneKey := paneTargetKey(pane, multiWindow)
 			output.WouldAffect = append(output.WouldAffect, paneKey)
 		}
-		if opts.Bead != "" {
-			output.BeadAssigned = opts.Bead
-		}
+		return output, nil
+	}
+	if beadPreflight != nil && restartAssignmentWasSent(beadPreflight.Recovery) {
+		applyRestartAssignmentReplay(output, beadPreflight.Recovery)
 		return output, nil
 	}
 
-	// Restart targets — track pane IDs for post-restart relaunch/liveness steps
-	restartedPaneInfo := make(map[string]restartPromptTarget) // paneKey -> prompt target info
-	for _, pane := range targetPanes {
-		paneKey := paneTargetKey(pane, multiWindow)
-
-		// Always use kill=true for restart to ensure process is cycled
-		err := tmux.RespawnPane(pane.ID, true)
-		if err != nil {
-			output.Failed = append(output.Failed, RestartError{
-				Pane:   paneKey,
-				Reason: fmt.Sprintf("failed to respawn: %v", err),
-			})
-		} else {
-			output.Restarted = append(output.Restarted, paneKey)
-			restartedPaneInfo[paneKey] = restartPromptTarget{
-				Pane:         paneKey,
-				Target:       pane.ID,
-				AgentType:    pane.Type,
-				ResolvedType: restartPaneAgentType(pane),
-			}
+	// Restart targets — track pane IDs for post-restart relaunch/liveness steps.
+	// The helper repeats the batch preflight defensively so no future caller can
+	// accidentally move validation after the first respawn.
+	restartedPaneInfo, err := respawnRestartPaneTargetsContext(
+		ctx,
+		targetPanes,
+		multiWindow,
+		output,
+		tmux.RespawnPaneContext,
+		paneShellPIDContext,
+	)
+	if err != nil {
+		if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+			setRestartPaneCancellation(output, cancelErr, "restart canceled during pane respawn")
+			return output, nil
 		}
+		output.RobotResponse = NewErrorResponse(err, ErrCodeNotImplemented, agent.GrokPhaseOneCapabilityHint)
+		return output, nil
 	}
 
 	// Relaunch agent CLIs in respawned agent panes (#187). respawn-pane -k
@@ -187,6 +338,9 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 	agentPaneReady := make(map[string]bool, len(output.Restarted))
 	if len(output.Restarted) > 0 {
 		cfg := opts.Config
+		if beadPreflight != nil && beadPreflight.Policy != nil {
+			cfg = beadPreflight.Policy
+		}
 		if cfg == nil {
 			var cfgErr error
 			cfg, cfgErr = config.LoadMerged(mustGetwd(), config.DefaultPath())
@@ -196,45 +350,58 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 		}
 
 		// Let fresh shells initialize before typing into them.
-		time.Sleep(restartPaneSettleDelay)
+		if err := waitForRestartPaneDelay(ctx, restartPaneSettleDelay); err != nil {
+			appendRestartCancellationFailures(output, output.Restarted, 0, "agent relaunch canceled before shell settle completed", err)
+			setRestartPaneCancellation(output, err, "restart canceled while fresh panes settled")
+			return output, nil
+		}
 
 		output.AgentRelaunched = make(map[string]bool)
+		output.AgentRelaunchStatus = make(map[string]RestartAgentRelaunchStatus)
 		output.ProcessAlive = make(map[string]bool, len(output.Restarted))
-		for _, paneKey := range output.Restarted {
+		for paneIndex, paneKey := range output.Restarted {
 			info := restartedPaneInfo[paneKey]
 
 			if !restartTargetIsAgent(info.ResolvedType) {
 				// User/unknown panes have no agent CLI to relaunch; the fresh
 				// shell is the fully restored state.
-				pid := paneShellPID(info.Target)
+				pid, pidErr := paneShellPIDContext(ctx, info.Target)
+				if cancelErr := restartPaneCancellationError(ctx, pidErr); cancelErr != nil {
+					output.Failed = append(output.Failed, RestartError{Pane: paneKey, Reason: cancelErr.Error()})
+					appendRestartCancellationFailures(output, output.Restarted, paneIndex+1, "agent relaunch skipped", cancelErr)
+					setRestartPaneCancellation(output, cancelErr, fmt.Sprintf("restart canceled while checking pane %s", paneKey))
+					return output, nil
+				}
 				output.ProcessAlive[paneKey] = pid > 0 && process.IsAlive(pid)
 				continue
 			}
 
-			launchCmd := restartAgentLaunchCommand(cfg, info.ResolvedType)
-			if err := tmux.SendKeysForAgent(info.Target, launchCmd, true, info.AgentType); err != nil {
-				output.AgentRelaunched[paneKey] = false
-				output.ProcessAlive[paneKey] = false
-				output.Failed = append(output.Failed, RestartError{
-					Pane:   paneKey,
-					Reason: fmt.Sprintf("failed to relaunch agent: %v", err),
-				})
+			launchCmd := restartAgentLaunchCommand(cfg, info.ResolvedType, info.Variant)
+			outcome, phase, lifecycleErr := relaunchRestartPaneAgentContext(
+				ctx,
+				info,
+				launchCmd,
+				restartPaneReadyTimeout,
+				tmux.SendKeysForAgentContext,
+				paneShellPIDContext,
+				waitForPaneAgentReadyContext,
+				process.HasChildAlive,
+			)
+			agentPaneReady[paneKey] = outcome.Ready
+			output.AgentRelaunched[paneKey] = outcome.Ready
+			output.AgentRelaunchStatus[paneKey] = outcome.Status
+			output.ProcessAlive[paneKey] = outcome.ProcessAlive
+			if lifecycleErr != nil {
+				reason := formatRestartAgentLifecycleError(phase, lifecycleErr, outcome)
+				appendRestartFailureOnce(output, paneKey, reason)
+				if cancelErr := restartPaneCancellationError(ctx, lifecycleErr); cancelErr != nil {
+					appendRestartCancellationFailures(output, output.Restarted, paneIndex+1, "agent relaunch skipped", cancelErr)
+					setRestartPaneCancellation(output, cancelErr, fmt.Sprintf("restart canceled during pane %s agent %s", paneKey, phase))
+					return output, nil
+				}
 				continue
 			}
-
-			// Ready-gate: poll until the agent TUI is up instead of sleeping
-			// a fixed interval, so prompts are never typed into a bare shell.
-			// Query the fresh pane_pid from tmux (respawn assigns a new shell
-			// PID) so the process check sees the post-respawn shell.
-			shellPID := paneShellPID(info.Target)
-			ready := waitForPaneAgentReady(info.Target, shellPID, info.ResolvedType, restartPaneReadyTimeout)
-			agentPaneReady[paneKey] = ready
-			output.AgentRelaunched[paneKey] = ready
-			// Agent panes are only "alive" with a live agent child under the
-			// shell — mere shell liveness is exactly the false success this
-			// command used to report (#187).
-			output.ProcessAlive[paneKey] = shellPID > 0 && process.HasChildAlive(shellPID)
-			if !ready {
+			if !outcome.Ready {
 				output.Failed = append(output.Failed, RestartError{
 					Pane:   paneKey,
 					Reason: fmt.Sprintf("agent not ready within %s after relaunch", restartPaneReadyTimeout),
@@ -243,31 +410,77 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 		}
 	}
 
-	// Send prompt to successfully restarted panes. Agent panes only receive
-	// the prompt once the ready-gate has passed; prompt_sent stays false when
-	// any eligible delivery was skipped or failed (#187).
-	if promptToSend != "" && len(output.Restarted) > 0 {
-		if opts.Bead != "" {
-			output.BeadAssigned = opts.Bead
+	// Bead prompts cross the shared atomic claim-ledger-dispatch boundary.
+	// Ordinary restart prompts retain the direct best-effort behavior.
+	if err := ctx.Err(); err != nil {
+		if beadPreflight != nil || promptToSend != "" {
+			appendRestartCancellationFailures(output, output.Restarted, 0, "prompt delivery skipped", err)
 		}
-
+		if beadPreflight == nil && promptToSend != "" {
+			output.PromptDelivery = make(map[string]RestartPromptDeliveryStatus, len(output.Restarted))
+			for _, paneKey := range output.Restarted {
+				output.PromptDelivery[paneKey] = RestartPromptSkipped
+			}
+		}
+		setRestartPaneCancellation(output, err, "restart canceled before prompt delivery")
+		return output, nil
+	}
+	if beadPreflight != nil && len(output.Restarted) > 0 {
+		paneKey := output.Restarted[0]
+		info := restartedPaneInfo[paneKey]
+		if restartTargetIsAgent(info.ResolvedType) && !agentPaneReady[paneKey] {
+			output.PromptError = fmt.Sprintf("pane %s: agent not ready, assignment not started", paneKey)
+		} else {
+			result, executeErr := executeRestartBeadAfterSafeObservation(
+				ctx,
+				opts.Session,
+				beadPreflight.Request,
+				restartPaneDispatchReadyTimeout,
+				restartPaneReadyPollInterval,
+				deps.ObserveSession,
+				beadPreflight.Coordinator.Execute,
+			)
+			if cancelErr := restartPaneCancellationError(ctx, executeErr); cancelErr != nil {
+				appendRestartFailureOnce(output, paneKey, fmt.Sprintf("atomic assignment canceled: %v", cancelErr))
+			}
+			applyRestartAtomicResult(output, result, executeErr)
+		}
+	} else if promptToSend != "" && len(output.Restarted) > 0 {
 		promptTargets := make([]restartPromptTarget, 0, len(output.Restarted))
 		var promptErrors []string
+		output.PromptDelivery = make(map[string]RestartPromptDeliveryStatus, len(output.Restarted))
 		for _, paneKey := range output.Restarted {
 			info := restartedPaneInfo[paneKey]
 			if restartTargetIsAgent(info.ResolvedType) && !agentPaneReady[paneKey] {
 				promptErrors = append(promptErrors, fmt.Sprintf("pane %s: agent not ready, prompt not sent", paneKey))
+				output.PromptDelivery[paneKey] = RestartPromptSkipped
 				continue
 			}
 			promptTargets = append(promptTargets, info)
 		}
-		promptErrors = append(promptErrors, sendRestartPrompts(promptTargets, promptToSend, tmux.SendKeysForAgentDoubleEnter)...)
+		deliveryErrors, canceledPanes, deliveryStatus, deliveryErr := sendRestartPromptsContext(
+			ctx,
+			promptTargets,
+			promptToSend,
+			tmux.SendKeysForAgentDoubleEnterContext,
+		)
+		promptErrors = append(promptErrors, deliveryErrors...)
+		for paneKey, status := range deliveryStatus {
+			output.PromptDelivery[paneKey] = status
+		}
 
 		if len(promptErrors) > 0 {
 			output.PromptSent = false
 			output.PromptError = strings.Join(promptErrors, "; ")
 		} else {
 			output.PromptSent = len(promptTargets) > 0
+		}
+		if cancelErr := restartPaneCancellationError(ctx, deliveryErr); cancelErr != nil {
+			for _, paneKey := range canceledPanes {
+				appendRestartFailureOnce(output, paneKey, fmt.Sprintf("prompt delivery canceled: %v", cancelErr))
+			}
+			setRestartPaneCancellation(output, cancelErr, "restart canceled during prompt delivery")
+			return output, nil
 		}
 	}
 
@@ -284,6 +497,555 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 	return output, nil
 }
 
+func restartPaneDeps(custom *RestartPaneDependencies) RestartPaneDependencies {
+	observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
+	deps := RestartPaneDependencies{
+		LoadAssignmentPolicy:   loadAuthoritativeAssignmentPolicy,
+		FetchActionable:        getAssignableActionableRecommendations,
+		FetchBeadDetails:       bv.GetBeadAssignmentDetailsContext,
+		AssignmentLedgerExists: restartPaneAssignmentLedgerExists,
+		LoadStore:              assignment.LoadStoreStrict,
+		LoadStoreReadOnly:      assignment.LoadStoreStrictReadOnly,
+		ClaimBead:              bv.ClaimBeadForAssignment,
+		ClaimBeadWithPolicy:    bv.ClaimBeadForAssignmentWithOperatorGatedLabels,
+		GetBeadStatus:          bv.GetBeadStatusContext,
+		NewIdempotencyKey:      assignment.NewAssignmentIdempotencyKey,
+		ListPanes:              tmux.GetPanesContext,
+		ObserveSession:         observer.Observe,
+		DispatchDeliverer:      dispatchsvc.TMUXDeliverer{},
+	}
+	if custom == nil {
+		return deps
+	}
+	if custom.LoadAssignmentPolicy != nil {
+		deps.LoadAssignmentPolicy = custom.LoadAssignmentPolicy
+	}
+	if custom.FetchActionable != nil {
+		deps.FetchActionable = custom.FetchActionable
+	}
+	if custom.FetchBeadDetails != nil {
+		deps.FetchBeadDetails = custom.FetchBeadDetails
+	}
+	if custom.AssignmentLedgerExists != nil {
+		deps.AssignmentLedgerExists = custom.AssignmentLedgerExists
+	}
+	if custom.LoadStore != nil {
+		deps.LoadStore = custom.LoadStore
+	}
+	if custom.LoadStoreReadOnly != nil {
+		deps.LoadStoreReadOnly = custom.LoadStoreReadOnly
+	}
+	if custom.ClaimBead != nil {
+		deps.ClaimBead = custom.ClaimBead
+		deps.ClaimBeadWithPolicy = nil
+	}
+	if custom.ClaimBeadWithPolicy != nil {
+		deps.ClaimBeadWithPolicy = custom.ClaimBeadWithPolicy
+	}
+	if custom.GetBeadStatus != nil {
+		deps.GetBeadStatus = custom.GetBeadStatus
+	}
+	if custom.NewIdempotencyKey != nil {
+		deps.NewIdempotencyKey = custom.NewIdempotencyKey
+	}
+	if custom.ListPanes != nil {
+		deps.ListPanes = custom.ListPanes
+	}
+	if custom.ObserveSession != nil {
+		deps.ObserveSession = custom.ObserveSession
+	}
+	if custom.DispatchDeliverer != nil {
+		deps.DispatchDeliverer = custom.DispatchDeliverer
+	}
+	if custom.DispatchPacer != nil {
+		deps.DispatchPacer = custom.DispatchPacer
+	}
+	return deps
+}
+
+func restartPaneAssignmentLedgerExists(session string) (bool, error) {
+	path := filepath.Join(assignment.StorageDir(), session, "assignments.json")
+	for _, candidate := range []string{path, path + ".bak"} {
+		info, err := os.Stat(candidate)
+		switch {
+		case err == nil && !info.Mode().IsRegular():
+			return false, fmt.Errorf("assignment ledger %s is not a regular file", candidate)
+		case err == nil:
+			return true, nil
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		default:
+			return false, fmt.Errorf("inspect assignment ledger %s: %w", candidate, err)
+		}
+	}
+	return false, nil
+}
+
+func preflightRestartBead(
+	ctx context.Context,
+	opts RestartPaneOptions,
+	pane tmux.Pane,
+	deps RestartPaneDependencies,
+) (*restartBeadPreflight, error) {
+	projectDir := strings.TrimSpace(opts.ProjectDir)
+	if projectDir == "" {
+		return nil, errors.New("authoritative project directory is required for --restart-bead")
+	}
+	beadID := strings.TrimSpace(opts.Bead)
+	if beadID == "" {
+		return nil, errors.New("bead ID is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	policy, err := deps.LoadAssignmentPolicy(projectDir, opts.ConfigPath, opts.RequireConfig)
+	if err != nil {
+		return nil, fmt.Errorf("load assignment safety policy: %w", err)
+	}
+	operatorGatedLabels := []string(nil)
+	if policy != nil {
+		operatorGatedLabels = append(operatorGatedLabels, policy.Assign.OperatorGatedLabels...)
+	}
+	actionable, err := deps.FetchActionable(ctx, projectDir, 0)
+	if err != nil {
+		return nil, fmt.Errorf("verify actionable bv plan: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	details, err := deps.FetchBeadDetails(ctx, projectDir, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("read live Beads eligibility: %w", err)
+	}
+	if details == nil || strings.TrimSpace(details.ID) != beadID {
+		return nil, fmt.Errorf("live Beads details do not identify %s", beadID)
+	}
+	if strings.TrimSpace(details.Title) == "" {
+		return nil, fmt.Errorf("bead %s has an empty title", beadID)
+	}
+
+	agentType := restartPaneAgentType(pane)
+	target := strings.TrimSpace(pane.ID)
+	if target == "" {
+		target = pane.Ref().Physical()
+	}
+	agentName := restartPaneAssignmentActor(opts.Session, target)
+	prompt := strings.TrimSpace(opts.Prompt)
+	if prompt == "" {
+		prompt = buildRestartBeadPrompt(beadID, details.Title)
+	}
+
+	planErr := validateRestartActionablePlanWithPolicy(beadID, actionable, operatorGatedLabels)
+	freshDetailsErr := validateRestartFreshDetailsWithPolicy(details, time.Now(), operatorGatedLabels)
+	freshAuthorized := planErr == nil && freshDetailsErr == nil
+	possibleRecovery := strings.EqualFold(strings.TrimSpace(details.Status), "in_progress") && strings.TrimSpace(details.Assignee) != ""
+	if !freshAuthorized && !possibleRecovery {
+		if planErr != nil {
+			return nil, planErr
+		}
+		return nil, freshDetailsErr
+	}
+	ledgerExists, err := deps.AssignmentLedgerExists(opts.Session)
+	if err != nil {
+		return nil, fmt.Errorf("inspect assignment ledger: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var store *assignment.AssignmentStore
+	if ledgerExists {
+		loadStore := deps.LoadStore
+		if opts.DryRun {
+			loadStore = deps.LoadStoreReadOnly
+		}
+		store, err = loadStore(opts.Session)
+		if err != nil {
+			return nil, fmt.Errorf("load assignment ledger: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := validateRestartStorePreflight(store, beadID, target); err != nil {
+			return nil, err
+		}
+	}
+
+	var recovery *assignment.Assignment
+	if store != nil {
+		existing := store.Get(beadID)
+		if existing != nil && !robotAtomicAssignmentTerminal(existing.Status) {
+			recovery = restartMatchingAssignment(existing, target, pane.Index, agentType, agentName, prompt)
+			if recovery == nil {
+				return nil, fmt.Errorf("bead %s already has a different active assignment intent", beadID)
+			}
+		}
+	}
+	if recovery != nil {
+		if err := validateRestartRecoveryDetailsWithPolicy(details, recovery, time.Now(), operatorGatedLabels); err != nil {
+			return nil, err
+		}
+		if recovery.DispatchState == assignment.DispatchSending {
+			return nil, assignment.ErrDispatchOutcomeUnknown
+		}
+	} else if !freshAuthorized {
+		if planErr != nil {
+			return nil, planErr
+		}
+		return nil, freshDetailsErr
+	}
+
+	if opts.DryRun {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return &restartBeadPreflight{Details: details, Prompt: prompt, Policy: policy, Store: store, Recovery: recovery}, nil
+	}
+	if store == nil {
+		store, err = deps.LoadStore(opts.Session)
+		if err != nil {
+			return nil, fmt.Errorf("load assignment ledger: %w", err)
+		}
+		if err := validateRestartStorePreflight(store, beadID, target); err != nil {
+			return nil, err
+		}
+		if existing := store.Get(beadID); existing != nil && !robotAtomicAssignmentTerminal(existing.Status) {
+			recovery = restartMatchingAssignment(existing, target, pane.Index, agentType, agentName, prompt)
+			if recovery == nil {
+				return nil, fmt.Errorf("bead %s acquired a different active assignment intent during preflight", beadID)
+			}
+			if err := validateRestartRecoveryDetailsWithPolicy(details, recovery, time.Now(), operatorGatedLabels); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	key, err := robotAtomicIdempotencyKey(store, beadID, target, pane.Index, agentType, agentName, prompt, false, nil, deps.NewIdempotencyKey)
+	if err != nil {
+		return nil, fmt.Errorf("resolve restart assignment identity: %w", err)
+	}
+	request := assignment.AtomicRequest{
+		BeadID: beadID, BeadTitle: details.Title, Target: target, OccupancyKey: target, Pane: pane.Index,
+		AgentType: agentType, AgentName: agentName, Actor: agentName, Prompt: prompt, IdempotencyKey: key,
+	}
+	if recovery != nil {
+		request.RecoveredIntentSHA256 = strings.TrimSpace(recovery.IntentSHA256)
+		if request.RecoveredIntentSHA256 == "" {
+			request.RecoveredIntentSHA256 = strings.TrimSpace(recovery.PromptSHA256)
+		}
+	}
+	redactionConfig := config.Default().Redaction.ToRedactionLibConfig()
+	if policy != nil {
+		redactionConfig = policy.Redaction.ToRedactionLibConfig()
+	}
+	dispatchPort := newRobotAtomicPaneDispatchPort(
+		opts.Session, deps.ListPanes, deps.ObserveSession, redactionConfig, deps.DispatchDeliverer, deps.DispatchPacer,
+	)
+	if _, err := dispatchPort.Preflight(ctx, assignment.DispatchRequest{
+		BeadID: request.BeadID, BeadTitle: request.BeadTitle, Target: request.Target, Pane: request.Pane,
+		AgentType: request.AgentType, AgentName: request.AgentName, Prompt: request.Prompt, IdempotencyKey: request.IdempotencyKey,
+	}); err != nil {
+		return nil, fmt.Errorf("preflight restart assignment prompt: %w", err)
+	}
+	claimBead := deps.ClaimBead
+	if deps.ClaimBeadWithPolicy != nil {
+		claimBead = func(claimCtx context.Context, dir, id, actor string) (bv.BeadClaimResult, error) {
+			return deps.ClaimBeadWithPolicy(claimCtx, dir, id, actor, operatorGatedLabels)
+		}
+	}
+	coordinator := assignment.NewAtomicCoordinator(
+		store, newRobotAtomicClaimPort(projectDir, claimBead), nil, dispatchPort, dispatchPort,
+	).WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(statusCtx context.Context, id string) (string, error) {
+		return deps.GetBeadStatus(statusCtx, projectDir, id)
+	})).WithAssignmentEligibilityAuthorizationPort(
+		newRestartAssignmentEligibilityPort(projectDir, operatorGatedLabels, deps.FetchBeadDetails),
+	)
+	return &restartBeadPreflight{
+		Details: details, Prompt: prompt, Policy: policy, Store: store, Recovery: recovery,
+		Request: request, Coordinator: coordinator,
+	}, nil
+}
+
+func restartPaneAssignmentActor(session, target string) string {
+	return fmt.Sprintf("%s-pane-%s", strings.TrimSpace(session), strings.TrimPrefix(strings.TrimSpace(target), "%"))
+}
+
+func newRestartAssignmentEligibilityPort(
+	projectDir string,
+	operatorGatedLabels []string,
+	fetch func(context.Context, string, string) (*bv.BeadAssignmentDetails, error),
+) assignment.AssignmentEligibilityAuthorizationPort {
+	operatorGatedLabels = append([]string(nil), operatorGatedLabels...)
+	return assignment.AssignmentEligibilityAuthorizationFunc(func(ctx context.Context, request assignment.AssignmentEligibilityAuthorizationRequest) error {
+		details, err := fetch(ctx, projectDir, request.BeadID)
+		if err != nil {
+			return fmt.Errorf("read final live Beads eligibility: %w", err)
+		}
+		err = bv.ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels(details, bv.BeadAssignmentAuthorization{
+			BeadID: request.BeadID, ExpectedAssignee: request.ClaimActor,
+			AllowUnassignedOpen:  request.AllowUnassignedOpen,
+			AllowOwnedOpen:       request.AllowOwnedOpen,
+			AllowOwnedInProgress: request.AllowOwnedInProgress,
+		}, operatorGatedLabels)
+		if errors.Is(err, bv.ErrBeadAssignmentIneligible) {
+			return fmt.Errorf("%w: %v", assignment.ErrClaimIneligible, err)
+		}
+		return err
+	})
+}
+
+func validateRestartStorePreflight(store *assignment.AssignmentStore, beadID, target string) error {
+	if store == nil {
+		return errors.New("assignment ledger is required")
+	}
+	for _, current := range store.ListActive() {
+		if current == nil || current.BeadID == beadID {
+			continue
+		}
+		identity, err := assignment.CanonicalPaneIdentity(current)
+		if err != nil {
+			return fmt.Errorf("verify active assignment %s occupancy: %w", current.BeadID, err)
+		}
+		if identity == target {
+			return fmt.Errorf("target %s is already occupied by bead %s", target, current.BeadID)
+		}
+	}
+	prior := store.Get(beadID)
+	if prior == nil {
+		return nil
+	}
+	if prior.ClearState != assignment.ClearStateNone {
+		return fmt.Errorf("assignment %s is awaiting reservation release", beadID)
+	}
+	if robotAtomicAssignmentTerminal(prior.Status) {
+		if strings.TrimSpace(prior.PendingCompletionEventID) != "" {
+			return fmt.Errorf("assignment %s has unacknowledged completion event %s", beadID, prior.PendingCompletionEventID)
+		}
+		if restartAssignmentHasReservationEvidence(prior) {
+			return fmt.Errorf("assignment %s still owns reservation receipts", beadID)
+		}
+	}
+	return nil
+}
+
+func restartAssignmentHasReservationEvidence(current *assignment.Assignment) bool {
+	if current == nil {
+		return false
+	}
+	if current.ClearState != assignment.ClearStateNone || len(current.ReservationIDs) > 0 || len(current.ReservedPaths) > 0 {
+		return true
+	}
+
+	state := current.ReservationState
+	if state == "" {
+		if current.ReservationCompleted {
+			state = assignment.ReservationReserved
+		} else {
+			state = assignment.ReservationPending
+		}
+	}
+	switch state {
+	case assignment.ReservationReserving, assignment.ReservationUnknown:
+		return true
+	case assignment.ReservationReserved:
+		return !current.ReservationCompleted || strings.TrimSpace(current.ReservationError) != ""
+	default:
+		// ReservationRequired is durable policy, not evidence of a live lease.
+		// In particular, a terminal Released record with no handles is clean.
+		return false
+	}
+}
+
+func restartMatchingAssignment(
+	existing *assignment.Assignment,
+	target string,
+	pane int,
+	agentType, agentName, prompt string,
+) *assignment.Assignment {
+	if existing == nil || existing.Pane != pane || strings.TrimSpace(existing.DispatchTarget) != target ||
+		normalizeAgentType(existing.AgentType) != normalizeAgentType(agentType) ||
+		strings.TrimSpace(existing.AgentName) != agentName || restartAssignmentHasReservationEvidence(existing) {
+		return nil
+	}
+	occupancy := strings.TrimSpace(existing.OccupancyKey)
+	if occupancy == "" {
+		occupancy = strings.TrimSpace(existing.DispatchTarget)
+	}
+	if occupancy != target {
+		return nil
+	}
+	intent := strings.TrimSpace(existing.IntentSHA256)
+	if intent == "" {
+		intent = strings.TrimSpace(existing.PromptSHA256)
+	}
+	if intent == "" || intent != assignment.PromptSHA256(prompt) || strings.TrimSpace(existing.IdempotencyKey) == "" {
+		return nil
+	}
+	return existing
+}
+
+func validateRestartActionablePlan(beadID string, actionable []bv.TriageRecommendation) error {
+	return validateRestartActionablePlanWithPolicy(beadID, actionable, bv.OperatorGatedLabels())
+}
+
+func validateRestartActionablePlanWithPolicy(beadID string, actionable []bv.TriageRecommendation, operatorGatedLabels []string) error {
+	var match *bv.TriageRecommendation
+	for i := range actionable {
+		if strings.TrimSpace(actionable[i].ID) != beadID {
+			continue
+		}
+		if match != nil {
+			return fmt.Errorf("verified actionable plan contains bead %s more than once", beadID)
+		}
+		match = &actionable[i]
+	}
+	if match == nil {
+		return fmt.Errorf("bead %s is absent from the verified actionable plan", beadID)
+	}
+	if len(match.BlockedBy) > 0 {
+		return fmt.Errorf("bead %s is blocked in the verified plan by %s", beadID, strings.Join(match.BlockedBy, ", "))
+	}
+	for _, label := range match.Labels {
+		if bv.IsOperatorGatedLabelInPolicy(label, operatorGatedLabels) {
+			return fmt.Errorf("bead %s is operator-gated in the verified plan by label %q", beadID, strings.TrimSpace(label))
+		}
+	}
+	status := strings.ToLower(strings.TrimSpace(match.Status))
+	if status != "" && status != "open" && status != "ready" {
+		return fmt.Errorf("bead %s has non-actionable plan status %q", beadID, match.Status)
+	}
+	return nil
+}
+
+func validateRestartBeadCommon(details *bv.BeadAssignmentDetails, now time.Time) error {
+	return validateRestartBeadCommonWithPolicy(details, now, bv.OperatorGatedLabels())
+}
+
+func validateRestartBeadCommonWithPolicy(details *bv.BeadAssignmentDetails, now time.Time, operatorGatedLabels []string) error {
+	if details == nil {
+		return errors.New("live Beads assignment details are required")
+	}
+	beadID := strings.TrimSpace(details.ID)
+	if len(details.BlockedBy) > 0 {
+		return fmt.Errorf("bead %s has unresolved blockers: %s", beadID, strings.Join(details.BlockedBy, ", "))
+	}
+	for _, label := range details.Labels {
+		if bv.IsOperatorGatedLabelInPolicy(label, operatorGatedLabels) {
+			return fmt.Errorf("bead %s is operator-gated by live label %q", beadID, strings.TrimSpace(label))
+		}
+	}
+	if details.DeferUntil != nil && details.DeferUntil.After(now) {
+		return fmt.Errorf("bead %s is deferred until %s", beadID, details.DeferUntil.UTC().Format(time.RFC3339))
+	}
+	if details.Pinned {
+		return fmt.Errorf("bead %s is pinned", beadID)
+	}
+	if details.Ephemeral {
+		return fmt.Errorf("bead %s is ephemeral", beadID)
+	}
+	if details.Template {
+		return fmt.Errorf("bead %s is a template", beadID)
+	}
+	if details.Wisp || strings.Contains(strings.ToLower(beadID), "-wisp-") {
+		return fmt.Errorf("bead %s is a wisp", beadID)
+	}
+	return nil
+}
+
+func validateRestartFreshDetails(details *bv.BeadAssignmentDetails, now time.Time) error {
+	return validateRestartFreshDetailsWithPolicy(details, now, bv.OperatorGatedLabels())
+}
+
+func validateRestartFreshDetailsWithPolicy(details *bv.BeadAssignmentDetails, now time.Time, operatorGatedLabels []string) error {
+	if err := validateRestartBeadCommonWithPolicy(details, now, operatorGatedLabels); err != nil {
+		return err
+	}
+	if !strings.EqualFold(strings.TrimSpace(details.Status), "open") {
+		return fmt.Errorf("bead %s has status %q, want open", details.ID, details.Status)
+	}
+	if assignee := strings.TrimSpace(details.Assignee); assignee != "" {
+		return fmt.Errorf("bead %s is already assigned to %q", details.ID, assignee)
+	}
+	return nil
+}
+
+func validateRestartRecoveryDetails(details *bv.BeadAssignmentDetails, recovery *assignment.Assignment, now time.Time) error {
+	return validateRestartRecoveryDetailsWithPolicy(details, recovery, now, bv.OperatorGatedLabels())
+}
+
+func validateRestartRecoveryDetailsWithPolicy(details *bv.BeadAssignmentDetails, recovery *assignment.Assignment, now time.Time, operatorGatedLabels []string) error {
+	if recovery == nil {
+		return errors.New("durable restart recovery assignment is required")
+	}
+	if err := validateRestartBeadCommonWithPolicy(details, now, operatorGatedLabels); err != nil {
+		return err
+	}
+	if recovery.ClaimState == assignment.ClaimIneligible || recovery.ClaimState == assignment.ClaimFailed {
+		return fmt.Errorf("durable restart assignment %s has failed claim state %q", recovery.BeadID, recovery.ClaimState)
+	}
+	if strings.TrimSpace(recovery.ClaimActor) == "" ||
+		!strings.EqualFold(strings.TrimSpace(details.Status), "in_progress") ||
+		strings.TrimSpace(details.Assignee) != strings.TrimSpace(recovery.ClaimActor) {
+		return fmt.Errorf("durable restart assignment %s is not owned in_progress by %s", recovery.BeadID, recovery.ClaimActor)
+	}
+	if recovery.DispatchState == assignment.DispatchSent &&
+		(recovery.ClaimState != assignment.ClaimClaimed || strings.TrimSpace(recovery.DispatchReceiptID) == "" || strings.TrimSpace(recovery.PromptSent) == "") {
+		return fmt.Errorf("durable restart assignment %s has an incomplete dispatch receipt", recovery.BeadID)
+	}
+	return nil
+}
+
+func restartAssignmentWasSent(recovery *assignment.Assignment) bool {
+	return recovery != nil && recovery.DispatchState == assignment.DispatchSent
+}
+
+func applyRestartAssignmentReplay(output *RestartPaneOutput, recovery *assignment.Assignment) {
+	if output == nil || recovery == nil {
+		return
+	}
+	output.PromptSent = true
+	output.ClaimActor = recovery.ClaimActor
+	output.IdempotencyKey = recovery.IdempotencyKey
+	output.DispatchReceiptID = recovery.DispatchReceiptID
+	output.AssignmentReplayed = true
+}
+
+func applyRestartAtomicResult(output *RestartPaneOutput, result assignment.AtomicResult, executeErr error) {
+	if output == nil {
+		return
+	}
+	if result.Assignment != nil {
+		output.ClaimActor = result.Assignment.ClaimActor
+		output.IdempotencyKey = result.Assignment.IdempotencyKey
+		output.DispatchReceiptID = result.Assignment.DispatchReceiptID
+	}
+	output.AssignmentReplayed = result.Replayed
+	output.AssignmentRecovered = result.Recovered
+	if executeErr != nil {
+		output.PromptSent = false
+		output.PromptError = executeErr.Error()
+		if errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded) {
+			setRestartPaneCancellation(output, executeErr, "restart canceled during atomic assignment")
+			return
+		}
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("atomic restart assignment failed: %w", executeErr),
+			"ASSIGNMENT_FAILED",
+			"Inspect the durable assignment receipt before retrying",
+		)
+		return
+	}
+	if !result.Sent || result.Assignment == nil || result.Assignment.DispatchState != assignment.DispatchSent ||
+		strings.TrimSpace(result.Assignment.DispatchReceiptID) == "" {
+		err := errors.New("atomic restart assignment completed without a durable dispatch receipt")
+		output.PromptError = err.Error()
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Inspect the durable assignment ledger before retrying")
+		return
+	}
+	output.PromptSent = true
+}
+
 // restartTargetIsAgent reports whether a resolved pane type identifies an
 // agent CLI pane (as opposed to a user shell or an unidentifiable pane).
 func restartTargetIsAgent(resolvedType string) bool {
@@ -295,12 +1057,312 @@ func restartTargetIsAgent(resolvedType string) bool {
 	}
 }
 
+func validateRestartBeadTargets(targets []tmux.Pane) error {
+	if len(targets) != 1 {
+		return fmt.Errorf("--restart-bead requires exactly one target pane, resolved %d", len(targets))
+	}
+	if !restartTargetIsAgent(restartPaneAgentType(targets[0])) {
+		return fmt.Errorf("--restart-bead target %s is not an agent pane", targets[0].Ref().Physical())
+	}
+	return nil
+}
+
+func validateRestartPaneTargets(targets []tmux.Pane) error {
+	for _, pane := range targets {
+		resolvedType := restartPaneAgentType(pane)
+		if err := agent.AgentType(resolvedType).ValidateAutomatedRelaunch(); err != nil {
+			return fmt.Errorf("pane %s (%s): %w", pane.Ref().Physical(), resolvedType, err)
+		}
+	}
+	return nil
+}
+
+func respawnRestartPaneTargetsContext(
+	ctx context.Context,
+	targets []tmux.Pane,
+	multiWindow bool,
+	output *RestartPaneOutput,
+	respawn func(context.Context, string, bool) error,
+	panePID func(context.Context, string) (int, error),
+) (map[string]restartPromptTarget, error) {
+	if ctx == nil {
+		return nil, errors.New("restart pane respawn context is required")
+	}
+	if respawn == nil {
+		return nil, errors.New("restart pane respawn function is required")
+	}
+	if panePID == nil {
+		return nil, errors.New("restart pane PID observer is required")
+	}
+	if err := validateRestartPaneTargets(targets); err != nil {
+		return nil, err
+	}
+
+	restartedPaneInfo := make(map[string]restartPromptTarget)
+	for paneIndex, pane := range targets {
+		paneKey := paneTargetKey(pane, multiWindow)
+		if err := ctx.Err(); err != nil {
+			remaining := make([]string, 0, len(targets)-paneIndex)
+			for _, pending := range targets[paneIndex:] {
+				remaining = append(remaining, paneTargetKey(pending, multiWindow))
+			}
+			appendRestartCancellationFailures(output, remaining, 0, "respawn skipped", err)
+			return restartedPaneInfo, err
+		}
+		beforePID, err := panePID(ctx, pane.ID)
+		if err != nil || beforePID <= 0 {
+			if err == nil {
+				err = errors.New("pane PID is unavailable")
+			}
+			appendRestartFailureOnce(output, paneKey, fmt.Sprintf("failed to observe pane PID before respawn: %v", err))
+			if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+				remaining := make([]string, 0, len(targets)-paneIndex-1)
+				for _, pending := range targets[paneIndex+1:] {
+					remaining = append(remaining, paneTargetKey(pending, multiWindow))
+				}
+				appendRestartCancellationFailures(output, remaining, 0, "respawn skipped", cancelErr)
+				return restartedPaneInfo, cancelErr
+			}
+			continue
+		}
+		if err := respawn(ctx, pane.ID, true); err != nil {
+			if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+				afterPID, observationErr := observeRestartPanePIDAfterCancellation(ctx, pane.ID, panePID)
+				if observationErr == nil && afterPID > 0 && afterPID != beforePID {
+					output.Restarted = append(output.Restarted, paneKey)
+					restartedPaneInfo[paneKey] = restartPromptTarget{
+						Pane:         paneKey,
+						Target:       pane.ID,
+						AgentType:    pane.Type,
+						ResolvedType: restartPaneAgentType(pane),
+						Variant:      pane.Variant,
+					}
+					appendRestartFailureOnce(output, paneKey, fmt.Sprintf(
+						"respawn changed pane PID from %d to %d, but the command returned after cancellation and the post-respawn lifecycle is incomplete: %v",
+						beforePID,
+						afterPID,
+						cancelErr,
+					))
+				} else {
+					reason := fmt.Sprintf("failed to respawn: %v", err)
+					switch {
+					case observationErr != nil:
+						reason += fmt.Sprintf("; post-cancellation pane PID observation failed, so mutation status is unknown: %v", observationErr)
+					case afterPID <= 0:
+						reason += "; post-cancellation pane PID is unavailable, so mutation status is unknown"
+					default:
+						reason += fmt.Sprintf("; pane PID remained %d", afterPID)
+					}
+					appendRestartFailureOnce(output, paneKey, reason)
+				}
+				remaining := make([]string, 0, len(targets)-paneIndex-1)
+				for _, pending := range targets[paneIndex+1:] {
+					remaining = append(remaining, paneTargetKey(pending, multiWindow))
+				}
+				appendRestartCancellationFailures(output, remaining, 0, "respawn skipped", cancelErr)
+				return restartedPaneInfo, cancelErr
+			}
+			appendRestartFailureOnce(output, paneKey, fmt.Sprintf("failed to respawn: %v", err))
+			continue
+		}
+
+		output.Restarted = append(output.Restarted, paneKey)
+		restartedPaneInfo[paneKey] = restartPromptTarget{
+			Pane:         paneKey,
+			Target:       pane.ID,
+			AgentType:    pane.Type,
+			ResolvedType: restartPaneAgentType(pane),
+			Variant:      pane.Variant,
+		}
+		if err := ctx.Err(); err != nil {
+			appendRestartFailureOnce(output, paneKey, fmt.Sprintf("respawn completed but post-respawn lifecycle was canceled: %v", err))
+			remaining := make([]string, 0, len(targets)-paneIndex-1)
+			for _, pending := range targets[paneIndex+1:] {
+				remaining = append(remaining, paneTargetKey(pending, multiWindow))
+			}
+			appendRestartCancellationFailures(output, remaining, 0, "respawn skipped", err)
+			return restartedPaneInfo, err
+		}
+	}
+	return restartedPaneInfo, nil
+}
+
+func observeRestartPanePIDAfterCancellation(
+	ctx context.Context,
+	target string,
+	panePID func(context.Context, string) (int, error),
+) (int, error) {
+	observationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartPaneMutationObservationTimeout)
+	defer cancel()
+	return panePID(observationCtx, target)
+}
+
+func relaunchRestartPaneAgentContext(
+	ctx context.Context,
+	info restartPromptTarget,
+	launchCommand string,
+	readyTimeout time.Duration,
+	send func(context.Context, string, string, bool, tmux.AgentType) error,
+	panePID func(context.Context, string) (int, error),
+	waitReady func(context.Context, string, int, string, time.Duration) (bool, error),
+	hasChildAlive func(int) bool,
+) (restartAgentRelaunchOutcome, string, error) {
+	failed := restartAgentRelaunchOutcome{Status: RestartAgentRelaunchFailed}
+	if ctx == nil {
+		return failed, "preflight", errors.New("agent relaunch context is required")
+	}
+	if send == nil || panePID == nil || waitReady == nil || hasChildAlive == nil {
+		return failed, "preflight", errors.New("agent relaunch dependencies are required")
+	}
+
+	shellPID, err := panePID(ctx, info.Target)
+	if err != nil || shellPID <= 0 {
+		if err == nil {
+			err = errors.New("pane PID is unavailable")
+		}
+		return failed, "PID observation", err
+	}
+	if err := send(ctx, info.Target, launchCommand, true, info.AgentType); err != nil {
+		if restartPaneCancellationError(ctx, err) != nil {
+			return observeRestartPaneAgentAfterCancellation(ctx, info, panePID, waitReady, hasChildAlive), "launch", err
+		}
+		return failed, "launch", err
+	}
+
+	ready, err := waitReady(ctx, info.Target, shellPID, info.ResolvedType, readyTimeout)
+	outcome := restartAgentRelaunchOutcome{
+		Status:       RestartAgentRelaunchNotReady,
+		Ready:        ready,
+		ProcessAlive: shellPID > 0 && hasChildAlive(shellPID),
+		ShellPID:     shellPID,
+	}
+	if ready {
+		outcome.Status = RestartAgentRelaunchReady
+	}
+	if err != nil && restartPaneCancellationError(ctx, err) != nil {
+		return observeRestartPaneAgentAfterCancellation(ctx, info, panePID, waitReady, hasChildAlive), "readiness", err
+	}
+	return outcome, "readiness", err
+}
+
+func observeRestartPaneAgentAfterCancellation(
+	ctx context.Context,
+	info restartPromptTarget,
+	panePID func(context.Context, string) (int, error),
+	waitReady func(context.Context, string, int, string, time.Duration) (bool, error),
+	hasChildAlive func(int) bool,
+) restartAgentRelaunchOutcome {
+	outcome := restartAgentRelaunchOutcome{Status: RestartAgentRelaunchUnknown}
+	observationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartPaneMutationObservationTimeout)
+	defer cancel()
+
+	shellPID, err := panePID(observationCtx, info.Target)
+	if err != nil || shellPID <= 0 {
+		if err == nil {
+			err = errors.New("pane PID is unavailable")
+		}
+		outcome.ObservationError = err
+		return outcome
+	}
+	outcome.ShellPID = shellPID
+	ready, readyErr := waitReady(observationCtx, info.Target, shellPID, info.ResolvedType, restartPaneMutationObservationTimeout)
+	outcome.Ready = ready
+	outcome.ProcessAlive = hasChildAlive(shellPID)
+	switch {
+	case ready:
+		outcome.Status = RestartAgentRelaunchReady
+	case readyErr != nil && !errors.Is(readyErr, context.Canceled) && !errors.Is(readyErr, context.DeadlineExceeded):
+		outcome.Status = RestartAgentRelaunchUnknown
+		outcome.ObservationError = readyErr
+	case outcome.ProcessAlive:
+		outcome.Status = RestartAgentRelaunchUnknown
+	default:
+		outcome.Status = RestartAgentRelaunchNotReady
+	}
+	return outcome
+}
+
+func formatRestartAgentLifecycleError(phase string, err error, outcome restartAgentRelaunchOutcome) string {
+	if cancelErr := restartPaneCancellationError(context.Background(), err); cancelErr != nil {
+		var reason string
+		switch outcome.Status {
+		case RestartAgentRelaunchReady:
+			reason = fmt.Sprintf("agent became ready before %s returned cancellation, but the post-relaunch lifecycle is incomplete: %v", phase, cancelErr)
+		case RestartAgentRelaunchUnknown:
+			reason = fmt.Sprintf("agent %s returned cancellation; relaunch status is unknown and must be inspected before retrying: %v", phase, cancelErr)
+		default:
+			reason = fmt.Sprintf("agent relaunch was canceled during %s before readiness was confirmed: %v", phase, cancelErr)
+		}
+		if outcome.ObservationError != nil {
+			reason += fmt.Sprintf("; independent observation failed: %v", outcome.ObservationError)
+		}
+		return reason
+	}
+	return fmt.Sprintf("failed during agent %s: %v", phase, err)
+}
+
+func appendRestartFailureOnce(output *RestartPaneOutput, pane, reason string) {
+	if output == nil {
+		return
+	}
+	for _, failure := range output.Failed {
+		if failure.Pane == pane {
+			return
+		}
+	}
+	output.Failed = append(output.Failed, RestartError{Pane: pane, Reason: reason})
+}
+
+func appendRestartCancellationFailures(output *RestartPaneOutput, panes []string, start int, stage string, err error) {
+	if output == nil || err == nil || start >= len(panes) {
+		return
+	}
+	if start < 0 {
+		start = 0
+	}
+	for _, pane := range panes[start:] {
+		appendRestartFailureOnce(output, pane, fmt.Sprintf("%s: %v", stage, err))
+	}
+}
+
+// restartModelVars recovers a restarted pane's model pin from its title
+// variant. A restart must not silently downgrade a pinned pane to the account
+// default model (#223), so when the variant is a known model alias (or an
+// exact full model name from the alias table) the returned template vars carry
+// the resolved pin. Unknown variants — persona names share the same title slot
+// — return empty vars rather than guessing a bogus --model value.
+func restartModelVars(cfg *config.Config, agentType, variant string) config.AgentTemplateVars {
+	vars := config.AgentTemplateVars{AgentType: agentType}
+	alias := strings.TrimSpace(variant)
+	if cfg == nil || alias == "" {
+		return vars
+	}
+	aliases := cfg.Models.AliasesFor(agentType)
+	if len(aliases) == 0 {
+		return vars
+	}
+	if fullName, ok := aliases[strings.ToLower(alias)]; ok {
+		vars.Model = fullName
+		vars.ModelAlias = alias
+		vars.ModelRequested = true
+		return vars
+	}
+	for _, fullName := range aliases {
+		if strings.EqualFold(fullName, alias) {
+			vars.Model = fullName
+			vars.ModelRequested = true
+			return vars
+		}
+	}
+	return vars
+}
+
 // restartAgentLaunchCommand resolves the command used to relaunch an agent CLI
 // in a respawned pane. It prefers the configured (template-rendered) agent
-// command — the same command robot-spawn delivers by keystroke — and falls
-// back to the canonical launch alias (cc/cod/gmi/...) when no usable command
-// is configured (#187).
-func restartAgentLaunchCommand(cfg *config.Config, agentType string) string {
+// command — the same command robot-spawn delivers by keystroke — rendered with
+// the pane's recovered model pin (#223), and falls back to the canonical
+// launch alias (cc/cod/gmi/...) when no usable command is configured (#187).
+func restartAgentLaunchCommand(cfg *config.Config, agentType, variant string) string {
 	alias := restartLaunchAlias(agentType)
 
 	var tmpl string
@@ -336,7 +1398,7 @@ func restartAgentLaunchCommand(cfg *config.Config, agentType string) string {
 		return alias
 	}
 
-	rendered, err := config.GenerateAgentCommand(tmpl, config.AgentTemplateVars{})
+	rendered, err := config.GenerateAgentCommand(tmpl, restartModelVars(cfg, ResolveAgentType(agentType), variant))
 	if err != nil || strings.TrimSpace(rendered) == "" {
 		return alias
 	}
@@ -346,45 +1408,184 @@ func restartAgentLaunchCommand(cfg *config.Config, agentType string) string {
 	return rendered
 }
 
-// paneShellPID queries the pane's current shell PID from tmux. Returns 0 when
-// unavailable. After respawn-pane the shell PID changes, so this must be
-// queried fresh rather than taken from the pre-restart pane snapshot.
-func paneShellPID(target string) int {
-	pidStr, err := tmux.DefaultClient.Run("display-message", "-t", target, "-p", "#{pane_pid}")
+// paneShellPIDContext queries the pane's current shell PID from tmux. After
+// respawn-pane the shell PID changes, so callers must query it fresh rather
+// than use the pre-restart pane snapshot.
+func paneShellPIDContext(ctx context.Context, target string) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("pane PID context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	pidStr, err := tmux.DefaultClient.RunContext(ctx, "display-message", "-t", target, "-p", "#{pane_pid}")
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(pidStr))
 	if err != nil || pid <= 0 {
-		return 0
+		return 0, nil
 	}
-	return pid
+	return pid, nil
 }
 
-// waitForPaneAgentReady polls a pane until isAgentReady reports the agent TUI
-// is up AND the pane shell has a live child process (the agent CLI). The
-// process check guards against isAgentReady matching a bare shell prompt
-// glyph (#187). A shellPID <= 0 skips the process check. Returns false when
-// the timeout elapses first.
-func waitForPaneAgentReady(target string, shellPID int, agentType string, timeout time.Duration) bool {
+// waitForPaneAgentReadyContext polls until the agent TUI is ready and the pane
+// shell has a live agent child. A shellPID <= 0 skips the process check.
+func waitForPaneAgentReadyContext(ctx context.Context, target string, shellPID int, agentType string, timeout time.Duration) (bool, error) {
+	return waitForPaneAgentReadyWithContext(
+		ctx,
+		target,
+		shellPID,
+		agentType,
+		timeout,
+		restartPaneReadyPollInterval,
+		tmux.CapturePaneOutputContext,
+		process.HasChildAlive,
+	)
+}
+
+func executeRestartBeadAfterSafeObservation(
+	ctx context.Context,
+	session string,
+	request assignment.AtomicRequest,
+	timeout time.Duration,
+	pollInterval time.Duration,
+	observe func(context.Context, string) (statuspkg.SessionObservation, error),
+	execute func(context.Context, assignment.AtomicRequest) (assignment.AtomicResult, error),
+) (assignment.AtomicResult, error) {
+	if execute == nil {
+		return assignment.AtomicResult{}, errors.New("restart assignment executor is required")
+	}
+	if err := waitForRestartPaneSafeDispatchContext(ctx, session, request.Target, timeout, pollInterval, observe); err != nil {
+		return assignment.AtomicResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return assignment.AtomicResult{}, err
+	}
+	return execute(ctx, request)
+}
+
+func waitForRestartPaneSafeDispatchContext(
+	ctx context.Context,
+	session string,
+	paneID string,
+	timeout time.Duration,
+	pollInterval time.Duration,
+	observe func(context.Context, string) (statuspkg.SessionObservation, error),
+) error {
+	if ctx == nil {
+		return errors.New("restart dispatch observation context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(session) == "" || strings.TrimSpace(paneID) == "" {
+		return errors.New("restart dispatch observation requires a session and pane ID")
+	}
+	if observe == nil {
+		return errors.New("restart dispatch observer is required")
+	}
+	if timeout <= 0 {
+		return errors.New("restart dispatch observation timeout must be positive")
+	}
+	if pollInterval <= 0 {
+		pollInterval = restartPaneReadyPollInterval
+	}
+
+	gateCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		observation, observeErr := observe(gateCtx, session)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if gateCtx.Err() != nil {
+			return fmt.Errorf("pane %s did not become safe to dispatch within %s", paneID, timeout)
+		}
+		if observeErr == nil &&
+			statuspkg.DispatchObservationIsCurrent(observation.ObservedAt, time.Now()) &&
+			observation.SafeToDispatch(paneID) {
+			return nil
+		}
+		if err := waitForRestartPaneDelay(gateCtx, pollInterval); err != nil {
+			if parentErr := ctx.Err(); parentErr != nil {
+				return parentErr
+			}
+			return fmt.Errorf("pane %s did not become safe to dispatch within %s", paneID, timeout)
+		}
+	}
+}
+
+func waitForPaneAgentReadyWithContext(
+	ctx context.Context,
+	target string,
+	shellPID int,
+	agentType string,
+	timeout time.Duration,
+	pollInterval time.Duration,
+	capture func(context.Context, string, int) (string, error),
+	hasChildAlive func(int) bool,
+) (bool, error) {
+	if ctx == nil {
+		return false, errors.New("restart readiness context is required")
+	}
+	if capture == nil || hasChildAlive == nil {
+		return false, errors.New("restart readiness dependencies are required")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if pollInterval <= 0 {
+		pollInterval = restartPaneReadyPollInterval
+	}
 	deadline := time.Now().Add(timeout)
 	for {
 		ready := false
-		if captured, err := tmux.CapturePaneOutput(target, 50); err == nil && isAgentReady(captured, agentType) {
+		captured, captureErr := capture(ctx, target, 50)
+		if cancelErr := restartPaneCancellationError(ctx, captureErr); cancelErr != nil {
+			return false, cancelErr
+		}
+		if captureErr == nil && isAgentReady(captured, agentType) {
 			ready = true
 		}
-		if ready && shellPID > 0 && !process.HasChildAlive(shellPID) {
+		if ready && shellPID > 0 && !hasChildAlive(shellPID) {
 			// Content looks ready but nothing is running under the shell —
 			// a bare-prompt false positive. Keep polling.
 			ready = false
 		}
 		if ready {
-			return true
+			return true, nil
 		}
-		if time.Now().After(deadline) {
-			return false
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false, nil
 		}
-		time.Sleep(restartPaneReadyPollInterval)
+		if remaining < pollInterval {
+			pollInterval = remaining
+		}
+		if err := waitForRestartPaneDelay(ctx, pollInterval); err != nil {
+			return false, err
+		}
+	}
+}
+
+func waitForRestartPaneDelay(ctx context.Context, delay time.Duration) error {
+	if ctx == nil {
+		return errors.New("restart delay context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -435,50 +1636,77 @@ func restartPaneAgentType(pane tmux.Pane) string {
 	return detectAgentType(pane.Title)
 }
 
-func sendRestartPrompts(targets []restartPromptTarget, prompt string, send func(target, keys string, agentType tmux.AgentType) error) []string {
+func sendRestartPromptsContext(
+	ctx context.Context,
+	targets []restartPromptTarget,
+	prompt string,
+	send func(context.Context, string, string, tmux.AgentType) error,
+) ([]string, []string, map[string]RestartPromptDeliveryStatus, error) {
+	if ctx == nil {
+		return nil, nil, nil, errors.New("restart prompt context is required")
+	}
+	if send == nil {
+		return nil, nil, nil, errors.New("restart prompt sender is required")
+	}
 	var promptErrors []string
-	for _, target := range targets {
-		if err := send(target.Target, prompt, target.AgentType); err != nil {
+	deliveryStatus := make(map[string]RestartPromptDeliveryStatus, len(targets))
+	for targetIndex, target := range targets {
+		if err := ctx.Err(); err != nil {
+			canceledPanes := make([]string, 0, len(targets)-targetIndex)
+			for _, pending := range targets[targetIndex:] {
+				promptErrors = append(promptErrors, fmt.Sprintf("pane %s: prompt skipped: %v", pending.Pane, err))
+				canceledPanes = append(canceledPanes, pending.Pane)
+				deliveryStatus[pending.Pane] = RestartPromptSkipped
+			}
+			return promptErrors, canceledPanes, deliveryStatus, err
+		}
+		if err := send(ctx, target.Target, prompt, target.AgentType); err != nil {
+			if cancelErr := restartPaneCancellationError(ctx, err); cancelErr != nil {
+				promptErrors = append(promptErrors, fmt.Sprintf(
+					"pane %s: prompt delivery outcome is unknown after cancellation; inspect the pane before retrying: %v",
+					target.Pane,
+					cancelErr,
+				))
+				deliveryStatus[target.Pane] = RestartPromptUnknown
+				canceledPanes := []string{target.Pane}
+				for _, pending := range targets[targetIndex+1:] {
+					promptErrors = append(promptErrors, fmt.Sprintf("pane %s: prompt skipped: %v", pending.Pane, cancelErr))
+					canceledPanes = append(canceledPanes, pending.Pane)
+					deliveryStatus[pending.Pane] = RestartPromptSkipped
+				}
+				return promptErrors, canceledPanes, deliveryStatus, cancelErr
+			}
 			promptErrors = append(promptErrors, fmt.Sprintf("pane %s: %v", target.Pane, err))
+			deliveryStatus[target.Pane] = RestartPromptFailed
+			continue
+		}
+		deliveryStatus[target.Pane] = RestartPromptDelivered
+		if err := ctx.Err(); err != nil {
+			canceledPanes := make([]string, 0, len(targets)-targetIndex-1)
+			for _, pending := range targets[targetIndex+1:] {
+				promptErrors = append(promptErrors, fmt.Sprintf("pane %s: prompt skipped: %v", pending.Pane, err))
+				canceledPanes = append(canceledPanes, pending.Pane)
+				deliveryStatus[pending.Pane] = RestartPromptSkipped
+			}
+			return promptErrors, canceledPanes, deliveryStatus, err
 		}
 	}
-	return promptErrors
+	return promptErrors, nil, deliveryStatus, nil
 }
 
 // restartPaneBeadPromptTemplate is the default prompt template for --bead assignment.
 const restartPaneBeadPromptTemplate = "Read AGENTS.md, register with Agent Mail. Work on: {bead_id} - {bead_title}.\nUse br show {bead_id} for details. Mark in_progress when starting. Use ultrathink."
 
-// buildBeadPrompt fetches bead info via br show --json and builds the assignment prompt.
-func buildBeadPrompt(beadID string) (string, error) {
-	cmd := exec.Command("br", "show", beadID, "--json")
-	cmd.Dir, _ = os.Getwd()
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("br show %s failed: %w", beadID, err)
-	}
-
-	var issues []struct {
-		Title string `json:"title"`
-	}
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return "", fmt.Errorf("parse br show output: %w", err)
-	}
-	if len(issues) == 0 || issues[0].Title == "" {
-		return "", fmt.Errorf("bead %s not found", beadID)
-	}
-
-	prompt := strings.NewReplacer(
+func buildRestartBeadPrompt(beadID, title string) string {
+	return strings.NewReplacer(
 		"{bead_id}", beadID,
-		"{bead_title}", issues[0].Title,
+		"{bead_title}", title,
 	).Replace(restartPaneBeadPromptTemplate)
-
-	return prompt, nil
 }
 
-// PrintRestartPane handles the --robot-restart-pane command.
-// This is a thin wrapper around GetRestartPane() for CLI output.
-func PrintRestartPane(opts RestartPaneOptions) error {
-	output, err := GetRestartPane(opts)
+// PrintRestartPaneContext prints the cancellation-aware restart result.
+func PrintRestartPaneContext(ctx context.Context, opts RestartPaneOptions) error {
+	output, err := GetRestartPaneContext(ctx, opts)
 	if err != nil {
 		return err
 	}

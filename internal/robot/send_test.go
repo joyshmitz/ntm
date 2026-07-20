@@ -1244,6 +1244,45 @@ func TestRobotDispatchServiceAdapterParity(t *testing.T) {
 	}
 }
 
+func TestRobotDispatchRejectsDetectedGrokAsUnavailableWithoutDelivery(t *testing.T) {
+	t.Parallel()
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 0, Type: tmux.AgentClaude, Title: "proj__cc_1"},
+		{ID: "%2", Index: 1, Type: tmux.AgentUnknown, Title: "proj__grok_1"},
+	}
+	opts := SendOptions{Session: "proj", All: true}
+	request := robotPreparedDispatchRequest(panes, panes, opts, "work", false)
+	if request.Panes[1].Type != tmux.AgentGrok {
+		t.Fatalf("detected Grok request type = %q, want %q", request.Panes[1].Type, tmux.AgentGrok)
+	}
+
+	var deliveries int
+	service, _, err := newRobotDispatchService(
+		redaction.Config{Mode: redaction.ModeOff},
+		dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			deliveries++
+			return nil
+		}),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Execute(context.Background(), request)
+	var dispatchErr *dispatchsvc.Error
+	if !errors.As(err, &dispatchErr) || dispatchErr.Code != dispatchsvc.ErrPromptDeliveryUnsupported {
+		t.Fatalf("dispatch error = %T %v, want %q", err, err, dispatchsvc.ErrPromptDeliveryUnsupported)
+	}
+	if deliveries != 0 {
+		t.Fatalf("delivery calls = %d, want 0", deliveries)
+	}
+
+	response := robotDispatchPrepareErrorResponse(err)
+	if response.Success || response.ErrorCode != ErrCodeNotImplemented || ExitCodeForResponse(response) != 2 {
+		t.Fatalf("robot response = %+v, want NOT_IMPLEMENTED / exit 2", response)
+	}
+}
+
 func TestApplyRobotDispatchResultPreservesReceiptOrderAndErrors(t *testing.T) {
 	t.Parallel()
 	output := SendOutput{Successful: []string{}, Failed: []SendError{}}

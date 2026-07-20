@@ -12,10 +12,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/sqliteutil"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 // BulkAssignOutput represents the JSON response from --robot-bulk-assign.
@@ -67,7 +70,7 @@ type BulkAssignSummary struct {
 }
 
 // runBulkAssignCmd executes ntm --robot-bulk-assign with the given flags.
-// Uses a 30-second timeout to prevent test hangs.
+// Uses the shared E2E command timeout to remain bounded on loaded hosts.
 func runBulkAssignCmd(t *testing.T, suite *TestSuite, session string, flags ...string) (*BulkAssignOutput, []byte, error) {
 	t.Helper()
 
@@ -75,7 +78,7 @@ func runBulkAssignCmd(t *testing.T, suite *TestSuite, session string, flags ...s
 	args = append(args, flags...)
 
 	// Use context with timeout to prevent indefinite hangs (bd-brzap fix)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultRunTimeout)
 	defer cancel()
 
 	ntmPath, resolveErr := ensureE2ENTMBin()
@@ -83,12 +86,23 @@ func runBulkAssignCmd(t *testing.T, suite *TestSuite, session string, flags ...s
 		return nil, nil, fmt.Errorf("resolve E2E ntm binary: %w", resolveErr)
 	}
 	cmd := exec.CommandContext(ctx, ntmPath, args...)
-	output, err := cmd.CombinedOutput()
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+	if groupErr != nil {
+		return nil, nil, fmt.Errorf("create owned process group: %w", groupErr)
+	}
+	cmd.Cancel = func() error {
+		return group.Signal(os.Kill)
+	}
+	cmd.WaitDelay = 2 * time.Second
+	output, commandErr := cmd.CombinedOutput()
+	if closeErr := group.Close(); closeErr != nil {
+		return nil, output, fmt.Errorf("close owned process group: %w", closeErr)
+	}
 
 	// Check for timeout
 	if ctx.Err() == context.DeadlineExceeded {
-		suite.Logger().Log("[E2E-BULK-ASSIGN] Command timed out after 30s: args=%v", args)
-		return nil, output, fmt.Errorf("command timed out after 30s")
+		suite.Logger().Log("[E2E-BULK-ASSIGN] Command timed out after %s: args=%v output=%s", defaultRunTimeout, args, truncateString(string(output), 1000))
+		return nil, output, fmt.Errorf("command timed out after %s", defaultRunTimeout)
 	}
 
 	suite.Logger().Log("[E2E-BULK-ASSIGN] args=%v bytes=%d", args, len(output))
@@ -96,11 +110,258 @@ func runBulkAssignCmd(t *testing.T, suite *TestSuite, session string, flags ...s
 	var result BulkAssignOutput
 	if jsonErr := json.Unmarshal(output, &result); jsonErr != nil {
 		suite.Logger().Log("[E2E-BULK-ASSIGN] JSON parse failed: %v output=%s", jsonErr, string(output))
-		return nil, output, err
+		return nil, output, commandErr
 	}
 
 	suite.Logger().LogJSON("[E2E-BULK-ASSIGN] Result", result)
-	return &result, output, err
+	return &result, output, commandErr
+}
+
+func runRobotFixtureTool(t *testing.T, fixture *robotProcessFixture, timeout time.Duration, path string, args ...string) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Dir = fixture.projectDir
+	cmd.Env = append([]string(nil), fixture.env...)
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+	if groupErr != nil {
+		t.Fatalf("create owned process group for %s %q: %v", path, args, groupErr)
+	}
+	cmd.Cancel = func() error {
+		return group.Signal(os.Kill)
+	}
+	cmd.WaitDelay = 2 * time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	commandErr := cmd.Run()
+	if closeErr := group.Close(); closeErr != nil {
+		t.Fatalf("close owned process group for %s %q: %v", path, args, closeErr)
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("%s %q timed out after %v; stdout=%s stderr=%s", path, args, timeout, stdout.Bytes(), stderr.Bytes())
+	}
+	if commandErr != nil {
+		t.Fatalf("%s %q: %v stdout=%s stderr=%s", path, args, commandErr, stdout.Bytes(), stderr.Bytes())
+	}
+	return stdout.Bytes()
+}
+
+func prepareBulkAssignAgentPanes(t *testing.T, fixture *robotProcessFixture, total int) []tmux.Pane {
+	t.Helper()
+	if total < 1 {
+		t.Fatalf("[E2E-BULK-ASSIGN] pane total=%d, want at least one", total)
+	}
+
+	for index := 1; index < total; index++ {
+		paneID := strings.TrimSpace(fixture.mustTMUXOutput(t,
+			"split-window", "-d", "-h", "-t", fixture.session,
+			"-c", fixture.projectDir, "-P", "-F", "#{pane_id}",
+			"/bin/bash --noprofile --norc -i",
+		))
+		if paneID == "" {
+			t.Fatalf("[E2E-BULK-ASSIGN] create pane %d of %d returned no physical ID", index+1, total)
+		}
+		// Rebalance after every split so large fixtures do not repeatedly divide
+		// one shrinking horizontal cell before the final layout pass.
+		fixture.mustTMUXOutput(t, "select-layout", "-t", fixture.session, "tiled")
+	}
+
+	fixture.mustTMUXOutput(t, "select-layout", "-t", fixture.session, "tiled")
+	listOutput := fixture.mustTMUXOutput(t,
+		"list-panes", "-t", fixture.session,
+		"-F", "#{pane_id}\t#{window_index}\t#{pane_index}",
+	)
+	panes := make([]tmux.Pane, 0, total)
+	for _, line := range strings.Split(strings.TrimSpace(listOutput), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			t.Fatalf("[E2E-BULK-ASSIGN] malformed private tmux pane row %q", line)
+		}
+		windowIndex, err := strconv.Atoi(fields[1])
+		if err != nil {
+			t.Fatalf("[E2E-BULK-ASSIGN] parse window index in %q: %v", line, err)
+		}
+		paneIndex, err := strconv.Atoi(fields[2])
+		if err != nil {
+			t.Fatalf("[E2E-BULK-ASSIGN] parse pane index in %q: %v", line, err)
+		}
+		panes = append(panes, tmux.Pane{ID: fields[0], WindowIndex: windowIndex, Index: paneIndex})
+	}
+	panes = tmux.SortPanesByTopology(panes)
+	if len(panes) != total {
+		t.Fatalf("[E2E-BULK-ASSIGN] listed panes=%+v, want %d", panes, total)
+	}
+
+	seenPaneIDs := make(map[string]struct{}, total)
+	for index := range panes {
+		if _, duplicate := seenPaneIDs[panes[index].ID]; duplicate {
+			t.Fatalf("[E2E-BULK-ASSIGN] duplicate physical pane ID %q", panes[index].ID)
+		}
+		seenPaneIDs[panes[index].ID] = struct{}{}
+		panes[index].NTMIndex = index + 1
+		panes[index].Title = fmt.Sprintf("%s__cod_%d", fixture.session, index+1)
+		fixture.mustTMUXOutput(t, "select-pane", "-t", panes[index].ID, "-T", panes[index].Title)
+	}
+	return panes
+}
+
+func prepareBulkAssignBeads(t *testing.T, fixture *robotProcessFixture, total int) []string {
+	t.Helper()
+	brPath, err := exec.LookPath("br")
+	if err != nil {
+		t.Fatalf("real br is required for hermetic bulk assignment E2E: %v", err)
+	}
+	runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath, "init", "--prefix=rbe2e", "--json")
+	beads := make([]string, 0, total)
+	seen := make(map[string]struct{}, total)
+	for index := 0; index < total; index++ {
+		beadID := strings.TrimSpace(string(runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath,
+			"create", fmt.Sprintf("Hermetic bulk topology %d", index+1), "--type=task", "--priority=1", "--silent",
+		)))
+		if beadID == "" || strings.ContainsAny(beadID, " \t\r\n") {
+			t.Fatalf("[E2E-BULK-ASSIGN] unexpected br create output %q", beadID)
+		}
+		if _, duplicate := seen[beadID]; duplicate {
+			t.Fatalf("[E2E-BULK-ASSIGN] duplicate hermetic bead ID %q", beadID)
+		}
+		seen[beadID] = struct{}{}
+		beads = append(beads, beadID)
+	}
+	return beads
+}
+
+func runBulkAssignFixture(t *testing.T, fixture *robotProcessFixture, flags ...string) (BulkAssignOutput, robotBoundaryProcessResult) {
+	t.Helper()
+	args := []string{"--robot-bulk-assign=" + fixture.session, "--robot-format=json"}
+	args = append(args, flags...)
+	process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, fixture.env, args...)
+	if len(bytes.TrimSpace(process.stderr)) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] unexpected stderr: exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+	}
+	var result BulkAssignOutput
+	decodeSingleRobotJSON(t, process.stdout, &result)
+	return result, process
+}
+
+func installBulkAssignPlanningFixtures(
+	t *testing.T,
+	fixture *robotProcessFixture,
+	baseEnv []string,
+	triagePayload, planPayload, planMode, labelMode string,
+) ([]string, string, string) {
+	t.Helper()
+	realBR, err := exec.LookPath("br")
+	if err != nil {
+		t.Fatalf("real br is required for bulk planning fixture: %v", err)
+	}
+	binDir := filepath.Join(fixture.root, "bulk-planning-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create bulk planning fixture bin: %v", err)
+	}
+	triagePath := filepath.Join(fixture.root, "bulk-triage.json")
+	planPath := filepath.Join(fixture.root, "bulk-plan.json")
+	bvTrace := filepath.Join(fixture.root, "bulk-bv.trace")
+	brTrace := filepath.Join(fixture.root, "bulk-br.trace")
+	if err := os.WriteFile(triagePath, []byte(triagePayload), 0o600); err != nil {
+		t.Fatalf("write bulk triage payload: %v", err)
+	}
+	if err := os.WriteFile(planPath, []byte(planPayload), 0o600); err != nil {
+		t.Fatalf("write bulk plan payload: %v", err)
+	}
+	bvScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BULK_BV_TRACE"`,
+		`case "$1" in`,
+		`  --robot-triage) cat "$NTM_E2E_BULK_TRIAGE" ;;`,
+		`  --robot-plan)`,
+		`    if [ "$NTM_E2E_BULK_PLAN_MODE" = "failure" ]; then`,
+		`      printf 'injected bulk plan verification failure\n' >&2`,
+		`      exit 70`,
+		`    fi`,
+		`    cat "$NTM_E2E_BULK_PLAN"`,
+		`    ;;`,
+		`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+		`esac`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write bulk bv fixture: %v", err)
+	}
+	brScript := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> "$NTM_E2E_BULK_BR_TRACE"`,
+		`command_name="${1:-}"`,
+		`if [ "$command_name" = "--lock-timeout" ]; then`,
+		`  if [ "${2:-}" != "5000" ] || [ "$#" -lt 3 ]; then`,
+		`    printf 'unexpected br lock prefix: %s\n' "$*" >&2`,
+		`    exit 64`,
+		`  fi`,
+		`  command_name=$3`,
+		`fi`,
+		`if [ "$NTM_E2E_BULK_LABEL_MODE" = "empty" ]; then`,
+		`  case "$command_name" in`,
+		`    ready|list) printf '[]\n'; exit 0 ;;`,
+		`  esac`,
+		`fi`,
+		"exec " + tmux.ShellQuote(realBR) + ` "$@"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write bulk br fixture: %v", err)
+	}
+	env := mergeRobotProcessEnv(baseEnv, map[string]string{
+		"PATH":                    binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
+		"NTM_E2E_BULK_TRIAGE":     triagePath,
+		"NTM_E2E_BULK_PLAN":       planPath,
+		"NTM_E2E_BULK_PLAN_MODE":  planMode,
+		"NTM_E2E_BULK_LABEL_MODE": labelMode,
+		"NTM_E2E_BULK_BV_TRACE":   bvTrace,
+		"NTM_E2E_BULK_BR_TRACE":   brTrace,
+	})
+	return env, bvTrace, brTrace
+}
+
+func readBulkAssignFixtureBead(t *testing.T, fixture *robotProcessFixture, beadID string) []byte {
+	t.Helper()
+	brPath, err := exec.LookPath("br")
+	if err != nil {
+		t.Fatalf("real br is required for bulk Beads assertion: %v", err)
+	}
+	return runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath, "show", beadID, "--json")
+}
+
+func assertBulkAssignTraceEmpty(t *testing.T, path, surface string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("read bulk %s trace: %v", surface, err)
+	}
+	if len(bytes.TrimSpace(data)) != 0 {
+		t.Fatalf("bulk safety failure reached %s: %s", surface, data)
+	}
+}
+
+func assertBulkAssignFixtureHasNoLedger(t *testing.T, fixture *robotProcessFixture, beadID string) {
+	t.Helper()
+	for _, path := range []string{
+		filepath.Join(fixture.root, "home", ".ntm", "sessions", fixture.session, "assignments.json"),
+		filepath.Join(fixture.root, "home", ".ntm", "sessions", fixture.session, "assignments.json.bak"),
+	} {
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("inspect unexpected bulk assignment ledger %s: %v", path, err)
+		}
+		t.Fatalf("bulk safety failure created ledger %s while rejecting %s: mode=%s size=%d", path, beadID, info.Mode(), info.Size())
+	}
 }
 
 func TestE2E_RobotBulkAssign_RequiresSession(t *testing.T) {
@@ -115,15 +376,32 @@ func TestE2E_RobotBulkAssign_RequiresSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve E2E ntm binary: %v", err)
 	}
-	cmd := exec.Command(ntmPath, "--robot-bulk-assign=")
-	output, _ := cmd.CombinedOutput()
+	helpEnv := mergeRobotProcessEnv(os.Environ(), map[string]string{"NO_COLOR": "1", "TERM": "dumb"})
+	process := runBuiltRobotProcessWithin(t, defaultRunTimeout, ntmPath, "", helpEnv, "--robot-bulk-assign=")
+	if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] empty session help exit=%d stdout=%s stderr=%s",
+			process.exitCode, process.stdout, process.stderr)
+	}
+	output := append([]byte(nil), process.stdout...)
 
 	suite.Logger().Log("[E2E-BULK-ASSIGN] empty session shows help: bytes=%d", len(output))
 
-	// With empty value, NTM shows help instead of triggering the command
-	// This is the expected CLI behavior - verify help is shown
-	if !strings.Contains(string(output), "Named Tmux") && !strings.Contains(string(output), "session") {
-		t.Fatalf("[E2E-BULK-ASSIGN] Expected help or session mention: %s", string(output)[:min(200, len(output))])
+	// With an empty value, NTM must render its custom root help rather than trigger
+	// a robot command or emit an unrelated success document.
+	help := string(output)
+	for _, marker := range []string{
+		"Named Tmux Session Manager for AI Agents",
+		"Create session and launch agents",
+		"Interactive session dashboard",
+		"ntm spawn myproject --cc=2 --cod=2",
+		"Aliases: cnt sat ant rnt lnt snt",
+	} {
+		if !strings.Contains(help, marker) {
+			t.Fatalf("[E2E-BULK-ASSIGN] empty session output omitted help marker %q: %s", marker, help[:min(500, len(help))])
+		}
+	}
+	if json.Valid(bytes.TrimSpace(output)) {
+		t.Fatalf("[E2E-BULK-ASSIGN] empty session unexpectedly emitted a robot JSON document: %s", output)
 	}
 }
 
@@ -137,154 +415,162 @@ func min(a, b int) int {
 func TestE2E_RobotBulkAssign_RequiresBVOrAllocation(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_requires_source")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
-	}
-
-	// Test without --from-bv or --allocation
-	result, output, _ := runBulkAssignCmd(t, suite, suite.Session())
-
-	// Should return error about missing source
-	if result != nil && result.Success {
-		t.Fatal("[E2E-BULK-ASSIGN] Should fail without --from-bv or --allocation")
-	}
-
-	// Check error message mentions the required flags
-	outStr := string(output)
-	if !strings.Contains(outStr, "from-bv") && !strings.Contains(outStr, "allocation") {
-		t.Fatalf("[E2E-BULK-ASSIGN] Error should mention --from-bv or --allocation: %s", outStr)
+	fixture := newRobotProcessFixture(t, "bulk-requires-source")
+	result, process := runBulkAssignFixture(t, fixture)
+	if process.exitCode != 1 || result.Success || result.ErrorCode != "INVALID_FLAG" ||
+		result.Assignments == nil || result.UnassignedBeads == nil || result.UnassignedPanes == nil ||
+		result.Summary != (BulkAssignSummary{}) ||
+		(!strings.Contains(result.Error, "--from-bv") && !strings.Contains(result.Error, "--allocation")) {
+		t.Fatalf("[E2E-BULK-ASSIGN] missing-source envelope: exit=%d result=%+v", process.exitCode, result)
 	}
 }
 
 func TestE2E_RobotBulkAssign_DryRunMode(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_dry_run")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
-	}
-
-	// Test --dry-run with explicit allocation
-	allocation := `{"1":"bd-test1","2":"bd-test2"}`
-	result, _, err := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--dry-run")
-
+	fixture := newRobotProcessFixture(t, "bulk-dry-run")
+	pane := prepareBulkAssignAgentPanes(t, fixture, 1)[0]
+	beadID := prepareBulkAssignBeads(t, fixture, 1)[0]
+	allocation, err := json.Marshal(map[string]string{pane.ID: beadID})
 	if err != nil {
-		// Even with error, check the response structure
-		suite.Logger().Log("[E2E-BULK-ASSIGN] dry-run command error: %v", err)
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal dry-run allocation: %v", err)
 	}
-
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	result, process := runBulkAssignFixture(t, fixture, "--allocation="+string(allocation), "--dry-run")
+	if process.exitCode != 0 || !result.Success || result.ErrorCode != "" || !result.DryRun ||
+		result.AllocationSource != "explicit" || result.Summary.TotalPanes != 1 ||
+		result.Summary.Assigned != 0 || result.Summary.Skipped != 0 || result.Summary.Failed != 0 ||
+		len(result.Assignments) != 1 || len(result.UnassignedBeads) != 0 || len(result.UnassignedPanes) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] dry-run envelope: exit=%d result=%+v", process.exitCode, result)
 	}
-
-	// Verify dry_run flag is set in response
-	if !result.DryRun {
-		t.Fatal("[E2E-BULK-ASSIGN] dry_run should be true in response")
+	assignment := result.Assignments[0]
+	if assignment.Pane != strconv.Itoa(pane.Index) || assignment.PaneID != pane.ID || assignment.Bead != beadID ||
+		assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+		t.Fatalf("[E2E-BULK-ASSIGN] dry-run assignment=%+v", assignment)
 	}
-
-	suite.Logger().Log("[E2E-BULK-ASSIGN] dry_run=%v allocation_source=%s", result.DryRun, result.AllocationSource)
 }
 
 func TestE2E_RobotBulkAssign_ExplicitAllocation(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_explicit")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+	fixture := newRobotProcessFixture(t, "bulk-explicit")
+	panes := prepareBulkAssignAgentPanes(t, fixture, 2)
+	beads := prepareBulkAssignBeads(t, fixture, 2)
+	allocation := map[string]string{panes[0].ID: beads[0], panes[1].ID: beads[1]}
+	encoded, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal explicit allocation: %v", err)
 	}
-
-	// Test explicit allocation
-	allocation := `{"1":"bd-abc123","2":"bd-xyz789"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--dry-run") // Use dry-run to avoid needing real beads
-
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	result, process := runBulkAssignFixture(t, fixture, "--allocation="+string(encoded), "--dry-run")
+	if process.exitCode != 0 || !result.Success || result.Session != fixture.session || !result.DryRun ||
+		result.AllocationSource != "explicit" || result.ErrorCode != "" || result.Summary.TotalPanes != 2 ||
+		result.Summary.Failed != 0 || len(result.Assignments) != 2 || len(result.UnassignedPanes) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] explicit envelope: exit=%d result=%+v", process.exitCode, result)
 	}
-
-	// Verify allocation source
-	if result.AllocationSource != "explicit" {
-		suite.Logger().Log("[E2E-BULK-ASSIGN] allocation_source=%s (expected: explicit)", result.AllocationSource)
+	expected := map[string]tmux.Pane{beads[0]: panes[0], beads[1]: panes[1]}
+	for _, assignment := range result.Assignments {
+		pane, ok := expected[assignment.Bead]
+		if !ok || assignment.Pane != strconv.Itoa(pane.Index) || assignment.PaneID != pane.ID ||
+			assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+			t.Fatalf("[E2E-BULK-ASSIGN] explicit assignment=%+v", assignment)
+		}
+		delete(expected, assignment.Bead)
 	}
-
-	// Verify the session is correct
-	if result.Session != suite.Session() {
-		t.Fatalf("[E2E-BULK-ASSIGN] Session mismatch: got=%s want=%s", result.Session, suite.Session())
+	if len(expected) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] explicit allocation omitted mappings: %v", expected)
 	}
 }
 
 func TestE2E_RobotBulkAssign_SkipPanes(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_skip_panes")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+	fixture := newRobotProcessFixture(t, "bulk-skip-panes")
+	panes := prepareBulkAssignAgentPanes(t, fixture, 3)
+	beads := prepareBulkAssignBeads(t, fixture, 3)
+	allocation := make(map[string]string, len(panes))
+	expected := make(map[string]tmux.Pane, len(panes))
+	for index := range panes {
+		allocation[panes[index].ID] = beads[index]
+		expected[beads[index]] = panes[index]
 	}
-
-	// Test with the canonical --skip flag.
-	allocation := `{"1":"bd-test1","2":"bd-test2","3":"bd-test3"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--skip=1,2",
-		"--dry-run")
-
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	encoded, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal skip allocation: %v", err)
 	}
-
-	// Verify skipped panes are reflected - they appear as "failed" with "pane not available"
-	suite.Logger().Log("[E2E-BULK-ASSIGN] skip_panes: summary.failed=%d", result.Summary.Failed)
-
-	// Skipped panes should be marked as failed (not available)
-	for _, a := range result.Assignments {
-		if a.Pane == "1" || a.Pane == "2" {
-			// These panes should be failed due to skip
-			if a.Status != "failed" || !strings.Contains(a.Error, "pane not available") {
-				suite.Logger().Log("[E2E-BULK-ASSIGN] Pane %s: status=%s error=%s", a.Pane, a.Status, a.Error)
-			}
+	skipped := map[string]struct{}{panes[0].ID: {}, panes[1].ID: {}}
+	result, process := runBulkAssignFixture(t, fixture,
+		"--allocation="+string(encoded),
+		"--skip="+panes[0].ID+","+panes[1].ID,
+		"--dry-run",
+	)
+	if process.exitCode != 1 || result.Success || result.ErrorCode != "PANE_NOT_FOUND" || !result.DryRun ||
+		result.AllocationSource != "explicit" || result.Summary.TotalPanes != 3 ||
+		result.Summary.Assigned != 0 || result.Summary.Skipped != 0 || result.Summary.Failed != 2 ||
+		len(result.Assignments) != 3 || len(result.UnassignedPanes) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] skip-panes envelope: exit=%d result=%+v", process.exitCode, result)
+	}
+	for _, assignment := range result.Assignments {
+		pane, ok := expected[assignment.Bead]
+		if !ok {
+			t.Fatalf("[E2E-BULK-ASSIGN] unexpected skip assignment=%+v", assignment)
 		}
+		if _, isSkipped := skipped[pane.ID]; isSkipped {
+			if assignment.Pane != pane.ID || assignment.PaneID != "" || assignment.Status != "failed" ||
+				assignment.PromptSent || assignment.Claimed || !strings.Contains(strings.ToLower(assignment.Error), "not found") {
+				t.Fatalf("[E2E-BULK-ASSIGN] skipped assignment=%+v", assignment)
+			}
+		} else if assignment.Pane != strconv.Itoa(pane.Index) || assignment.PaneID != pane.ID ||
+			assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+			t.Fatalf("[E2E-BULK-ASSIGN] retained assignment=%+v", assignment)
+		}
+		delete(expected, assignment.Bead)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] skip-panes omitted mappings: %v", expected)
 	}
 }
 
 func TestE2E_RobotBulkAssign_Strategy(t *testing.T) {
 	CommonE2EPrerequisites(t)
+	brPath, err := exec.LookPath("br")
+	if err != nil {
+		t.Fatalf("real br is required for hermetic bulk strategy E2E: %v", err)
+	}
 
 	strategies := []string{"impact", "ready", "stale", "balanced"}
 
 	for _, strategy := range strategies {
 		t.Run(strategy, func(t *testing.T) {
-			suite := NewTestSuite(t, fmt.Sprintf("bulk_assign_strategy_%s", strategy))
-			defer suite.Teardown()
-
-			if err := suite.Setup(); err != nil {
-				t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+			fixture := newRobotProcessFixture(t, "bulk-strategy-"+strategy)
+			runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath, "init", "--prefix=rbe2e", "--json")
+			beadID := strings.TrimSpace(string(runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath,
+				"create", "Hermetic canonical strategy", "--type=task", "--priority=1", "--silent",
+			)))
+			if beadID == "" || strings.ContainsAny(beadID, " \t\r\n") {
+				t.Fatalf("unexpected br create output %q", beadID)
+			}
+			allocation, err := json.Marshal(map[string]string{fixture.paneID: beadID})
+			if err != nil {
+				t.Fatalf("marshal strategy allocation: %v", err)
 			}
 
-			// Test strategy flag (note: --from-bv required with strategy)
-			result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-				"--from-bv",
+			process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, fixture.env,
+				"--robot-bulk-assign="+fixture.session,
+				"--allocation="+string(allocation),
 				"--strategy="+strategy,
-				"--dry-run")
-
-			// Even if bv is not available, the strategy should be recorded
-			if result != nil {
-				suite.Logger().Log("[E2E-BULK-ASSIGN] strategy=%s result.strategy=%s", strategy, result.Strategy)
-
-				if result.Strategy != "" && result.Strategy != strategy {
-					t.Fatalf("[E2E-BULK-ASSIGN] Strategy mismatch: got=%s want=%s", result.Strategy, strategy)
-				}
+				"--dry-run",
+				"--robot-format=json",
+			)
+			if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+				t.Fatalf("strategy %s exit=%d stdout=%s stderr=%s", strategy, process.exitCode, process.stdout, process.stderr)
+			}
+			var result BulkAssignOutput
+			decodeSingleRobotJSON(t, process.stdout, &result)
+			if !result.Success || !result.DryRun || result.AllocationSource != "explicit" || result.Strategy != strategy {
+				t.Fatalf("strategy %s envelope=%+v", strategy, result)
+			}
+			if len(result.Assignments) != 1 || result.Assignments[0].Bead != beadID ||
+				result.Assignments[0].PaneID != fixture.paneID || result.Assignments[0].Status != "planned" {
+				t.Fatalf("strategy %s assignments=%+v", strategy, result.Assignments)
 			}
 		})
 	}
@@ -324,19 +610,7 @@ func TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess(t *testing.T) {
 			fixture := newRobotProcessFixture(t, "bulk-strategy")
 			runBR := func(args ...string) []byte {
 				t.Helper()
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				defer cancel()
-				cmd := exec.CommandContext(ctx, brPath, args...)
-				cmd.Dir = fixture.projectDir
-				cmd.Env = append([]string(nil), fixture.env...)
-				output, err := cmd.CombinedOutput()
-				if ctx.Err() == context.DeadlineExceeded {
-					t.Fatalf("br %q timed out", args)
-				}
-				if err != nil {
-					t.Fatalf("br %q: %v output=%s", args, err, output)
-				}
-				return output
+				return runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath, args...)
 			}
 			runBR("init", "--prefix=rbe2e", "--json")
 			beadID := strings.TrimSpace(string(runBR("create", "Hermetic bulk strategy", "--type=task", "--priority=1", "--silent")))
@@ -354,7 +628,7 @@ func TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess(t *testing.T) {
 				"--robot-format=json",
 			}
 			args = append(args, test.flags...)
-			process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env, args...)
+			process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, fixture.env, args...)
 			if process.exitCode != 0 {
 				t.Fatalf("bulk strategy process exit=%d, want 0; stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
 			}
@@ -393,7 +667,7 @@ func TestE2ERobotBulkAssignInvalidInputsAreSingleFailureDocuments(t *testing.T) 
 			fixture := newRobotProcessFixture(t, "bulk-invalid")
 			args := []string{"--robot-bulk-assign=" + fixture.session, "--robot-format=json"}
 			args = append(args, test.args...)
-			process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env, args...)
+			process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, fixture.env, args...)
 			if process.exitCode != 1 || len(bytes.TrimSpace(process.stderr)) != 0 {
 				t.Fatalf("exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
 			}
@@ -423,7 +697,7 @@ func TestE2ERobotBulkAssignInvalidInputsAreSingleFailureDocuments(t *testing.T) 
 		if err != nil {
 			t.Fatalf("marshal duplicate allocation: %v", err)
 		}
-		process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env,
+		process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, fixture.env,
 			"--robot-bulk-assign="+fixture.session,
 			"--allocation="+string(allocation),
 			"--dry-run",
@@ -472,7 +746,7 @@ func TestE2ERobotBulkAssignMissingDependenciesAreTyped(t *testing.T) {
 	}
 	assertMissing := func(t *testing.T, fixture *robotProcessFixture, env []string, wantText string) {
 		t.Helper()
-		process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env,
+		process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, env,
 			"--robot-bulk-assign="+fixture.session,
 			"--from-bv",
 			"--strategy=ready",
@@ -499,20 +773,9 @@ func TestE2ERobotBulkAssignMissingDependenciesAreTyped(t *testing.T) {
 
 	t.Run("br", func(t *testing.T) {
 		fixture := newRobotProcessFixture(t, "bulk-missing-br")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, brPath, "init", "--prefix=rbe2e", "--json")
-		cmd.Dir = fixture.projectDir
-		cmd.Env = append([]string(nil), fixture.env...)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("initialize real Beads workspace: %v output=%s", err, output)
-		}
-		cmd = exec.CommandContext(ctx, brPath, "create", "Missing br contract", "--type=task", "--priority=1", "--silent")
-		cmd.Dir = fixture.projectDir
-		cmd.Env = append([]string(nil), fixture.env...)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("create real Beads task: %v output=%s", err, output)
-		}
+		runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath, "init", "--prefix=rbe2e", "--json")
+		runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath,
+			"create", "Missing br contract", "--type=task", "--priority=1", "--silent")
 		pathDir := t.TempDir()
 		linkTool(t, pathDir, tmuxPath, "tmux")
 		linkTool(t, pathDir, bvPath, "bv")
@@ -524,168 +787,207 @@ func TestE2ERobotBulkAssignMissingDependenciesAreTyped(t *testing.T) {
 func TestE2E_RobotBulkAssign_JSONStructure(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_json_structure")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+	fixture := newRobotProcessFixture(t, "bulk-json-structure")
+	pane := prepareBulkAssignAgentPanes(t, fixture, 1)[0]
+	beadID := prepareBulkAssignBeads(t, fixture, 1)[0]
+	allocation, err := json.Marshal(map[string]string{pane.ID: beadID})
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal JSON-structure allocation: %v", err)
 	}
-
-	// Test with explicit allocation to ensure we get a valid response
-	allocation := `{"1":"bd-struct-test"}`
-	result, output, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--dry-run")
-
-	// Verify JSON is valid
+	process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, fixture.env,
+		"--robot-bulk-assign="+fixture.session,
+		"--robot-format=json",
+		"--allocation="+string(allocation),
+		"--dry-run",
+	)
+	if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] JSON-structure process exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+	}
+	var result BulkAssignOutput
+	decodeSingleRobotJSON(t, process.stdout, &result)
+	if !result.Success || result.ErrorCode != "" || !result.DryRun || result.AllocationSource != "explicit" ||
+		result.Session != fixture.session || len(result.Assignments) != 1 {
+		t.Fatalf("[E2E-BULK-ASSIGN] JSON-structure envelope=%+v", result)
+	}
 	var raw map[string]interface{}
-	if err := json.Unmarshal(output, &raw); err != nil {
+	if err := json.Unmarshal(process.stdout, &raw); err != nil {
 		t.Fatalf("[E2E-BULK-ASSIGN] Invalid JSON: %v", err)
 	}
-
-	// Verify required fields exist
-	requiredFields := []string{"session", "timestamp"}
+	requiredFields := []string{
+		"success", "session", "strategy", "timestamp", "assignments", "summary", "dry_run", "allocation_source",
+	}
 	for _, field := range requiredFields {
 		if _, ok := raw[field]; !ok {
 			t.Fatalf("[E2E-BULK-ASSIGN] Missing required field: %s", field)
 		}
 	}
-
-	// Verify session matches
-	if result != nil && result.Session != suite.Session() {
-		t.Fatalf("[E2E-BULK-ASSIGN] Session mismatch: got=%s want=%s", result.Session, suite.Session())
+	if _, present := raw["error"]; present {
+		t.Fatalf("[E2E-BULK-ASSIGN] successful JSON unexpectedly contains error: %v", raw)
 	}
-
-	suite.Logger().Log("[E2E-BULK-ASSIGN] JSON structure validated with %d fields", len(raw))
 }
 
 func TestE2E_RobotBulkAssign_InvalidAllocationJSON(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_invalid_json")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
-	}
-
-	// Test with invalid JSON allocation
-	result, output, err := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation={invalid json}")
-
-	suite.Logger().Log("[E2E-BULK-ASSIGN] invalid JSON: err=%v", err)
-
-	// Should have an error
-	if result != nil && result.Success {
-		t.Fatal("[E2E-BULK-ASSIGN] Should fail with invalid JSON")
-	}
-
-	// Error should mention JSON or parse
-	outStr := strings.ToLower(string(output))
-	if !strings.Contains(outStr, "json") && !strings.Contains(outStr, "parse") && !strings.Contains(outStr, "invalid") {
-		suite.Logger().Log("[E2E-BULK-ASSIGN] Warning: error message doesn't mention JSON parsing: %s", string(output))
+	fixture := newRobotProcessFixture(t, "bulk-invalid-json")
+	result, process := runBulkAssignFixture(t, fixture, "--allocation={invalid json}")
+	lowerError := strings.ToLower(result.Error)
+	if process.exitCode != 1 || result.Success || result.ErrorCode != "INVALID_FLAG" ||
+		result.Assignments == nil || result.UnassignedBeads == nil || result.UnassignedPanes == nil ||
+		result.Summary != (BulkAssignSummary{}) ||
+		(!strings.Contains(lowerError, "json") && !strings.Contains(lowerError, "parse")) {
+		t.Fatalf("[E2E-BULK-ASSIGN] invalid-allocation envelope: exit=%d result=%+v", process.exitCode, result)
 	}
 }
 
 func TestE2E_RobotBulkAssign_SummaryStats(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_summary")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+	fixture := newRobotProcessFixture(t, "bulk-summary")
+	panes := prepareBulkAssignAgentPanes(t, fixture, 3)
+	beads := prepareBulkAssignBeads(t, fixture, 3)
+	allocation := make(map[string]string, len(panes))
+	for index := range panes {
+		allocation[panes[index].ID] = beads[index]
 	}
-
-	// Test with multiple allocations
-	allocation := `{"1":"bd-sum1","2":"bd-sum2","3":"bd-sum3"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--dry-run")
-
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	encoded, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal summary allocation: %v", err)
 	}
-
-	// Verify summary is present
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Summary: total=%d assigned=%d skipped=%d failed=%d",
-		result.Summary.TotalPanes,
-		result.Summary.Assigned,
-		result.Summary.Skipped,
-		result.Summary.Failed)
-
-	// Summary counts should be non-negative
-	if result.Summary.TotalPanes < 0 || result.Summary.Assigned < 0 ||
-		result.Summary.Skipped < 0 || result.Summary.Failed < 0 {
-		t.Fatal("[E2E-BULK-ASSIGN] Summary counts should be non-negative")
+	result, process := runBulkAssignFixture(t, fixture, "--allocation="+string(encoded), "--dry-run")
+	if process.exitCode != 0 || !result.Success || result.ErrorCode != "" || !result.DryRun ||
+		result.AllocationSource != "explicit" || result.Summary.TotalPanes != 3 ||
+		result.Summary.Assigned != 0 || result.Summary.Skipped != 0 || result.Summary.Failed != 0 ||
+		len(result.Assignments) != 3 || len(result.UnassignedBeads) != 0 || len(result.UnassignedPanes) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] summary envelope: exit=%d result=%+v", process.exitCode, result)
 	}
 }
 
 func TestE2E_RobotBulkAssign_UnassignedPanes(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_unassigned_panes")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
-	}
-
-	// Create additional panes
-	for i := 0; i < 3; i++ {
-		cmd := exec.Command(tmux.BinaryPath(), "split-window", "-t", suite.Session(), "-h")
-		if err := cmd.Run(); err != nil {
-			suite.Logger().Log("[E2E-BULK-ASSIGN] Warning: could not create pane %d: %v", i, err)
-		}
-	}
+	fixture := newRobotProcessFixture(t, "bulk-unassigned-panes")
+	panes := prepareBulkAssignAgentPanes(t, fixture, 4)
+	beads := prepareBulkAssignBeads(t, fixture, 1)
 
 	// Test with fewer beads than panes
-	allocation := `{"1":"bd-only-one"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
+	allocation, err := json.Marshal(map[string]string{panes[0].ID: beads[0]})
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal single-pane allocation: %v", err)
+	}
+	result, process := runBulkAssignFixture(t, fixture,
+		"--allocation="+string(allocation),
 		"--dry-run")
 
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	if process.exitCode != 0 || !result.Success || !result.DryRun || result.AllocationSource != "explicit" {
+		t.Fatalf("[E2E-BULK-ASSIGN] positive unassigned-pane envelope: exit=%d result=%+v", process.exitCode, result)
 	}
-
-	// Should have unassigned panes
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Unassigned panes: %v", result.UnassignedPanes)
-
-	// Verify total panes vs assigned
-	if result.Summary.TotalPanes > 1 && len(result.UnassignedPanes) == 0 {
-		suite.Logger().Log("[E2E-BULK-ASSIGN] Warning: expected unassigned_panes with %d total panes and 1 allocation",
-			result.Summary.TotalPanes)
+	if result.Summary.TotalPanes != 4 || result.Summary.Assigned != 0 || result.Summary.Skipped != 0 ||
+		result.Summary.Failed != 0 || len(result.Assignments) != 1 || len(result.UnassignedPanes) != 3 {
+		t.Fatalf("[E2E-BULK-ASSIGN] result=%+v, want one allocation plus three unassigned panes", result)
+	}
+	assignment := result.Assignments[0]
+	if assignment.Pane != strconv.Itoa(panes[0].Index) || assignment.PaneID != panes[0].ID || assignment.Bead != beads[0] ||
+		assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+		t.Fatalf("[E2E-BULK-ASSIGN] assignment=%+v, want the allocated physical pane to resolve", result.Assignments[0])
+	}
+	expectedUnassigned := make(map[string]struct{}, 3)
+	for _, pane := range panes[1:] {
+		expectedUnassigned[strconv.Itoa(pane.Index)] = struct{}{}
+	}
+	for _, pane := range result.UnassignedPanes {
+		if _, ok := expectedUnassigned[pane]; !ok {
+			t.Fatalf("[E2E-BULK-ASSIGN] unexpected or duplicate unassigned pane %q in %v", pane, result.UnassignedPanes)
+		}
+		delete(expectedUnassigned, pane)
+	}
+	if len(expectedUnassigned) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] missing exact unassigned panes %v from %v", expectedUnassigned, result.UnassignedPanes)
 	}
 }
 
 func TestE2E_RobotBulkAssign_UnassignedBeads(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_unassigned_beads")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+	fixture := newRobotProcessFixture(t, "bulk-unassigned-beads")
+	pane := prepareBulkAssignAgentPanes(t, fixture, 1)[0]
+	beads := prepareBulkAssignBeads(t, fixture, 5)
+	recommendations := make([]map[string]any, 0, len(beads))
+	items := make([]map[string]any, 0, len(beads))
+	for index, beadID := range beads {
+		title := fmt.Sprintf("Verified unassigned bulk bead %d", index+1)
+		recommendations = append(recommendations, map[string]any{
+			"id": beadID, "title": title, "type": "task", "status": "open",
+			"priority": 1, "score": float64(len(beads) - index), "action": "assign", "reasons": []string{"E2E"},
+		})
+		items = append(items, map[string]any{
+			"id": beadID, "title": title, "status": "open", "priority": 1,
+		})
 	}
-
-	// Test with more beads than panes (only 1 pane in fresh session)
-	allocation := `{"1":"bd-one","2":"bd-two","3":"bd-three","4":"bd-four","5":"bd-five"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--dry-run")
-
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	triagePayload, err := json.Marshal(map[string]any{
+		"generated_at": "2026-07-19T00:00:00Z",
+		"data_hash":    "bulk-unassigned-e2e",
+		"triage": map[string]any{
+			"recommendations": recommendations,
+		},
+	})
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal unassigned triage: %v", err)
 	}
-
-	// Should have unassigned beads (more beads than panes)
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Unassigned beads: %v", result.UnassignedBeads)
-
-	// With 5 allocations and likely fewer panes, we should have unassigned beads
-	if result.Summary.TotalPanes < 5 && len(result.UnassignedBeads) == 0 {
-		suite.Logger().Log("[E2E-BULK-ASSIGN] Warning: expected unassigned_beads with %d panes and 5 allocations",
-			result.Summary.TotalPanes)
+	planPayload, err := json.Marshal(map[string]any{
+		"generated_at": "2026-07-19T00:00:00Z",
+		"plan": map[string]any{
+			"tracks": []map[string]any{{
+				"track_id": "bulk-unassigned-e2e",
+				"items":    items,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal unassigned plan: %v", err)
+	}
+	env, _, _ := installBulkAssignPlanningFixtures(
+		t, fixture, fixture.env, string(triagePayload), string(planPayload), "ok", "real",
+	)
+	process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, env,
+		"--robot-bulk-assign="+fixture.session,
+		"--from-bv",
+		"--strategy=impact",
+		"--dry-run",
+		"--robot-format=json",
+	)
+	if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] unassigned-beads process exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+	}
+	var result BulkAssignOutput
+	decodeSingleRobotJSON(t, process.stdout, &result)
+	if !result.Success || result.ErrorCode != "" || !result.DryRun || result.AllocationSource != "bv" ||
+		result.Summary.TotalPanes != 1 || result.Summary.Assigned != 0 || result.Summary.Skipped != 0 ||
+		result.Summary.Failed != 0 || len(result.Assignments) != 1 || len(result.UnassignedBeads) != 4 ||
+		len(result.UnassignedPanes) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] unassigned-beads envelope=%+v", result)
+	}
+	assignment := result.Assignments[0]
+	if assignment.Pane != strconv.Itoa(pane.Index) || assignment.PaneID != pane.ID ||
+		assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+		t.Fatalf("[E2E-BULK-ASSIGN] unassigned-beads assignment=%+v", assignment)
+	}
+	remaining := make(map[string]struct{}, len(beads))
+	for _, beadID := range beads {
+		remaining[beadID] = struct{}{}
+	}
+	if _, ok := remaining[assignment.Bead]; !ok {
+		t.Fatalf("[E2E-BULK-ASSIGN] assigned unknown bead %q", assignment.Bead)
+	}
+	delete(remaining, assignment.Bead)
+	for _, beadID := range result.UnassignedBeads {
+		if _, ok := remaining[beadID]; !ok {
+			t.Fatalf("[E2E-BULK-ASSIGN] unexpected or duplicate unassigned bead %q in %v", beadID, result.UnassignedBeads)
+		}
+		delete(remaining, beadID)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] unassigned-beads partition omitted %v", remaining)
 	}
 }
 
@@ -701,6 +1003,7 @@ func TestE2E_RobotBulkAssign_WithFromBV(t *testing.T) {
 	}
 
 	fixture := newRobotProcessFixture(t, "bulk-from-bv")
+	const realBVRobotTimeout = 90 * time.Second
 	makeCodexIdle := func(t *testing.T, targetFixture *robotProcessFixture) {
 		t.Helper()
 		fakeCodex := filepath.Join(targetFixture.root, "codex")
@@ -714,21 +1017,7 @@ func TestE2E_RobotBulkAssign_WithFromBV(t *testing.T) {
 	makeCodexIdle(t, fixture)
 	runTool := func(t *testing.T, targetFixture *robotProcessFixture, path string, args ...string) []byte {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, path, args...)
-		cmd.Dir = targetFixture.projectDir
-		cmd.Env = append([]string(nil), targetFixture.env...)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s %q: %v stdout=%s stderr=%s", path, args, err, stdout.Bytes(), stderr.Bytes())
-		}
-		if ctx.Err() != nil {
-			t.Fatalf("%s %q timed out: %v", path, args, ctx.Err())
-		}
-		return stdout.Bytes()
+		return runRobotFixtureTool(t, targetFixture, defaultRunTimeout, path, args...)
 	}
 
 	runTool(t, fixture, brPath, "init", "--prefix=rbe2e", "--json")
@@ -752,33 +1041,35 @@ func TestE2E_RobotBulkAssign_WithFromBV(t *testing.T) {
 		t.Fatalf("real bv recommendations=%+v, want first bead %q", triage.Triage.Recommendations, beadID)
 	}
 
-	process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env,
-		"--robot-bulk-assign="+fixture.session,
-		"--from-bv",
-		"--strategy=ready",
-		"--dry-run",
-		"--robot-format=json",
-	)
-	if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
-		t.Fatalf("real from-BV process exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
-	}
-	var result BulkAssignOutput
-	decodeSingleRobotJSON(t, process.stdout, &result)
-	if !result.Success || !result.DryRun {
-		t.Fatalf("real from-BV envelope=%+v", result)
-	}
-	if result.AllocationSource != "bv" || result.Strategy != "ready" {
-		t.Fatalf("allocation_source=%q strategy=%q, want bv/ready", result.AllocationSource, result.Strategy)
-	}
-	if len(result.Assignments) != 1 {
-		t.Fatalf("assignments=%+v, want exactly one real bv allocation", result.Assignments)
-	}
-	plannedAssignment := result.Assignments[0]
-	if plannedAssignment.Bead != beadID || plannedAssignment.PaneID != fixture.paneID || plannedAssignment.Status != "planned" || plannedAssignment.PromptSent {
-		t.Fatalf("assignment=%+v, want bead=%q pane_id=%q planned without dispatch", plannedAssignment, beadID, fixture.paneID)
-	}
-	if result.Summary.TotalPanes != 1 || result.Summary.Failed != 0 {
-		t.Fatalf("summary=%+v, want one successful dry-run plan", result.Summary)
+	for _, strategy := range []string{"impact", "ready"} {
+		process := runBuiltRobotProcessWithin(t, realBVRobotTimeout, fixture.ntmPath, fixture.projectDir, fixture.env,
+			"--robot-bulk-assign="+fixture.session,
+			"--from-bv",
+			"--strategy="+strategy,
+			"--dry-run",
+			"--robot-format=json",
+		)
+		if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+			t.Fatalf("real from-BV %s process exit=%d stdout=%s stderr=%s", strategy, process.exitCode, process.stdout, process.stderr)
+		}
+		var result BulkAssignOutput
+		decodeSingleRobotJSON(t, process.stdout, &result)
+		if !result.Success || !result.DryRun {
+			t.Fatalf("real from-BV %s envelope=%+v", strategy, result)
+		}
+		if result.AllocationSource != "bv" || result.Strategy != strategy {
+			t.Fatalf("allocation_source=%q strategy=%q, want bv/%s", result.AllocationSource, result.Strategy, strategy)
+		}
+		if len(result.Assignments) != 1 {
+			t.Fatalf("%s assignments=%+v, want exactly one real bv allocation", strategy, result.Assignments)
+		}
+		plannedAssignment := result.Assignments[0]
+		if plannedAssignment.Bead != beadID || plannedAssignment.PaneID != fixture.paneID || plannedAssignment.Status != "planned" || plannedAssignment.PromptSent {
+			t.Fatalf("%s assignment=%+v, want bead=%q pane_id=%q planned without dispatch", strategy, plannedAssignment, beadID, fixture.paneID)
+		}
+		if result.Summary.TotalPanes != 1 || result.Summary.Failed != 0 {
+			t.Fatalf("%s summary=%+v, want one successful dry-run plan", strategy, result.Summary)
+		}
 	}
 
 	runBulk := func(t *testing.T, targetFixture *robotProcessFixture, strategy string, extraArgs ...string) BulkAssignOutput {
@@ -790,7 +1081,7 @@ func TestE2E_RobotBulkAssign_WithFromBV(t *testing.T) {
 			"--robot-format=json",
 		}
 		args = append(args, extraArgs...)
-		process := runBuiltRobotProcess(t, targetFixture.ntmPath, targetFixture.projectDir, targetFixture.env, args...)
+		process := runBuiltRobotProcessWithin(t, realBVRobotTimeout, targetFixture.ntmPath, targetFixture.projectDir, targetFixture.env, args...)
 		if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
 			t.Fatalf("bulk %s exit=%d stdout=%s stderr=%s", strategy, process.exitCode, process.stdout, process.stderr)
 		}
@@ -1149,7 +1440,25 @@ exec "$real_br" "$@"
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	startRace := func(t *testing.T, peer *robotProcessFixture, contender string) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer) {
+	type raceProcess struct {
+		cmd      *exec.Cmd
+		group    *testutil.ProcessGroupForTest
+		stdout   *bytes.Buffer
+		stderr   *bytes.Buffer
+		joined   bool
+		waitErr  error
+		closeErr error
+	}
+	joinRace := func(process *raceProcess) error {
+		if process.joined {
+			return errors.Join(process.waitErr, process.closeErr)
+		}
+		process.waitErr = process.cmd.Wait()
+		process.closeErr = process.group.Close()
+		process.joined = true
+		return errors.Join(process.waitErr, process.closeErr)
+	}
+	startRace := func(t *testing.T, peer *robotProcessFixture, contender string) *raceProcess {
 		t.Helper()
 		ntmArgs := []string{
 			"--robot-bulk-assign=" + peer.session,
@@ -1169,17 +1478,40 @@ exec "$real_br" "$@"
 		cmd.Env = mergeRobotProcessEnv(raceEnv, map[string]string{
 			"NTM_E2E_RACE_CONTENDER": contender,
 		})
+		group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+		if groupErr != nil {
+			t.Fatalf("create owned process group for %s: %v", peer.session, groupErr)
+		}
+		cmd.Cancel = func() error {
+			return group.Signal(os.Kill)
+		}
+		cmd.WaitDelay = 2 * time.Second
 		stdout := &bytes.Buffer{}
 		stderr := &bytes.Buffer{}
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
 		if err := cmd.Start(); err != nil {
-			t.Fatalf("start concurrent bulk process for %s: %v", peer.session, err)
+			closeErr := group.Close()
+			t.Fatalf("start concurrent bulk process for %s: %v; close owned process group: %v", peer.session, err, closeErr)
 		}
-		return cmd, stdout, stderr
+		process := &raceProcess{cmd: cmd, group: group, stdout: stdout, stderr: stderr}
+		t.Cleanup(func() {
+			if process.joined {
+				return
+			}
+			cancel()
+			_ = process.group.Signal(os.Kill)
+			_ = joinRace(process)
+			if process.closeErr != nil {
+				t.Errorf("close owned process group for %s: %v", peer.session, process.closeErr)
+			}
+		})
+		return process
 	}
-	cmdA, stdoutA, stderrA := startRace(t, peerA, "A")
-	cmdB, stdoutB, stderrB := startRace(t, peerB, "B")
+	processA := startRace(t, peerA, "A")
+	processB := startRace(t, peerB, "B")
+	stdoutA, stderrA := processA.stdout, processA.stderr
+	stdoutB, stderrB := processB.stdout, processB.stderr
 	barrierDeadline := time.Now().Add(35 * time.Second)
 	for {
 		_, errA := os.Stat(filepath.Join(barrierDir, "arrived.A"))
@@ -1189,8 +1521,10 @@ exec "$real_br" "$@"
 		}
 		if (errA != nil && !os.IsNotExist(errA)) || (errB != nil && !os.IsNotExist(errB)) || time.Now().After(barrierDeadline) {
 			cancel()
-			waitErrA := cmdA.Wait()
-			waitErrB := cmdB.Wait()
+			_ = processA.group.Signal(os.Kill)
+			_ = processB.group.Signal(os.Kill)
+			waitErrA := joinRace(processA)
+			waitErrB := joinRace(processB)
 			t.Fatalf("concurrent contenders did not reach the shared guarded-claim barrier: marker A=%v marker B=%v wait A=%v wait B=%v stdout A=%q stderr A=%q stdout B=%q stderr B=%q",
 				errA, errB, waitErrA, waitErrB, stdoutA.Bytes(), stderrA.Bytes(), stdoutB.Bytes(), stderrB.Bytes())
 		}
@@ -1245,21 +1579,25 @@ exec "$real_br" "$@"
 			t.Fatalf("concurrent contender %s reached %d guarded-claim boundaries, want exactly one: %v", contender, len(claimSnapshots), claimSnapshots)
 		}
 	}
-	waitRace := func(t *testing.T, cmd *exec.Cmd, stdout, stderr *bytes.Buffer) int {
+	waitRace := func(t *testing.T, process *raceProcess) int {
 		t.Helper()
-		waitErr := cmd.Wait()
+		_ = joinRace(process)
 		if ctx.Err() != nil {
-			t.Fatalf("concurrent bulk process timed out: %v stdout=%s stderr=%s", ctx.Err(), stdout.Bytes(), stderr.Bytes())
+			t.Fatalf("concurrent bulk process timed out: %v stdout=%s stderr=%s", ctx.Err(), process.stdout.Bytes(), process.stderr.Bytes())
 		}
-		if waitErr != nil {
-			if _, ok := waitErr.(*exec.ExitError); !ok {
-				t.Fatalf("wait for concurrent bulk process: %v", waitErr)
+		if process.closeErr != nil {
+			t.Fatalf("close owned process group for concurrent bulk process: %v", process.closeErr)
+		}
+		if process.waitErr != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(process.waitErr, &exitErr) {
+				t.Fatalf("wait for concurrent bulk process: %v", process.waitErr)
 			}
 		}
-		return cmd.ProcessState.ExitCode()
+		return process.cmd.ProcessState.ExitCode()
 	}
-	exitA := waitRace(t, cmdA, stdoutA, stderrA)
-	exitB := waitRace(t, cmdB, stdoutB, stderrB)
+	exitA := waitRace(t, processA)
+	exitB := waitRace(t, processB)
 	if len(bytes.TrimSpace(stderrA.Bytes())) != 0 || len(bytes.TrimSpace(stderrB.Bytes())) != 0 {
 		t.Fatalf("concurrent bulk stderr A=%q B=%q", stderrA.Bytes(), stderrB.Bytes())
 	}
@@ -1321,161 +1659,163 @@ exec "$real_br" "$@"
 func TestE2E_RobotBulkAssign_MultiPaneSession(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_multi_pane")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
-	}
-
-	// Create 5 panes for testing
-	for i := 0; i < 4; i++ {
-		cmd := exec.Command(tmux.BinaryPath(), "split-window", "-t", suite.Session(), "-h")
-		if err := cmd.Run(); err != nil {
-			suite.Logger().Log("[E2E-BULK-ASSIGN] Warning: could not create pane %d: %v", i+1, err)
-		}
-	}
-
-	// Balance the layout
-	cmd := exec.Command(tmux.BinaryPath(), "select-layout", "-t", suite.Session(), "tiled")
-	cmd.Run()
+	fixture := newRobotProcessFixture(t, "bulk-multi-pane")
+	panes := prepareBulkAssignAgentPanes(t, fixture, 5)
+	beads := prepareBulkAssignBeads(t, fixture, 5)
 
 	// Test allocation to multiple panes
-	allocation := `{"0":"bd-p0","1":"bd-p1","2":"bd-p2","3":"bd-p3","4":"bd-p4"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
+	allocation := make(map[string]string, len(panes))
+	type expectedAssignment struct {
+		paneID   string
+		selector string
+	}
+	expectedByBead := make(map[string]expectedAssignment, len(panes))
+	for index := range panes {
+		allocation[panes[index].ID] = beads[index]
+		expectedByBead[beads[index]] = expectedAssignment{paneID: panes[index].ID, selector: strconv.Itoa(panes[index].Index)}
+	}
+	allocationBytes, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal multi-pane allocation: %v", err)
+	}
+	result, process := runBulkAssignFixture(t, fixture,
+		"--allocation="+string(allocationBytes),
 		"--dry-run")
 
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	if process.exitCode != 0 || !result.Success || !result.DryRun || result.AllocationSource != "explicit" {
+		t.Fatalf("[E2E-BULK-ASSIGN] positive multi-pane envelope: exit=%d result=%+v", process.exitCode, result)
 	}
-
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Multi-pane: total_panes=%d assigned=%d",
-		result.Summary.TotalPanes, result.Summary.Assigned)
-
-	// Should have multiple panes
-	if result.Summary.TotalPanes < 3 {
-		t.Fatalf("[E2E-BULK-ASSIGN] Expected at least 3 panes, got %d", result.Summary.TotalPanes)
+	if result.Summary.TotalPanes != 5 || result.Summary.Assigned != 0 || result.Summary.Skipped != 0 ||
+		result.Summary.Failed != 0 || len(result.Assignments) != 5 || len(result.UnassignedPanes) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] result=%+v, want five resolved allocations and no unassigned panes", result)
+	}
+	for _, assignment := range result.Assignments {
+		expected, ok := expectedByBead[assignment.Bead]
+		if !ok || assignment.PaneID != expected.paneID || assignment.Pane != expected.selector ||
+			assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+			t.Fatalf("[E2E-BULK-ASSIGN] assignment=%+v did not preserve the one-to-one bead/pane plan", assignment)
+		}
+		delete(expectedByBead, assignment.Bead)
+	}
+	if len(expectedByBead) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] missing planned bead/pane mappings: %v", expectedByBead)
 	}
 }
 
 func TestE2E_RobotBulkAssign_AssignmentDetails(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_details")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+	fixture := newRobotProcessFixture(t, "bulk-details")
+	pane := prepareBulkAssignAgentPanes(t, fixture, 1)[0]
+	beadID := prepareBulkAssignBeads(t, fixture, 1)[0]
+	allocation, err := json.Marshal(map[string]string{pane.ID: beadID})
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal assignment-details allocation: %v", err)
 	}
-
-	// Test with explicit allocation
-	allocation := `{"0":"bd-detail-test"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--dry-run")
-
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	result, process := runBulkAssignFixture(t, fixture, "--allocation="+string(allocation), "--dry-run")
+	if process.exitCode != 0 || !result.Success || result.ErrorCode != "" || !result.DryRun ||
+		result.AllocationSource != "explicit" || len(result.Assignments) != 1 || result.Summary.Failed != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] assignment-details envelope: exit=%d result=%+v", process.exitCode, result)
 	}
-
-	// Verify assignment details structure
-	for _, a := range result.Assignments {
-		suite.Logger().Log("[E2E-BULK-ASSIGN] Assignment: pane=%s pane_id=%s bead=%s status=%s prompt_sent=%v",
-			a.Pane, a.PaneID, a.Bead, a.Status, a.PromptSent)
-
-		if _, err := tmux.ParsePaneSelector(a.Pane); err != nil {
-			t.Fatalf("[E2E-BULK-ASSIGN] Invalid canonical pane selector %q: %v", a.Pane, err)
-		}
-
-		// Bead ID should be set
-		if a.Bead == "" {
-			t.Fatal("[E2E-BULK-ASSIGN] Assignment missing bead ID")
-		}
+	assignment := result.Assignments[0]
+	if _, err := tmux.ParsePaneSelector(assignment.Pane); err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] invalid canonical pane selector %q: %v", assignment.Pane, err)
+	}
+	if assignment.Pane != strconv.Itoa(pane.Index) || assignment.PaneID != pane.ID || assignment.Bead != beadID ||
+		assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+		t.Fatalf("[E2E-BULK-ASSIGN] assignment details=%+v", assignment)
 	}
 }
 
 func TestE2E_RobotBulkAssign_SkipMultiplePanes(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_skip_multiple")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
-	}
-
-	// Create additional panes
-	for i := 0; i < 4; i++ {
-		cmd := exec.Command(tmux.BinaryPath(), "split-window", "-t", suite.Session(), "-h")
-		cmd.Run()
-	}
-	exec.Command(tmux.BinaryPath(), "select-layout", "-t", suite.Session(), "tiled").Run()
+	fixture := newRobotProcessFixture(t, "bulk-skip-multiple")
+	panes := prepareBulkAssignAgentPanes(t, fixture, 5)
+	beads := prepareBulkAssignBeads(t, fixture, 5)
 
 	// Skip multiple panes
-	allocation := `{"0":"bd-s0","1":"bd-s1","2":"bd-s2","3":"bd-s3","4":"bd-s4"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--skip=0,2,4",
+	allocation := make(map[string]string, len(panes))
+	expectedPaneByBead := make(map[string]tmux.Pane, len(panes))
+	for index := range panes {
+		allocation[panes[index].ID] = beads[index]
+		expectedPaneByBead[beads[index]] = panes[index]
+	}
+	allocationBytes, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal skipped-pane allocation: %v", err)
+	}
+	skippedPaneIDs := map[string]struct{}{panes[0].ID: {}, panes[2].ID: {}, panes[4].ID: {}}
+	result, process := runBulkAssignFixture(t, fixture,
+		"--allocation="+string(allocationBytes),
+		"--skip="+strings.Join([]string{panes[0].ID, panes[2].ID, panes[4].ID}, ","),
 		"--dry-run")
 
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	if process.exitCode != 1 || result.Success || !result.DryRun || result.ErrorCode != "PANE_NOT_FOUND" ||
+		result.AllocationSource != "explicit" || result.Summary.TotalPanes != 5 || result.Summary.Assigned != 0 ||
+		result.Summary.Skipped != 0 || result.Summary.Failed != 3 || len(result.Assignments) != 5 || len(result.UnassignedPanes) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] skipped-pane envelope: exit=%d result=%+v", process.exitCode, result)
 	}
-
-	// Verify skipped panes appear as failed (not available in filtered pane list)
-	skippedPanes := map[string]bool{"0": true, "2": true, "4": true}
-	for _, a := range result.Assignments {
-		if skippedPanes[a.Pane] {
-			// Skipped panes should be marked as failed
-			suite.Logger().Log("[E2E-BULK-ASSIGN] Skipped pane %s: status=%s error=%s", a.Pane, a.Status, a.Error)
+	skipped, resolved := 0, 0
+	for _, assignment := range result.Assignments {
+		expectedPane, ok := expectedPaneByBead[assignment.Bead]
+		if !ok {
+			t.Fatalf("[E2E-BULK-ASSIGN] unexpected or duplicate bead assignment: %+v", assignment)
 		}
+		if _, shouldSkip := skippedPaneIDs[expectedPane.ID]; shouldSkip {
+			if assignment.Pane != expectedPane.ID || assignment.PaneID != "" || assignment.Status != "failed" ||
+				assignment.PromptSent || assignment.Claimed || !strings.Contains(strings.ToLower(assignment.Error), "not found") {
+				t.Fatalf("[E2E-BULK-ASSIGN] skipped assignment=%+v, want a non-actuated pane failure", assignment)
+			}
+			skipped++
+		} else {
+			if assignment.Pane != strconv.Itoa(expectedPane.Index) || assignment.PaneID != expectedPane.ID ||
+				assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+				t.Fatalf("[E2E-BULK-ASSIGN] unskipped assignment did not preserve its physical pane plan: %+v", assignment)
+			}
+			resolved++
+		}
+		delete(expectedPaneByBead, assignment.Bead)
 	}
-
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Skip multiple verified: 0,2,4 processed as expected")
+	if skipped != 3 || resolved != 2 || len(expectedPaneByBead) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] skipped=%d resolved=%d, want 3/2", skipped, resolved)
+	}
 }
 
 func TestE2E_RobotBulkAssign_EmptyAllocation(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_empty_alloc")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
-	}
-
-	// Test with empty allocation
-	result, output, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation={}")
-
-	if result != nil && result.Success {
-		// Empty allocation might be valid (0 assignments)
-		if len(result.Assignments) > 0 {
-			t.Fatal("[E2E-BULK-ASSIGN] Empty allocation should result in 0 assignments")
-		}
-		suite.Logger().Log("[E2E-BULK-ASSIGN] Empty allocation handled: assignments=%d", len(result.Assignments))
-	} else {
-		suite.Logger().Log("[E2E-BULK-ASSIGN] Empty allocation rejected: %s", string(output))
+	fixture := newRobotProcessFixture(t, "bulk-empty-allocation")
+	result, process := runBulkAssignFixture(t, fixture, "--allocation={}")
+	if process.exitCode != 1 || result.Success || result.ErrorCode != "INVALID_FLAG" ||
+		result.Assignments == nil || result.UnassignedBeads == nil || result.UnassignedPanes == nil ||
+		result.Summary != (BulkAssignSummary{}) ||
+		!strings.Contains(strings.ToLower(result.Error), "at least one") {
+		t.Fatalf("[E2E-BULK-ASSIGN] empty-allocation envelope: exit=%d result=%+v", process.exitCode, result)
 	}
 }
 
 func TestE2E_RobotBulkAssign_NonExistentSession(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_bad_session")
-	defer suite.Teardown()
-
-	// Don't set up a session - test with non-existent one
-	result, output, err := runBulkAssignCmd(t, suite, "nonexistent_session_12345",
-		"--allocation={\"1\":\"bd-test\"}",
-		"--dry-run")
-
-	if err == nil && result != nil && result.Success {
-		t.Fatal("[E2E-BULK-ASSIGN] Should fail with non-existent session")
+	fixture := newRobotProcessFixture(t, "bulk-missing-session-control")
+	missingSession := fixture.session + "-missing"
+	process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, fixture.env,
+		"--robot-bulk-assign="+missingSession,
+		"--robot-format=json",
+		`--allocation={"0":"missing-session-bead"}`,
+		"--dry-run",
+	)
+	if process.exitCode != 1 || len(bytes.TrimSpace(process.stderr)) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] nonexistent-session process exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
 	}
-
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Non-existent session error: %s", string(output))
+	var result BulkAssignOutput
+	decodeSingleRobotJSON(t, process.stdout, &result)
+	if result.Success || result.ErrorCode != "SESSION_NOT_FOUND" || result.Session != missingSession || !result.DryRun ||
+		result.Assignments == nil || result.UnassignedBeads == nil || result.UnassignedPanes == nil ||
+		result.Summary != (BulkAssignSummary{}) || !strings.Contains(strings.ToLower(result.Error), "panes") {
+		t.Fatalf("[E2E-BULK-ASSIGN] nonexistent-session envelope=%+v", result)
+	}
 }
 
 func TestE2E_RobotBulkAssign_PaneIndexValidation(t *testing.T) {
@@ -1488,52 +1828,49 @@ func TestE2E_RobotBulkAssign_PaneIndexValidation(t *testing.T) {
 		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
 	}
 
-	// Test with invalid pane indices (strings that look like negative numbers)
+	// A well-formed selector for a pane that does not exist must be a typed failure.
 	allocation := `{"99":"bd-nonexistent-pane"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
+	result, output, runErr := runBulkAssignCmd(t, suite, suite.Session(),
 		"--allocation="+allocation,
 		"--dry-run")
 
 	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+		t.Fatalf("[E2E-BULK-ASSIGN] expected JSON response: err=%v output=%s", runErr, output)
 	}
-
-	// Non-existent pane should be reported
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Non-existent pane 99: summary.failed=%d", result.Summary.Failed)
-
-	// The assignment should either fail or not be included
-	for _, a := range result.Assignments {
-		if a.Pane == "99" && a.Error == "" {
-			t.Fatal("[E2E-BULK-ASSIGN] Assignment to non-existent pane 99 should have error")
-		}
+	if runErr == nil || result.Success || !result.DryRun || result.ErrorCode != "PANE_NOT_FOUND" ||
+		result.AllocationSource != "explicit" || result.Summary.TotalPanes != 1 ||
+		result.Summary.Assigned != 0 || result.Summary.Skipped != 0 || result.Summary.Failed != 1 {
+		t.Fatalf("[E2E-BULK-ASSIGN] missing pane did not produce the typed failure contract: err=%v result=%+v output=%s",
+			runErr, result, output)
+	}
+	if len(result.Assignments) != 1 {
+		t.Fatalf("[E2E-BULK-ASSIGN] assignments=%+v, want exactly one failed pane-99 assignment", result.Assignments)
+	}
+	assignment := result.Assignments[0]
+	if assignment.Pane != "99" || assignment.PaneID != "" || assignment.Bead != "bd-nonexistent-pane" ||
+		assignment.Status != "failed" || assignment.PromptSent || assignment.Claimed ||
+		!strings.Contains(strings.ToLower(assignment.Error), "not found") {
+		t.Fatalf("[E2E-BULK-ASSIGN] assignment=%+v, want a non-actuated PANE_NOT_FOUND result for pane 99", assignment)
 	}
 }
 
 func TestE2E_RobotBulkAssign_TimestampFormat(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_timestamp")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+	fixture := newRobotProcessFixture(t, "bulk-timestamp")
+	pane := prepareBulkAssignAgentPanes(t, fixture, 1)[0]
+	beadID := prepareBulkAssignBeads(t, fixture, 1)[0]
+	allocation, err := json.Marshal(map[string]string{pane.ID: beadID})
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal timestamp allocation: %v", err)
 	}
-
-	allocation := `{"0":"bd-ts-test"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--dry-run")
-
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	result, process := runBulkAssignFixture(t, fixture, "--allocation="+string(allocation), "--dry-run")
+	if process.exitCode != 0 || !result.Success || result.ErrorCode != "" || len(result.Assignments) != 1 {
+		t.Fatalf("[E2E-BULK-ASSIGN] timestamp envelope: exit=%d result=%+v", process.exitCode, result)
 	}
-
-	// Verify timestamp is present and valid
-	if result.Timestamp == "" {
-		t.Fatal("[E2E-BULK-ASSIGN] Timestamp should not be empty")
+	if _, err := time.Parse(time.RFC3339, result.Timestamp); err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] timestamp %q is not RFC3339: %v", result.Timestamp, err)
 	}
-
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Timestamp: %s", result.Timestamp)
 }
 
 func TestE2E_RobotBulkAssign_AllStrategiesValidInput(t *testing.T) {
@@ -1543,29 +1880,28 @@ func TestE2E_RobotBulkAssign_AllStrategiesValidInput(t *testing.T) {
 
 	for _, strategy := range strategies {
 		t.Run("valid_"+strategy, func(t *testing.T) {
-			suite := NewTestSuite(t, fmt.Sprintf("bulk_assign_valid_%s", strategy))
-			defer suite.Teardown()
-
-			if err := suite.Setup(); err != nil {
-				t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+			fixture := newRobotProcessFixture(t, "bulk-valid-"+strategy)
+			pane := prepareBulkAssignAgentPanes(t, fixture, 1)[0]
+			beadID := prepareBulkAssignBeads(t, fixture, 1)[0]
+			allocation, err := json.Marshal(map[string]string{pane.ID: beadID})
+			if err != nil {
+				t.Fatalf("[E2E-BULK-ASSIGN] marshal %s strategy allocation: %v", strategy, err)
 			}
-
-			// Use explicit allocation to avoid needing bv
-			allocation := `{"0":"bd-` + strategy + `-test"}`
-			result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-				"--allocation="+allocation,
+			result, process := runBulkAssignFixture(t, fixture,
+				"--allocation="+string(allocation),
 				"--strategy="+strategy,
-				"--dry-run")
-
-			if result == nil {
-				t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+				"--dry-run",
+			)
+			if process.exitCode != 0 || !result.Success || result.ErrorCode != "" || !result.DryRun ||
+				result.Strategy != strategy || result.AllocationSource != "explicit" ||
+				result.Summary.TotalPanes != 1 || result.Summary.Failed != 0 || len(result.Assignments) != 1 {
+				t.Fatalf("[E2E-BULK-ASSIGN] valid %s strategy envelope: exit=%d result=%+v", strategy, process.exitCode, result)
 			}
-			if result.Strategy != strategy {
-				t.Fatalf("[E2E-BULK-ASSIGN] strategy=%q, want canonical --strategy value %q", result.Strategy, strategy)
+			assignment := result.Assignments[0]
+			if assignment.PaneID != pane.ID || assignment.Bead != beadID || assignment.Status != "planned" ||
+				assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+				t.Fatalf("[E2E-BULK-ASSIGN] valid %s strategy assignment=%+v", strategy, assignment)
 			}
-
-			// Strategy should be recorded even with explicit allocation
-			suite.Logger().Log("[E2E-BULK-ASSIGN] Strategy %s: recorded=%s", strategy, result.Strategy)
 		})
 	}
 }
@@ -1573,78 +1909,388 @@ func TestE2E_RobotBulkAssign_AllStrategiesValidInput(t *testing.T) {
 func TestE2E_RobotBulkAssign_CombinedFlags(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_combined")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
-	}
-
-	// Create a few panes
-	for i := 0; i < 2; i++ {
-		exec.Command(tmux.BinaryPath(), "split-window", "-t", suite.Session(), "-h").Run()
-	}
+	fixture := newRobotProcessFixture(t, "bulk-combined-flags")
+	panes := prepareBulkAssignAgentPanes(t, fixture, 3)
+	beads := prepareBulkAssignBeads(t, fixture, 3)
 
 	// Test multiple flags combined
-	allocation := `{"0":"bd-c0","1":"bd-c1","2":"bd-c2"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--skip=1",
+	allocation := make(map[string]string, len(panes))
+	expectedPaneByBead := make(map[string]tmux.Pane, len(panes))
+	for index := range panes {
+		allocation[panes[index].ID] = beads[index]
+		expectedPaneByBead[beads[index]] = panes[index]
+	}
+	allocationBytes, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal combined allocation: %v", err)
+	}
+	result, process := runBulkAssignFixture(t, fixture,
+		"--allocation="+string(allocationBytes),
+		"--skip="+panes[1].ID,
 		"--strategy=impact",
 		"--dry-run")
 
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	if process.exitCode != 1 || result.Success || !result.DryRun || result.ErrorCode != "PANE_NOT_FOUND" ||
+		result.AllocationSource != "explicit" || result.Strategy != "impact" || result.Summary.TotalPanes != 3 ||
+		result.Summary.Assigned != 0 || result.Summary.Skipped != 0 || result.Summary.Failed != 1 ||
+		len(result.Assignments) != 3 || len(result.UnassignedPanes) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] combined envelope: exit=%d result=%+v", process.exitCode, result)
 	}
-
-	// Verify combined behavior
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Combined flags: dry_run=%v strategy=%s failed=%d",
-		result.DryRun, result.Strategy, result.Summary.Failed)
-
-	if !result.DryRun {
-		t.Fatal("[E2E-BULK-ASSIGN] dry_run should be true")
-	}
-
-	// Pane 1 should be in assignments but marked as failed (skip causes pane not available)
-	for _, a := range result.Assignments {
-		if a.Pane == "1" {
-			suite.Logger().Log("[E2E-BULK-ASSIGN] Pane 1 skipped: status=%s error=%s", a.Status, a.Error)
+	skipped, resolved := 0, 0
+	for _, assignment := range result.Assignments {
+		expectedPane, ok := expectedPaneByBead[assignment.Bead]
+		if !ok {
+			t.Fatalf("[E2E-BULK-ASSIGN] unexpected or duplicate combined bead assignment: %+v", assignment)
 		}
+		if expectedPane.ID == panes[1].ID {
+			if assignment.Pane != expectedPane.ID || assignment.PaneID != "" || assignment.Status != "failed" ||
+				assignment.PromptSent || assignment.Claimed || !strings.Contains(strings.ToLower(assignment.Error), "not found") {
+				t.Fatalf("[E2E-BULK-ASSIGN] combined skipped assignment=%+v", assignment)
+			}
+			skipped++
+		} else {
+			if assignment.Pane != strconv.Itoa(expectedPane.Index) || assignment.PaneID != expectedPane.ID ||
+				assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+				t.Fatalf("[E2E-BULK-ASSIGN] combined unskipped assignment did not preserve its plan: %+v", assignment)
+			}
+			resolved++
+		}
+		delete(expectedPaneByBead, assignment.Bead)
+	}
+	if skipped != 1 || resolved != 2 || len(expectedPaneByBead) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] combined skipped=%d resolved=%d, want 1/2", skipped, resolved)
+	}
+}
+
+func TestE2E_RobotBulkAssign_InvalidOrMissingSelectedConfigHasZeroSideEffects(t *testing.T) {
+	CommonE2EPrerequisites(t)
+
+	for _, test := range []struct {
+		name          string
+		missingConfig bool
+	}{
+		{name: "invalid selected config"},
+		{name: "missing selected config", missingConfig: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRobotProcessFixture(t, "bulk-policy-invalid")
+			beads := prepareBulkAssignBeads(t, fixture, 1)
+			beadID := beads[0]
+			beforeBead := readBulkAssignFixtureBead(t, fixture, beadID)
+			mail := newAtomicAssignmentMailStub(fixture.projectDir)
+			t.Cleanup(mail.close)
+
+			triagePayload := fmt.Sprintf(
+				`{"triage":{"recommendations":[{"id":%q,"title":"Policy must load first","type":"task","status":"open","priority":1,"score":100,"action":"assign","reasons":[]}]}}`,
+				beadID,
+			)
+			planPayload := fmt.Sprintf(
+				`{"plan":{"tracks":[{"track_id":"policy-first","items":[{"id":%q,"title":"Policy must load first","status":"open","priority":1}]}]}}`,
+				beadID,
+			)
+			baseEnv := atomicAssignmentMergeEnv(fixture.env, mail.env())
+			env, bvTrace, brTrace := installBulkAssignPlanningFixtures(
+				t, fixture, baseEnv, triagePayload, planPayload, "ok", "real",
+			)
+			configPath := filepath.Join(fixture.root, "selected-policy.toml")
+			invalidConfig := []byte("[assign\noperator_gated_labels = [\"release-approval\"]\n")
+			if !test.missingConfig {
+				if err := os.WriteFile(configPath, invalidConfig, 0o600); err != nil {
+					t.Fatalf("write invalid selected bulk config: %v", err)
+				}
+			}
+			outsideDir := filepath.Join(fixture.root, "outside")
+			if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+				t.Fatalf("create bulk caller directory: %v", err)
+			}
+			marker := fmt.Sprintf("NTM_BULK_INVALID_POLICY_MUST_NOT_DISPATCH_%d", time.Now().UnixNano())
+			templatePath := filepath.Join(fixture.projectDir, "invalid-policy-template.txt")
+			if err := os.WriteFile(templatePath, []byte(marker+"::{bead_id}"), 0o600); err != nil {
+				t.Fatalf("write invalid-policy bulk template: %v", err)
+			}
+
+			process := runBuiltRobotProcessWithin(
+				t, defaultRunTimeout, fixture.ntmPath, outsideDir, env,
+				"--config="+configPath,
+				"--robot-bulk-assign="+fixture.session,
+				"--from-bv",
+				"--bulk-strategy=balanced",
+				"--prompt-template="+templatePath,
+				"--robot-format=json",
+			)
+			if process.exitCode != 1 || len(bytes.TrimSpace(process.stderr)) != 0 {
+				t.Fatalf("bulk invalid policy exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+			}
+			var result BulkAssignOutput
+			decodeSingleRobotJSON(t, process.stdout, &result)
+			if result.Success || result.ErrorCode != "INVALID_FLAG" ||
+				!strings.Contains(strings.ToLower(result.Error), "config") {
+				t.Fatalf("bulk invalid policy envelope = %+v, want one INVALID_FLAG document", result)
+			}
+			if test.missingConfig {
+				if result.Assignments == nil {
+					t.Fatalf("command-specific missing-config envelope assignments=nil, want checked-empty []")
+				}
+			} else {
+				var rootFailure struct {
+					Meta struct {
+						ExitCode int    `json:"exit_code"`
+						Command  string `json:"command"`
+					} `json:"_meta"`
+				}
+				decodeSingleRobotJSON(t, process.stdout, &rootFailure)
+				if rootFailure.Meta.ExitCode != 1 || rootFailure.Meta.Command != "robot-bulk-assign" || result.Assignments != nil {
+					t.Fatalf("invalid TOML root envelope meta=%+v assignments=%v, want command-owned generic failure", rootFailure.Meta, result.Assignments)
+				}
+			}
+			assertBulkAssignTraceEmpty(t, bvTrace, "bv planning")
+			assertBulkAssignTraceEmpty(t, brTrace, "Beads")
+			if test.missingConfig {
+				if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+					t.Fatalf("missing selected bulk config was created: %v", err)
+				}
+			} else {
+				afterConfig, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatalf("read invalid bulk config after rejection: %v", err)
+				}
+				if !bytes.Equal(afterConfig, invalidConfig) {
+					t.Fatalf("bulk rejection mutated invalid config:\nbefore=%s\nafter=%s", invalidConfig, afterConfig)
+				}
+			}
+			afterBead := readBulkAssignFixtureBead(t, fixture, beadID)
+			if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+				t.Fatalf("bulk invalid policy mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+			}
+			assertBulkAssignFixtureHasNoLedger(t, fixture, beadID)
+			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+			if paneOutput := fixture.mustTMUXOutput(t, "capture-pane", "-p", "-t", fixture.paneID, "-S", "-"); strings.Contains(paneOutput, marker) {
+				t.Fatalf("invalid bulk policy dispatched marker %q to pane: %s", marker, paneOutput)
+			}
+		})
+	}
+}
+
+func TestE2E_RobotBulkAssign_CrossCWDTargetPolicyRejectsOverlappingLiveGate(t *testing.T) {
+	CommonE2EPrerequisites(t)
+
+	fixture := newRobotProcessFixture(t, "bulk-cross-cwd-gate")
+	beads := prepareBulkAssignBeads(t, fixture, 1)
+	beadID := beads[0]
+	brPath, err := exec.LookPath("br")
+	if err != nil {
+		t.Fatalf("real br is required for bulk live-gate fixture: %v", err)
+	}
+	const gateLabel = "architecture-approval"
+	runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath,
+		"update", beadID, "--add-label="+gateLabel, "--json",
+	)
+	beforeBead := readBulkAssignFixtureBead(t, fixture, beadID)
+	projectConfigDir := filepath.Join(fixture.projectDir, ".ntm")
+	if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+		t.Fatalf("create bulk project config directory: %v", err)
+	}
+	projectConfig := []byte("[assign]\noperator_gated_labels = [\"" + gateLabel + "\"]\n")
+	projectConfigPath := filepath.Join(projectConfigDir, "config.toml")
+	if err := os.WriteFile(projectConfigPath, projectConfig, 0o600); err != nil {
+		t.Fatalf("write target bulk policy: %v", err)
+	}
+
+	triagePayload := fmt.Sprintf(
+		`{"triage":{"recommendations":[{"id":%q,"title":"Stale unlabeled triage row","type":"task","status":"open","priority":0,"score":999,"action":"assign","reasons":[],"labels":[]}],"blockers_to_clear":[{"id":%q,"title":"Overlapping high-impact row","unblocks_count":99,"actionable":true}]}}`,
+		beadID, beadID,
+	)
+	planPayload := fmt.Sprintf(
+		`{"plan":{"tracks":[{"track_id":"overlapping-live-gate","items":[{"id":%q,"title":"Plan omits labels","status":"open","priority":0,"unblocks":["bd-child"]}]}]}}`,
+		beadID,
+	)
+	mail := newAtomicAssignmentMailStub(fixture.projectDir)
+	t.Cleanup(mail.close)
+	baseEnv := atomicAssignmentMergeEnv(fixture.env, mail.env())
+	env, bvTrace, brTrace := installBulkAssignPlanningFixtures(
+		t, fixture, baseEnv, triagePayload, planPayload, "ok", "real",
+	)
+	outsideDir := filepath.Join(fixture.root, "unrelated-caller")
+	if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+		t.Fatalf("create unrelated bulk caller directory: %v", err)
+	}
+	marker := fmt.Sprintf("NTM_BULK_CROSS_CWD_GATE_MUST_NOT_DISPATCH_%d", time.Now().UnixNano())
+	templatePath := filepath.Join(fixture.projectDir, "cross-cwd-gate-template.txt")
+	if err := os.WriteFile(templatePath, []byte(marker+"::{bead_id}"), 0o600); err != nil {
+		t.Fatalf("write cross-CWD bulk template: %v", err)
+	}
+
+	process := runBuiltRobotProcessWithin(
+		t, defaultRunTimeout, fixture.ntmPath, outsideDir, env,
+		"--robot-bulk-assign="+fixture.session,
+		"--from-bv",
+		"--bulk-strategy=impact",
+		"--prompt-template="+templatePath,
+		"--robot-format=json",
+	)
+	if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+		t.Fatalf("cross-CWD live gate exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+	}
+	var result BulkAssignOutput
+	decodeSingleRobotJSON(t, process.stdout, &result)
+	if !result.Success || result.ErrorCode != "" || result.AllocationSource != "bv" ||
+		len(result.Assignments) != 0 || len(result.UnassignedBeads) != 0 ||
+		result.Summary.TotalPanes != 1 || result.Summary.Assigned != 0 || result.Summary.Failed != 0 {
+		t.Fatalf("cross-CWD live gate envelope = %+v, want no authorized assignments", result)
+	}
+	bvCalls, err := os.ReadFile(bvTrace)
+	if err != nil {
+		t.Fatalf("read cross-CWD bv trace: %v", err)
+	}
+	for _, want := range []string{"--robot-triage", "--robot-plan"} {
+		if !bytes.Contains(bvCalls, []byte(want)) {
+			t.Fatalf("cross-CWD bulk planning omitted %q:\n%s", want, bvCalls)
+		}
+	}
+	brCalls, err := os.ReadFile(brTrace)
+	if err != nil {
+		t.Fatalf("read cross-CWD br trace: %v", err)
+	}
+	for _, want := range []string{
+		"ready --json --limit 100000",
+		"list --json --status open --limit 100000",
+	} {
+		if !bytes.Contains(brCalls, []byte(want)) {
+			t.Fatalf("cross-CWD bulk planning omitted live-label lookup %q:\n%s", want, brCalls)
+		}
+	}
+	afterBead := readBulkAssignFixtureBead(t, fixture, beadID)
+	if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+		t.Fatalf("cross-CWD live gate mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+	}
+	afterConfig, err := os.ReadFile(projectConfigPath)
+	if err != nil {
+		t.Fatalf("read target bulk policy after command: %v", err)
+	}
+	if !bytes.Equal(afterConfig, projectConfig) {
+		t.Fatalf("cross-CWD bulk command mutated target policy:\nbefore=%s\nafter=%s", projectConfig, afterConfig)
+	}
+	assertBulkAssignFixtureHasNoLedger(t, fixture, beadID)
+	assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+	if paneOutput := fixture.mustTMUXOutput(t, "capture-pane", "-p", "-t", fixture.paneID, "-S", "-"); strings.Contains(paneOutput, marker) {
+		t.Fatalf("cross-CWD live gate dispatched marker %q to pane: %s", marker, paneOutput)
+	}
+}
+
+func TestE2E_RobotBulkAssign_PlanAndLabelVerificationFailuresHaveZeroMutation(t *testing.T) {
+	CommonE2EPrerequisites(t)
+
+	for _, test := range []struct {
+		name      string
+		planMode  string
+		labelMode string
+		wantTrace string
+	}{
+		{name: "plan command failure", planMode: "failure", labelMode: "real", wantTrace: "--robot-plan"},
+		{name: "plan item absent from live labels", planMode: "ok", labelMode: "empty", wantTrace: "list --json --status open --limit 100000"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRobotProcessFixture(t, "bulk-verification-failure")
+			beads := prepareBulkAssignBeads(t, fixture, 1)
+			beadID := beads[0]
+			beforeBead := readBulkAssignFixtureBead(t, fixture, beadID)
+			triagePayload := fmt.Sprintf(
+				`{"triage":{"recommendations":[{"id":%q,"title":"Unverified bulk work","type":"task","status":"open","priority":1,"score":100,"action":"assign","reasons":[]}]}}`,
+				beadID,
+			)
+			planPayload := fmt.Sprintf(
+				`{"plan":{"tracks":[{"track_id":"verification-failure","items":[{"id":%q,"title":"Unverified bulk work","status":"open","priority":1}]}]}}`,
+				beadID,
+			)
+			mail := newAtomicAssignmentMailStub(fixture.projectDir)
+			t.Cleanup(mail.close)
+			baseEnv := atomicAssignmentMergeEnv(fixture.env, mail.env())
+			env, bvTrace, brTrace := installBulkAssignPlanningFixtures(
+				t, fixture, baseEnv, triagePayload, planPayload, test.planMode, test.labelMode,
+			)
+			marker := fmt.Sprintf("NTM_BULK_VERIFICATION_MUST_NOT_DISPATCH_%d", time.Now().UnixNano())
+			templatePath := filepath.Join(fixture.projectDir, "verification-failure-template.txt")
+			if err := os.WriteFile(templatePath, []byte(marker+"::{bead_id}"), 0o600); err != nil {
+				t.Fatalf("write verification-failure bulk template: %v", err)
+			}
+
+			process := runBuiltRobotProcessWithin(
+				t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, env,
+				"--robot-bulk-assign="+fixture.session,
+				"--from-bv",
+				"--bulk-strategy=balanced",
+				"--prompt-template="+templatePath,
+				"--robot-format=json",
+			)
+			if process.exitCode != 1 || len(bytes.TrimSpace(process.stderr)) != 0 {
+				t.Fatalf("bulk verification failure exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+			}
+			var result BulkAssignOutput
+			decodeSingleRobotJSON(t, process.stdout, &result)
+			if result.Success || result.ErrorCode != "INTERNAL_ERROR" || result.Assignments == nil ||
+				!strings.Contains(result.Error, "verify actionable bulk assignment work") {
+				t.Fatalf("bulk verification failure envelope = %+v", result)
+			}
+			traces := make([]byte, 0)
+			if data, err := os.ReadFile(bvTrace); err == nil {
+				traces = append(traces, data...)
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("read bulk verification bv trace: %v", err)
+			}
+			if data, err := os.ReadFile(brTrace); err == nil {
+				traces = append(traces, data...)
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("read bulk verification br trace: %v", err)
+			}
+			if !bytes.Contains(traces, []byte(test.wantTrace)) {
+				t.Fatalf("bulk verification failure did not reach expected read-only boundary %q:\n%s", test.wantTrace, traces)
+			}
+			afterBead := readBulkAssignFixtureBead(t, fixture, beadID)
+			if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+				t.Fatalf("bulk verification failure mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+			}
+			assertBulkAssignFixtureHasNoLedger(t, fixture, beadID)
+			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+			if paneOutput := fixture.mustTMUXOutput(t, "capture-pane", "-p", "-t", fixture.paneID, "-S", "-"); strings.Contains(paneOutput, marker) {
+				t.Fatalf("bulk verification failure dispatched marker %q to pane: %s", marker, paneOutput)
+			}
+		})
 	}
 }
 
 func TestE2E_RobotBulkAssign_LargeAllocation(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_large")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+	fixture := newRobotProcessFixture(t, "bulk-large")
+	panes := prepareBulkAssignAgentPanes(t, fixture, 20)
+	beads := prepareBulkAssignBeads(t, fixture, 20)
+	allocation := make(map[string]string, len(panes))
+	expected := make(map[string]tmux.Pane, len(panes))
+	for index := range panes {
+		allocation[panes[index].ID] = beads[index]
+		expected[beads[index]] = panes[index]
 	}
-
-	// Build large allocation (20 entries)
-	var allocParts []string
-	for i := 0; i < 20; i++ {
-		allocParts = append(allocParts, fmt.Sprintf(`"%d":"bd-large%d"`, i, i))
+	encoded, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal large allocation: %v", err)
 	}
-	allocation := "{" + strings.Join(allocParts, ",") + "}"
-
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--dry-run")
-
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	result, process := runBulkAssignFixture(t, fixture, "--allocation="+string(encoded), "--dry-run")
+	if process.exitCode != 0 || !result.Success || result.ErrorCode != "" || !result.DryRun ||
+		result.AllocationSource != "explicit" || result.Summary.TotalPanes != 20 ||
+		result.Summary.Assigned != 0 || result.Summary.Skipped != 0 || result.Summary.Failed != 0 ||
+		len(result.Assignments) != 20 || len(result.UnassignedBeads) != 0 || len(result.UnassignedPanes) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] large-allocation envelope: exit=%d result=%+v", process.exitCode, result)
 	}
-
-	// Should handle large allocation gracefully
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Large allocation: 20 entries -> %d assigned, %d unassigned beads",
-		result.Summary.Assigned, len(result.UnassignedBeads))
-
-	// With only a few panes, most should be unassigned
-	if result.Summary.TotalPanes < 20 && len(result.UnassignedBeads) < 10 {
-		suite.Logger().Log("[E2E-BULK-ASSIGN] Warning: expected more unassigned beads")
+	for _, assignment := range result.Assignments {
+		pane, ok := expected[assignment.Bead]
+		if !ok || assignment.Pane != strconv.Itoa(pane.Index) || assignment.PaneID != pane.ID ||
+			assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+			t.Fatalf("[E2E-BULK-ASSIGN] large assignment=%+v", assignment)
+		}
+		delete(expected, assignment.Bead)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] large allocation omitted mappings: %v", expected)
 	}
 }
 
@@ -1652,34 +2298,80 @@ func TestE2E_RobotBulkAssign_SkipPanesFormat(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
 	testCases := []struct {
-		name      string
-		skipPanes string
+		name            string
+		skipPanes       func(string, string) string
+		allocatedPanes  []int
+		unassignedPanes []int
 	}{
-		{"single", "0"},
-		{"comma_separated", "0,1,2"},
-		{"with_spaces", "0, 1, 2"},
+		{
+			name:            "single",
+			skipPanes:       func(_, secondPaneID string) string { return secondPaneID },
+			allocatedPanes:  []int{1},
+			unassignedPanes: []int{0},
+		},
+		{
+			name:           "comma_separated",
+			skipPanes:      func(firstPaneID, secondPaneID string) string { return firstPaneID + "," + secondPaneID },
+			allocatedPanes: []int{0, 1},
+		},
+		{
+			name:           "with_spaces",
+			skipPanes:      func(firstPaneID, secondPaneID string) string { return firstPaneID + ", " + secondPaneID },
+			allocatedPanes: []int{0, 1},
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			suite := NewTestSuite(t, fmt.Sprintf("bulk_assign_skip_%s", tc.name))
-			defer suite.Teardown()
-
-			if err := suite.Setup(); err != nil {
-				t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+			fixture := newRobotProcessFixture(t, "bulk-skip-format-"+tc.name)
+			panes := prepareBulkAssignAgentPanes(t, fixture, 2)
+			firstPaneID, secondPaneID := panes[0].ID, panes[1].ID
+			allocation := make(map[string]string, len(tc.allocatedPanes))
+			expectedByPaneID := make(map[string]string, len(tc.allocatedPanes))
+			for _, paneIndex := range tc.allocatedPanes {
+				beadID := fmt.Sprintf("bd-skip-format-%d", paneIndex)
+				allocation[panes[paneIndex].ID] = beadID
+				expectedByPaneID[panes[paneIndex].ID] = beadID
 			}
-
-			allocation := `{"0":"bd-skip0","1":"bd-skip1","2":"bd-skip2"}`
-			result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-				"--allocation="+allocation,
-				"--skip="+tc.skipPanes,
+			allocationBytes, err := json.Marshal(allocation)
+			if err != nil {
+				t.Fatalf("[E2E-BULK-ASSIGN] marshal format-test allocation: %v", err)
+			}
+			result, process := runBulkAssignFixture(t, fixture,
+				"--allocation="+string(allocationBytes),
+				"--skip="+tc.skipPanes(firstPaneID, secondPaneID),
 				"--dry-run")
 
-			if result == nil {
-				t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+			if process.exitCode != 1 || result.Success || !result.DryRun || result.ErrorCode != "PANE_NOT_FOUND" ||
+				result.AllocationSource != "explicit" || result.Summary.TotalPanes != 2 || result.Summary.Assigned != 0 ||
+				result.Summary.Skipped != 0 || result.Summary.Failed != len(tc.allocatedPanes) ||
+				len(result.Assignments) != len(tc.allocatedPanes) || len(result.UnassignedPanes) != len(tc.unassignedPanes) {
+				t.Fatalf("[E2E-BULK-ASSIGN] skip format %s envelope: exit=%d result=%+v", tc.name, process.exitCode, result)
 			}
-
-			suite.Logger().Log("[E2E-BULK-ASSIGN] Skip format %s: skipped=%d", tc.name, result.Summary.Skipped)
+			for _, assignment := range result.Assignments {
+				beadID, ok := expectedByPaneID[assignment.Pane]
+				if !ok || assignment.Bead != beadID || assignment.PaneID != "" || assignment.Status != "failed" ||
+					assignment.PromptSent || assignment.Claimed || !strings.Contains(strings.ToLower(assignment.Error), "not found") {
+					t.Fatalf("[E2E-BULK-ASSIGN] skip format %s assignment=%+v did not prove its selector", tc.name, assignment)
+				}
+				delete(expectedByPaneID, assignment.Pane)
+			}
+			if len(expectedByPaneID) != 0 {
+				t.Fatalf("[E2E-BULK-ASSIGN] skip format %s omitted selectors %v", tc.name, expectedByPaneID)
+			}
+			expectedUnassigned := make(map[string]struct{}, len(tc.unassignedPanes))
+			for _, paneIndex := range tc.unassignedPanes {
+				expectedUnassigned[strconv.Itoa(panes[paneIndex].Index)] = struct{}{}
+			}
+			for _, selector := range result.UnassignedPanes {
+				if _, ok := expectedUnassigned[selector]; !ok {
+					t.Fatalf("[E2E-BULK-ASSIGN] skip format %s unexpected unassigned selector %q in %v", tc.name, selector, result.UnassignedPanes)
+				}
+				delete(expectedUnassigned, selector)
+			}
+			if len(expectedUnassigned) != 0 {
+				t.Fatalf("[E2E-BULK-ASSIGN] skip format %s omitted unassigned selectors %v", tc.name, expectedUnassigned)
+			}
 		})
 	}
 }
@@ -1687,29 +2379,38 @@ func TestE2E_RobotBulkAssign_SkipPanesFormat(t *testing.T) {
 func TestE2E_RobotBulkAssign_AllocationPaneTypes(t *testing.T) {
 	CommonE2EPrerequisites(t)
 
-	suite := NewTestSuite(t, "bulk_assign_pane_types")
-	defer suite.Teardown()
-
-	if err := suite.Setup(); err != nil {
-		t.Fatalf("[E2E-BULK-ASSIGN] Setup failed: %v", err)
+	fixture := newRobotProcessFixture(t, "bulk-pane-types")
+	panes := prepareBulkAssignAgentPanes(t, fixture, 2)
+	beads := prepareBulkAssignBeads(t, fixture, 2)
+	allocation := make(map[string]string, len(panes))
+	expected := make(map[string]tmux.Pane, len(panes))
+	for index := range panes {
+		selector := strconv.Itoa(panes[index].Index)
+		allocation[selector] = beads[index]
+		expected[beads[index]] = panes[index]
 	}
-
-	// Test with numeric string keys (which is the expected format)
-	allocation := `{"0":"bd-type0","1":"bd-type1"}`
-	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
-		"--allocation="+allocation,
-		"--dry-run")
-
-	if result == nil {
-		t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+	encoded, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatalf("[E2E-BULK-ASSIGN] marshal pane-type allocation: %v", err)
 	}
-
-	// Verify response pane identities use the canonical selector grammar.
-	for _, a := range result.Assignments {
-		if _, err := tmux.ParsePaneSelector(a.Pane); err != nil {
-			t.Fatalf("[E2E-BULK-ASSIGN] Invalid canonical pane selector %q: %v", a.Pane, err)
+	result, process := runBulkAssignFixture(t, fixture, "--allocation="+string(encoded), "--dry-run")
+	if process.exitCode != 0 || !result.Success || result.ErrorCode != "" || !result.DryRun ||
+		result.AllocationSource != "explicit" || result.Summary.TotalPanes != 2 ||
+		result.Summary.Failed != 0 || len(result.Assignments) != 2 {
+		t.Fatalf("[E2E-BULK-ASSIGN] pane-type envelope: exit=%d result=%+v", process.exitCode, result)
+	}
+	for _, assignment := range result.Assignments {
+		if _, err := tmux.ParsePaneSelector(assignment.Pane); err != nil {
+			t.Fatalf("[E2E-BULK-ASSIGN] invalid canonical pane selector %q: %v", assignment.Pane, err)
 		}
+		pane, ok := expected[assignment.Bead]
+		if !ok || assignment.Pane != strconv.Itoa(pane.Index) || assignment.PaneID != pane.ID ||
+			assignment.Status != "planned" || assignment.PromptSent || assignment.Claimed || assignment.Error != "" {
+			t.Fatalf("[E2E-BULK-ASSIGN] pane-type assignment=%+v", assignment)
+		}
+		delete(expected, assignment.Bead)
 	}
-
-	suite.Logger().Log("[E2E-BULK-ASSIGN] Pane types validated: %d assignments", len(result.Assignments))
+	if len(expected) != 0 {
+		t.Fatalf("[E2E-BULK-ASSIGN] pane-type allocation omitted mappings: %v", expected)
+	}
 }

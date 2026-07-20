@@ -206,10 +206,6 @@ func runProfileSwitch(ctx context.Context, agentID, newProfileName, sessionName,
 	return outputProfileSwitchSuccess(agentID, targetPane.ID, oldProfile, newProfile.Name)
 }
 
-func resolveProfileSwitchProjectDir(sessionName string) (string, error) {
-	return resolveProfileSwitchProjectDirContext(context.Background(), sessionName)
-}
-
 func resolveProfileSwitchProjectDirContext(ctx context.Context, sessionName string) (string, error) {
 	if ctx == nil {
 		return "", fmt.Errorf("profile switch project resolution requires a context")

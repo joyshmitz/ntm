@@ -447,9 +447,10 @@ func appendMissingRecipeAgentSpecs(agentSpecs *AgentSpecs, personaMap map[string
 		}
 
 		spec := AgentSpec{
-			Type:  agentType,
-			Count: recipeAgent.Count,
-			Model: strings.TrimSpace(recipeAgent.Model),
+			Type:            agentType,
+			Count:           recipeAgent.Count,
+			Model:           strings.TrimSpace(recipeAgent.Model),
+			ReasoningEffort: strings.TrimSpace(recipeAgent.ReasoningEffort),
 		}
 
 		personaName := strings.TrimSpace(recipeAgent.Persona)
@@ -583,28 +584,31 @@ func validateSpawnAgentTypes(agents []FlatAgent, pluginMap map[string]plugins.Ag
 // phase one. Prompt injection, assignment, persona setup, and restart require
 // authenticated TUI fixtures and therefore fail closed instead of pretending
 // to work through another provider's protocol.
-func validateGrokPhaseOneSpawn(opts SpawnOptions) error {
+func validateGrokPhaseOneSpawn(opts SpawnOptions, effectiveConfig *config.Config) error {
 	for agentOrder, spec := range opts.Agents {
 		if spec.Type != AgentTypeGrok {
 			continue
 		}
 		if opts.Prompt != "" || opts.InitPrompt != "" {
-			return errors.New("Grok Build phase-one spawn does not yet support --prompt or --init-prompt; launch with --grok and send interactively after authenticating")
+			return errors.New("phase-one Grok Build spawn does not yet support --prompt or --init-prompt; launch with --grok and send interactively after authenticating")
+		}
+		if !opts.NoCassContext && opts.CassContextQuery != "" {
+			return errors.New("phase-one Grok Build spawn does not yet support CASS context injection")
 		}
 		if _, ok := opts.MarchingOrders[agentOrder]; ok {
-			return errors.New("Grok Build phase-one spawn does not yet support marching-order prompt delivery")
+			return errors.New("phase-one Grok Build spawn does not yet support marching-order prompt delivery")
 		}
 		if opts.Assign {
-			return errors.New("Grok Build phase-one spawn does not yet support --assign")
+			return errors.New("phase-one Grok Build spawn does not yet support --assign")
 		}
-		if opts.AutoRestart {
-			return errors.New("Grok Build phase-one spawn does not yet support --auto-restart")
+		if opts.AutoRestart || (effectiveConfig != nil && effectiveConfig.Resilience.AutoRestart) {
+			return errors.New("phase-one Grok Build spawn does not yet support --auto-restart")
 		}
 		if spec.Persona != nil {
-			return errors.New("Grok Build phase-one spawn does not yet support persona prompt injection")
+			return errors.New("phase-one Grok Build spawn does not yet support persona prompt injection")
 		}
 		if profile, ok := opts.PersonaMap[spec.Model]; ok && profile != nil {
-			return errors.New("Grok Build phase-one spawn does not yet support persona prompt injection")
+			return errors.New("phase-one Grok Build spawn does not yet support persona prompt injection")
 		}
 	}
 	return nil
@@ -620,6 +624,26 @@ func validateSpawnPaneCapacity(panes []tmux.Pane, startIdx, agentCount int) erro
 			"spawn requires %d agent pane(s), but only %d are available after reserving %d user pane(s)",
 			agentCount, available, startIdx,
 		)
+	}
+	return nil
+}
+
+func validateSpawnGrokPaneBaselines(panes []tmux.Pane, startIdx int, agents []FlatAgent) error {
+	for agentOffset, launch := range agents {
+		if launch.Type != AgentTypeGrok {
+			continue
+		}
+		paneOffset := startIdx + agentOffset
+		if paneOffset < 0 || paneOffset >= len(panes) {
+			return fmt.Errorf(
+				"no assigned pane for Grok Build agent %d at offset %d",
+				launch.Index,
+				paneOffset,
+			)
+		}
+		if err := tmux.ValidatePaneLaunchBaseline(panes[paneOffset]); err != nil {
+			return fmt.Errorf("validate Grok Build agent %d: %w", launch.Index, err)
+		}
 	}
 	return nil
 }
@@ -974,6 +998,9 @@ type SpawnOptions struct {
 	AssignCodOnly      bool          // Only assign to Codex agents (alias for --assign-agent=codex)
 	AssignGmiOnly      bool          // Only assign to Gemini agents (alias for --assign-agent=gemini)
 	AssignAgyOnly      bool          // Only assign to Antigravity agents (alias for --assign-agent=antigravity)
+	// A non-nil admission means policy and the full actionable set were
+	// verified before spawn, including the valid no-work case of an empty set.
+	assignAdmission *spawnAssignmentAdmission
 
 	// Git worktree isolation configuration
 	UseWorktrees bool // Enable git worktree isolation for agents
@@ -999,6 +1026,170 @@ type SpawnOptions struct {
 
 	// Goal label for multi-session support (bd-1933u)
 	Label string
+}
+
+type spawnAssignmentAdmission struct {
+	projectDir string
+	actionable []bv.TriageRecommendation
+}
+
+type spawnAssignmentPreflightDependencies struct {
+	configurePolicy func(string) error
+	fetchActionable func(context.Context, string, int) ([]bv.TriageRecommendation, error)
+}
+
+func preflightWorktreeProject(ctx context.Context, projectDir string) error {
+	if ctx == nil {
+		return errors.New("worktree preflight requires a command context")
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("worktree preflight canceled: %w", err)
+	}
+
+	projectDir = strings.TrimSpace(projectDir)
+	if projectDir == "" {
+		return errors.New("worktree preflight requires a project directory")
+	}
+	info, err := os.Stat(projectDir)
+	if err != nil {
+		return fmt.Errorf("cannot create isolated agent worktrees: inspect project %s: %w", projectDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("cannot create isolated agent worktrees: project path is not a directory: %s", projectDir)
+	}
+
+	runGit := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", projectDir}, args...)...)
+		output, commandErr := cmd.CombinedOutput()
+		trimmedOutput := strings.TrimSpace(string(output))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return trimmedOutput, fmt.Errorf("worktree preflight canceled: %w", ctxErr)
+		}
+		return trimmedOutput, commandErr
+	}
+
+	insideWorktree, err := runGit("rev-parse", "--is-inside-work-tree")
+	if err != nil || insideWorktree != "true" {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("worktree preflight canceled: %w", ctxErr)
+		}
+		detail := insideWorktree
+		if detail == "" && err != nil {
+			detail = err.Error()
+		}
+		return fmt.Errorf(
+			"cannot create isolated agent worktrees.\n\n"+
+				"Project: %s\n"+
+				"Problem: this path is not an initialized Git working tree (%s).\n\n"+
+				"Initialize the repository and create its first commit, or rerun without --worktrees",
+			projectDir, detail,
+		)
+	}
+
+	headDetail, err := runGit("rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("worktree preflight canceled: %w", ctxErr)
+		}
+		if headDetail == "" {
+			headDetail = err.Error()
+		}
+		return fmt.Errorf(
+			"cannot create isolated agent worktrees.\n\n"+
+				"Project: %s\n"+
+				"Problem: the Git repository has no valid HEAD commit (%s).\n\n"+
+				"Create the initial commit, or rerun without --worktrees",
+			projectDir, headDetail,
+		)
+	}
+
+	return nil
+}
+
+func validateSpawnWorktreeOptions(opts SpawnOptions) error {
+	if !opts.UseWorktrees {
+		return nil
+	}
+	if opts.WorktreeName != "" && len(opts.Agents) > 1 {
+		return fmt.Errorf(
+			"--worktree-name is only valid for single-agent spawns; got %d agents",
+			len(opts.Agents),
+		)
+	}
+	return nil
+}
+
+func spawnSafetySessionExistsError(session string) error {
+	return fmt.Errorf("session '%s' already exists (--safety mode prevents reuse; use 'ntm kill %s' first)", session, session)
+}
+
+func defaultSpawnAssignmentPreflightDependencies() spawnAssignmentPreflightDependencies {
+	return spawnAssignmentPreflightDependencies{
+		configurePolicy: configureAuthoritativeAssignmentPolicy,
+		fetchActionable: bv.GetActionableRecommendationsContext,
+	}
+}
+
+func preflightSpawnAssignment(
+	ctx context.Context,
+	projectDir string,
+	timeout time.Duration,
+	deps spawnAssignmentPreflightDependencies,
+) (*spawnAssignmentAdmission, error) {
+	if ctx == nil {
+		return nil, errors.New("spawn assignment preflight requires a command context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("spawn assignment preflight canceled: %w", err)
+	}
+	projectDir = strings.TrimSpace(projectDir)
+	if projectDir == "" {
+		return nil, errors.New("spawn assignment preflight requires an authoritative project directory")
+	}
+	projectDir = filepath.Clean(projectDir)
+	if deps.configurePolicy == nil || deps.fetchActionable == nil {
+		return nil, errors.New("spawn assignment preflight dependencies are incomplete")
+	}
+	if err := deps.configurePolicy(projectDir); err != nil {
+		return nil, fmt.Errorf("spawn assignment policy preflight: %w", err)
+	}
+
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	planningCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	actionable, err := deps.fetchActionable(planningCtx, projectDir, 100)
+	if err != nil {
+		if ctxErr := planningCtx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("spawn assignment planning preflight canceled: %w", ctxErr)
+		}
+		return nil, fmt.Errorf("spawn assignment stopped because actionable work could not be verified: %w", err)
+	}
+
+	return &spawnAssignmentAdmission{
+		projectDir: projectDir,
+		actionable: cloneSpawnActionableRecommendations(actionable),
+	}, nil
+}
+
+func cloneSpawnActionableRecommendations(source []bv.TriageRecommendation) []bv.TriageRecommendation {
+	if source == nil {
+		return []bv.TriageRecommendation{}
+	}
+	cloned := make([]bv.TriageRecommendation, len(source))
+	for index, recommendation := range source {
+		recommendation.Labels = append([]string(nil), recommendation.Labels...)
+		recommendation.Reasons = append([]string(nil), recommendation.Reasons...)
+		recommendation.UnblocksIDs = append([]string(nil), recommendation.UnblocksIDs...)
+		recommendation.BlockedBy = append([]string(nil), recommendation.BlockedBy...)
+		if recommendation.Breakdown != nil {
+			breakdown := *recommendation.Breakdown
+			recommendation.Breakdown = &breakdown
+		}
+		cloned[index] = recommendation
+	}
+	return cloned
 }
 
 // RecoveryContext holds all the information needed to help an agent recover
@@ -1378,7 +1569,9 @@ Examples:
 				if err := appendMissingRecipeAgentSpecs(&agentSpecs, personaMap, r.Name, dir, r.Agents); err != nil {
 					return err
 				}
-				fmt.Printf("Using recipe '%s': %s\n", r.Name, r.Description)
+				if !IsJSONOutput() {
+					fmt.Printf("Using recipe '%s': %s\n", r.Name, r.Description)
+				}
 			}
 
 			// Handle workflow template (similar to recipe but uses workflow templates)
@@ -1711,6 +1904,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	lifecycleSessionMayExist := false
 	lifecyclePartialMutation := false
 	lifecycleAffectedPaneIDs := []string{}
+	lifecycleAffectedWorktreePaths := []string{}
 
 	// Helper for JSON error output
 	outputError := func(err error) error {
@@ -1724,6 +1918,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 				lifecyclePartialMutation,
 				lifecycleSessionMayExist,
 				lifecycleAffectedPaneIDs,
+				lifecycleAffectedWorktreePaths,
 			)
 			if encodeErr := output.PrintJSON(response); encodeErr != nil {
 				return errors.Join(fmt.Errorf("encode spawn error response: %w", encodeErr), err)
@@ -1743,15 +1938,47 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	if err := validateSpawnAgentTypes(opts.Agents, opts.PluginMap); err != nil {
 		return outputError(err)
 	}
-	if err := validateGrokPhaseOneSpawn(opts); err != nil {
-		return outputError(err)
-	}
-
-	if err := tmux.EnsureInstalled(); err != nil {
+	if err := validateGrokPhaseOneSpawn(opts, cfg); err != nil {
 		return outputError(err)
 	}
 
 	if err := tmux.ValidateSessionName(opts.Session); err != nil {
+		return outputError(err)
+	}
+
+	// Calculate total agents before external preflight so malformed spawn
+	// requests fail without consulting assignment tooling.
+	var totalAgents int
+	if len(opts.Agents) == 0 {
+		totalAgents = legacySpawnTotalAgentCount(opts)
+		if totalAgents == 0 {
+			return outputError(fmt.Errorf("no agents specified (use --cc, --cod, --gmi, --agy, --grok, --cursor, --windsurf, --aider, --ollama or plugin flags)"))
+		}
+	} else {
+		totalAgents = len(opts.Agents)
+	}
+
+	dir, err := resolveSpawnProjectDir(opts)
+	if err != nil {
+		return outputError(err)
+	}
+	if err := validateSpawnWorktreeOptions(opts); err != nil {
+		return outputError(err)
+	}
+	if opts.Assign {
+		admission, preflightErr := preflightSpawnAssignment(
+			ctx,
+			dir,
+			opts.AssignTimeout,
+			defaultSpawnAssignmentPreflightDependencies(),
+		)
+		if preflightErr != nil {
+			return outputError(preflightErr)
+		}
+		opts.assignAdmission = admission
+	}
+
+	if err := tmux.EnsureInstalled(); err != nil {
 		return outputError(err)
 	}
 
@@ -1773,7 +2000,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 			return outputError(fmt.Errorf("checking spawn safety for session %s: %w", opts.Session, err))
 		}
 		if exists {
-			return outputError(fmt.Errorf("session '%s' already exists (--safety mode prevents reuse; use 'ntm kill %s' first)", opts.Session, opts.Session))
+			return outputError(spawnSafetySessionExistsError(opts.Session))
 		}
 	}
 
@@ -1787,21 +2014,56 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		return outputError(err)
 	}
 
-	// Calculate total agents - either from Agents slice or explicit counts (legacy path)
-	var totalAgents int
-	if len(opts.Agents) == 0 {
-		totalAgents = legacySpawnTotalAgentCount(opts)
-		if totalAgents == 0 {
-			return outputError(fmt.Errorf("no agents specified (use --cc, --cod, --gmi, --agy, --grok, --cursor, --windsurf, --aider, --ollama or plugin flags)"))
+	// Complete deterministic worktree admission before running hooks. Hooks are
+	// user code and must not run when the requested checkout set is already
+	// known to be invalid. CreateForAgent repeats the mutable checks after hooks
+	// so a hook or concurrent process cannot invalidate this admission silently.
+	if _, statErr := os.Stat(dir); errors.Is(statErr, os.ErrNotExist) {
+		if opts.UseWorktrees {
+			return outputError(fmt.Errorf(
+				"cannot create isolated agent worktrees.\n\n"+
+					"Project: %s\n"+
+					"Problem: this directory does not exist (projects_base resolution may not match your intended project location).\n\n"+
+					"Worktree isolation requires an existing Git repository with at least one commit.\n\n"+
+					"Suggested remediation:\n"+
+					"  - If the project lives elsewhere, run ntm from that directory or fix projects_base in config.toml\n"+
+					"  - Otherwise create and initialize it first:\n"+
+					"      mkdir -p %s && cd %s && git init && git add . && git commit -m 'Initial commit'\n\n"+
+					"Or rerun without --worktrees", dir, dir, dir))
 		}
-	} else {
-		totalAgents = len(opts.Agents)
+		if IsJSONOutput() {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return outputError(fmt.Errorf("creating directory: %w", err))
+			}
+		} else {
+			fmt.Printf("Directory not found: %s\n", dir)
+			if !confirm("Create it?") {
+				fmt.Println("Aborted.")
+				return nil
+			}
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return outputError(fmt.Errorf("creating directory: %w", err))
+			}
+			fmt.Printf("Created %s\n", dir)
+		}
+	} else if statErr != nil {
+		return outputError(fmt.Errorf("inspect spawn project directory %s: %w", dir, statErr))
 	}
 
-	dir, err := resolveSpawnProjectDir(opts)
-	if err != nil {
-		return outputError(err)
+	var worktreeManager *worktrees.WorktreeManager
+	if opts.UseWorktrees {
+		if err := preflightWorktreeProject(ctx, dir); err != nil {
+			return outputError(err)
+		}
+		worktreeManager = worktrees.NewManager(dir, opts.Session)
+		for _, agent := range opts.Agents {
+			agentName := worktreeAgentName(agent, opts.WorktreeName)
+			if err := worktreeManager.PreflightForAgent(ctx, agentName); err != nil {
+				return outputError(fmt.Errorf("preflight worktree for agent %s: %w", agentName, err))
+			}
+		}
 	}
+
 	auditStart := time.Now()
 	auditSessionCreated := false
 	auditPanesAdded := 0
@@ -1891,23 +2153,59 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		}
 	}
 
-	// Check if directory exists
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		if IsJSONOutput() {
-			// Auto-create directory without prompting in JSON mode
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return outputError(fmt.Errorf("creating directory: %w", err))
+	steps := output.NewSteps()
+	provisionedWorktreePaths := make(map[string]string, len(opts.Agents))
+	if opts.UseWorktrees {
+		if !IsJSONOutput() {
+			steps.Start("Creating Git worktrees for agent isolation")
+		}
+		for _, agent := range opts.Agents {
+			if err := ctx.Err(); err != nil {
+				if !IsJSONOutput() {
+					steps.Fail()
+				}
+				return outputError(fmt.Errorf("worktree creation canceled: %w", err))
 			}
-		} else {
-			fmt.Printf("Directory not found: %s\n", dir)
-			if !confirm("Create it?") {
-				fmt.Println("Aborted.")
-				return nil
+			agentName := worktreeAgentName(agent, opts.WorktreeName)
+			worktreeInfo, createErr := worktreeManager.CreateForAgent(ctx, agentName)
+			if worktreeInfo != nil && worktreeInfo.Created && strings.TrimSpace(worktreeInfo.Path) != "" {
+				lifecyclePartialMutation = true
+				lifecycleAffectedWorktreePaths = append(lifecycleAffectedWorktreePaths, worktreeInfo.Path)
 			}
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return outputError(fmt.Errorf("creating directory: %w", err))
+			if createErr != nil {
+				if !IsJSONOutput() {
+					steps.Fail()
+				}
+				return outputError(fmt.Errorf("failed to create worktree for agent %s: %w", agentName, createErr))
 			}
-			fmt.Printf("Created %s\n", dir)
+			if worktreeInfo == nil || strings.TrimSpace(worktreeInfo.Path) == "" {
+				return outputError(fmt.Errorf("failed to create worktree for agent %s: manager returned no path", agentName))
+			}
+			provisionedWorktreePaths[agentName] = worktreeInfo.Path
+		}
+		// Revalidate the complete provisioned set before any tmux lifecycle
+		// operation. This catches wrappers, hooks, or concurrent actors that
+		// leave a checkout detached, stale, or on the wrong branch.
+		for _, agent := range opts.Agents {
+			agentName := worktreeAgentName(agent, opts.WorktreeName)
+			worktreeInfo, lookupErr := worktreeManager.GetWorktreeForAgent(ctx, agentName)
+			if lookupErr != nil {
+				return outputError(fmt.Errorf("validate provisioned worktree for agent %s: %w", agentName, lookupErr))
+			}
+			expectedPath := provisionedWorktreePaths[agentName]
+			if worktreeInfo == nil || !worktreeInfo.Created || worktreeInfo.Error != "" || worktreeInfo.Path != expectedPath {
+				detail := "manager returned no worktree"
+				if worktreeInfo != nil {
+					detail = worktreeInfo.Error
+					if detail == "" {
+						detail = fmt.Sprintf("path %q does not match provisioned path %q", worktreeInfo.Path, expectedPath)
+					}
+				}
+				return outputError(fmt.Errorf("validate provisioned worktree for agent %s: %s", agentName, detail))
+			}
+		}
+		if !IsJSONOutput() {
+			steps.Done()
 		}
 	}
 
@@ -1917,11 +2215,15 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		totalPanes++
 	}
 
-	// Create or use existing session
-	steps := output.NewSteps()
+	// Create or use existing session only after every requested worktree is
+	// ready. A worktree failure must not leave a partially created tmux session.
 	sessionExists, err := tmux.SessionExistsContext(ctx, opts.Session)
 	if err != nil {
 		return outputError(fmt.Errorf("checking spawn session %s: %w", opts.Session, err))
+	}
+	if opts.Safety && sessionExists {
+		lifecycleSessionMayExist = true
+		return outputError(spawnSafetySessionExistsError(opts.Session))
 	}
 	if !sessionExists {
 		if !IsJSONOutput() {
@@ -1974,38 +2276,6 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 			}
 		}
 		return nil, lastErr
-	}
-
-	// Create worktrees if enabled
-	var worktreeManager *worktrees.WorktreeManager
-	if opts.UseWorktrees {
-		worktreeManager = worktrees.NewManager(dir, opts.Session)
-		// Reject `--worktree-name` for multi-agent spawns: it can't serve
-		// every agent without collapsing the isolation contract. See ntm#145.
-		if opts.WorktreeName != "" && len(opts.Agents) > 1 {
-			return outputError(fmt.Errorf(
-				"--worktree-name is only valid for single-agent spawns; got %d agents",
-				len(opts.Agents),
-			))
-		}
-		if !IsJSONOutput() {
-			steps.Start("Creating Git worktrees for agent isolation")
-		}
-
-		// Create worktree for each agent
-		for _, agent := range opts.Agents {
-			agentName := worktreeAgentName(agent, opts.WorktreeName)
-			if _, err := worktreeManager.CreateForAgent(agentName); err != nil {
-				if !IsJSONOutput() {
-					steps.Fail()
-				}
-				return outputError(fmt.Errorf("failed to create worktree for agent %s: %w", agentName, err))
-			}
-		}
-
-		if !IsJSONOutput() {
-			steps.Done()
-		}
 	}
 
 	// Get current pane count
@@ -2103,6 +2373,9 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	if err := validateSpawnPaneCapacity(panes, startIdx, len(opts.Agents)); err != nil {
 		return outputError(err)
 	}
+	if err := validateSpawnGrokPaneBaselines(panes, startIdx, opts.Agents); err != nil {
+		return outputError(fmt.Errorf("validating Grok Build launch panes: %w", err))
+	}
 
 	agentNum := startIdx
 	if !IsJSONOutput() {
@@ -2138,7 +2411,8 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	var setupWg sync.WaitGroup
 	var maxStaggerDelay time.Duration
 	setupCtx, cancelSetup := context.WithCancel(ctx)
-	defer cancelAndJoinSpawnPromptWorkers(cancelSetup, &setupWg)
+	defer setupWg.Wait()
+	defer cancelSetup()
 	spawnObserver := newSpawnSessionObserver()
 	spawnDispatcher := newCanonicalSpawnPromptDispatcher(opts.Session, spawnObserver)
 	var setupErrorsMu sync.Mutex
@@ -2187,7 +2461,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 
 	// Resolve CASS context if enabled
 	var cassContext string
-	if !opts.NoCassContext && cfg.CASS.Context.Enabled {
+	if !opts.NoCassContext && cfg.CASS.Context.Enabled && spawnHasAutomatedPromptDeliveryTarget(opts.Agents) {
 		query := opts.CassContextQuery
 		if query == "" {
 			query = opts.Prompt // Use prompt if available
@@ -2212,7 +2486,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	// Note: rc is kept as a pointer so we can format per-agent-type in the goroutines
 	// Gated by --no-recovery flag (independent of --no-cass-context)
 	var rc *RecoveryContext
-	recoveryEnabled := !opts.NoRecovery && cfg.SessionRecovery.Enabled && cfg.SessionRecovery.AutoInjectOnSpawn
+	recoveryEnabled := !opts.NoRecovery && cfg.SessionRecovery.Enabled && cfg.SessionRecovery.AutoInjectOnSpawn && spawnHasAutomatedPromptDeliveryTarget(opts.Agents)
 	if recoveryEnabled {
 		recoveryCtx, cancelCtx := context.WithTimeout(ctx, 5*time.Second)
 		var recoveryErr error
@@ -2244,6 +2518,11 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		}
 
 		pane := panes[agentNum]
+		if agent.Type == AgentTypeGrok {
+			if err := tmux.ValidatePaneLaunchBaseline(pane); err != nil {
+				return outputError(fmt.Errorf("launching %s agent: %w", agent.Type, err))
+			}
+		}
 
 		if testPacing.agentDelay > 0 && staggerAgentIdx > 0 {
 			if err := waitContextDelay(ctx, testPacing.agentDelay); err != nil {
@@ -2508,15 +2787,6 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 			return outputError(fmt.Errorf("invalid %s agent command: %w", agent.Type, err))
 		}
 
-		// Use worktree directory if worktree isolation is enabled
-		workingDir := dir
-		if opts.UseWorktrees && worktreeManager != nil {
-			agentName := worktreeAgentName(agent, opts.WorktreeName)
-			if wtInfo, err := worktreeManager.GetWorktreeForAgent(agentName); err == nil && wtInfo.Created && wtInfo.Error == "" {
-				workingDir = wtInfo.Path
-			}
-		}
-
 		if agent.Type == AgentTypeCodex {
 			var cooldown time.Duration
 			cooldown, openAICooldownWaited = codexCooldownRemaining(rateLimitTracker, openAICooldownWaited)
@@ -2533,6 +2803,36 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 			return outputError(fmt.Errorf("spawn canceled before launching agent %d: %w", agent.Index, err))
 		}
 
+		// Resolve the launch directory at the final command-construction
+		// boundary. Worktree isolation must never degrade to the shared project
+		// directory when a checkout disappears, detaches, or changes branch.
+		workingDir := dir
+		if opts.UseWorktrees {
+			if worktreeManager == nil {
+				return outputError(fmt.Errorf("building %s agent command: worktree manager is unavailable", agent.Type))
+			}
+			agentName := worktreeAgentName(agent, opts.WorktreeName)
+			expectedPath, provisioned := provisionedWorktreePaths[agentName]
+			if !provisioned || strings.TrimSpace(expectedPath) == "" {
+				return outputError(fmt.Errorf("building %s agent command: no provisioned worktree for agent %s", agent.Type, agentName))
+			}
+			worktreeInfo, lookupErr := worktreeManager.GetWorktreeForAgent(ctx, agentName)
+			if lookupErr != nil {
+				return outputError(fmt.Errorf("building %s agent command: validate worktree for agent %s: %w", agent.Type, agentName, lookupErr))
+			}
+			if worktreeInfo == nil || !worktreeInfo.Created || worktreeInfo.Error != "" || worktreeInfo.Path != expectedPath {
+				detail := "manager returned no worktree"
+				if worktreeInfo != nil {
+					detail = worktreeInfo.Error
+					if detail == "" {
+						detail = fmt.Sprintf("path %q does not match provisioned path %q", worktreeInfo.Path, expectedPath)
+					}
+				}
+				return outputError(fmt.Errorf("building %s agent command: worktree for agent %s is not launchable: %s", agent.Type, agentName, detail))
+			}
+			workingDir = expectedPath
+		}
+
 		cmd, err := tmux.BuildPaneCommand(workingDir, safeAgentCmd)
 		if err != nil {
 			return outputError(fmt.Errorf("building %s agent command: %w", agent.Type, err))
@@ -2547,6 +2847,14 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 				launchErr = newPromptSendFailure(fmt.Errorf("sending persona/profile %s launch prompt: %w", personaName, launchErr))
 			}
 			return outputError(launchErr)
+		}
+		if agent.Type == AgentTypeGrok {
+			if _, err := tmux.WaitForPaneProcessStartContext(ctx, opts.Session, pane.ID); err != nil {
+				return outputError(fmt.Errorf(
+					"launching %s agent in pane %s did not start a stable process: %w",
+					agent.Type, pane.ID, err,
+				))
+			}
 		}
 		if rateLimitTracker != nil && agent.Type == AgentTypeCodex {
 			rateLimitTracker.RecordSuccess("openai")
@@ -2615,7 +2923,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 			if isStaggered && panePrompt != "" {
 				userDelay = promptDelay
 			}
-			promptSteps := buildSpawnPromptSequence(cassContext, recoveryPrompt, panePrompt, userDelay)
+			promptSteps := buildSpawnPromptSequenceForAgent(agentType, cassContext, recoveryPrompt, panePrompt, userDelay)
 			if isStaggered {
 				for stepIndex := range promptSteps {
 					if promptSteps[stepIndex].Kind == "user_prompt" {
@@ -2883,7 +3191,20 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	}
 
 	// Emit analytics events (JSONL) for session creation and agent spawns.
-	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, opts.AgyCount, opts.GrokCount, opts.CursorCount, opts.WindsurfCount, opts.AiderCount, opts.OpencodeCount, opts.OllamaCount, dir, opts.RecipeName)
+	events.EmitSessionCreate(opts.Session, events.SessionCreateData{
+		ClaudeCount:      opts.CCCount,
+		CodexCount:       opts.CodCount,
+		GeminiCount:      opts.GmiCount,
+		AntigravityCount: opts.AgyCount,
+		GrokCount:        opts.GrokCount,
+		CursorCount:      opts.CursorCount,
+		WindsurfCount:    opts.WindsurfCount,
+		AiderCount:       opts.AiderCount,
+		OpencodeCount:    opts.OpencodeCount,
+		OllamaCount:      opts.OllamaCount,
+		WorkDir:          dir,
+		Recipe:           opts.RecipeName,
+	})
 	for _, agent := range launchedAgents {
 		events.Emit(events.EventAgentSpawn, opts.Session, events.AgentSpawnData{
 			AgentType: agent.agentType,
@@ -3258,6 +3579,22 @@ func spawnHasPromptDelivery(opts SpawnOptions) bool {
 	return false
 }
 
+func spawnHasAutomatedPromptDeliveryTarget(agents []FlatAgent) bool {
+	for _, spec := range agents {
+		if err := agentpkg.AgentType(spec.Type).ValidateAutomatedPromptDelivery(); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func buildSpawnPromptSequenceForAgent(agentType AgentType, cassContext, recoveryPrompt, userPrompt string, userDelay time.Duration) []spawnPromptStep {
+	if err := agentpkg.AgentType(agentType).ValidateAutomatedPromptDelivery(); err != nil {
+		return []spawnPromptStep{}
+	}
+	return buildSpawnPromptSequence(cassContext, recoveryPrompt, userPrompt, userDelay)
+}
+
 func buildSpawnPromptSequence(cassContext, recoveryPrompt, userPrompt string, userDelay time.Duration) []spawnPromptStep {
 	steps := make([]spawnPromptStep, 0, 3)
 	if userPrompt == "" && cassContext != "" {
@@ -3399,15 +3736,6 @@ func waitForSpawnSetupCompletionContext(ctx context.Context, setupDone <-chan st
 		return errors.New("spawn interrupted before all prompts were delivered")
 	case <-ctx.Done():
 		return fmt.Errorf("spawn canceled before all prompts were delivered: %w", ctx.Err())
-	}
-}
-
-func cancelAndJoinSpawnPromptWorkers(cancelSetup context.CancelFunc, setupWg *sync.WaitGroup) {
-	if cancelSetup != nil {
-		cancelSetup()
-	}
-	if setupWg != nil {
-		setupWg.Wait()
 	}
 }
 
@@ -5318,13 +5646,7 @@ func spawnPaneObservationSafeToDispatch(pane statuspkg.PaneObservation) bool {
 }
 
 func spawnPaneCommandIsShell(command string) bool {
-	command = strings.ToLower(filepath.Base(strings.TrimSpace(command)))
-	switch command {
-	case "sh", "bash", "dash", "zsh", "fish", "ksh", "csh", "tcsh", "nu", "pwsh", "powershell":
-		return true
-	default:
-		return false
-	}
+	return tmux.PaneCommandIsShell(command)
 }
 
 func waitUntilNextSpawnPoll(ctx context.Context, deadline time.Time, pollInterval time.Duration) error {
@@ -5395,15 +5717,7 @@ func runAssignmentPhaseContext(ctx context.Context, session string, opts SpawnOp
 		timeout = 30 * time.Second
 	}
 
-	assignOpts := &AssignCommandOptions{
-		Session:         session,
-		Strategy:        opts.AssignStrategy,
-		Limit:           opts.AssignLimit,
-		AgentTypeFilter: opts.AssignAgentType,
-		Verbose:         verbose,
-		Quiet:           quiet,
-		Timeout:         timeout,
-	}
+	assignOpts := spawnAssignCommandOptions(session, opts, verbose, quiet, timeout)
 
 	// Get assignment recommendations
 	assignOutput, err := getAssignOutputEnhanced(ctx, assignOpts)
@@ -5417,4 +5731,23 @@ func runAssignmentPhaseContext(ctx context.Context, session string, opts SpawnOp
 	}
 
 	return assignOutput, nil
+}
+
+func spawnAssignCommandOptions(session string, opts SpawnOptions, verbose, quiet bool, timeout time.Duration) *AssignCommandOptions {
+	assignOpts := &AssignCommandOptions{
+		Session:         session,
+		Strategy:        opts.AssignStrategy,
+		Limit:           opts.AssignLimit,
+		AgentTypeFilter: opts.AssignAgentType,
+		Verbose:         verbose,
+		Quiet:           quiet,
+		Timeout:         timeout,
+	}
+	if opts.assignAdmission != nil {
+		assignOpts.ProjectDir = opts.assignAdmission.projectDir
+		assignOpts.policyProject = opts.assignAdmission.projectDir
+		assignOpts.actionablePreflightVerified = true
+		assignOpts.verifiedActionable = cloneSpawnActionableRecommendations(opts.assignAdmission.actionable)
+	}
+	return assignOpts
 }

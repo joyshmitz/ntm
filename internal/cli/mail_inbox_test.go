@@ -20,15 +20,29 @@ import (
 
 // MockMailClient implements MailClient interface for testing
 type MockMailClient struct {
-	Available     bool
-	ProjKey       string
-	Agents        []agentmail.Agent
-	Inboxes       map[string][]agentmail.InboxMessage
-	ListAgentsErr error
-	FetchInboxErr error
+	Available           bool
+	AvailabilityStarted chan<- struct{}
+	ProjKey             string
+	Agents              []agentmail.Agent
+	Inboxes             map[string][]agentmail.InboxMessage
+	ListAgentsErr       error
+	FetchInboxErr       error
+	ListAgentsCalls     int
 }
 
-func (m *MockMailClient) IsAvailable() bool {
+func (m *MockMailClient) IsAvailableContext(ctx context.Context) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	if m.AvailabilityStarted != nil {
+		select {
+		case m.AvailabilityStarted <- struct{}{}:
+		case <-ctx.Done():
+			return false
+		}
+		<-ctx.Done()
+		return false
+	}
 	return m.Available
 }
 
@@ -37,6 +51,7 @@ func (m *MockMailClient) ProjectKey() string {
 }
 
 func (m *MockMailClient) ListProjectAgents(ctx context.Context, projectKey string) ([]agentmail.Agent, error) {
+	m.ListAgentsCalls++
 	if m.ListAgentsErr != nil {
 		return nil, m.ListAgentsErr
 	}
@@ -184,6 +199,7 @@ func TestRunMailInbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := &cobra.Command{}
+			cmd.SetContext(t.Context())
 			var buf bytes.Buffer
 			cmd.SetOut(&buf)
 
@@ -217,6 +233,72 @@ func TestRunMailInbox(t *testing.T) {
 	}
 }
 
+func TestRunMailInboxRejectsMissingOrCanceledContext(t *testing.T) {
+	client := &MockMailClient{Available: false}
+
+	t.Run("nil command", func(t *testing.T) {
+		err := runMailInbox(nil, client, "", false, "", false, 10, false)
+		if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+			t.Fatalf("runMailInbox() error = %v, want missing context error", err)
+		}
+	})
+
+	t.Run("nil context", func(t *testing.T) {
+		err := runMailInbox(&cobra.Command{}, client, "", false, "", false, 10, false)
+		if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+			t.Fatalf("runMailInbox() error = %v, want missing context error", err)
+		}
+	})
+
+	t.Run("pre-canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		cmd := &cobra.Command{}
+		cmd.SetContext(ctx)
+		err := runMailInbox(cmd, client, "", false, "", false, 10, false)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runMailInbox() error = %v, want context.Canceled", err)
+		}
+	})
+}
+
+func TestRunMailInboxCancelsDuringAvailabilityProbe(t *testing.T) {
+	started := make(chan struct{})
+	client := &MockMailClient{Available: true, AvailabilityStarted: started}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	result := make(chan error, 1)
+	go func() {
+		result <- runMailInbox(cmd, client, "", false, "", false, 10, false)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("availability probe did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runMailInbox() error=%v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runMailInbox() did not stop after availability cancellation")
+	}
+	if client.ListAgentsCalls != 0 {
+		t.Fatalf("ListProjectAgents called after canceled availability probe: %d", client.ListAgentsCalls)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("output=%q, want none after cancellation", output.String())
+	}
+}
+
 func TestRunMailInboxJSONEmptyArray(t *testing.T) {
 	client := &MockMailClient{
 		Available: true,
@@ -224,6 +306,7 @@ func TestRunMailInboxJSONEmptyArray(t *testing.T) {
 		Inboxes:   map[string][]agentmail.InboxMessage{},
 	}
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	var output bytes.Buffer
 	cmd.SetOut(&output)
 
@@ -286,6 +369,7 @@ func TestRunMailInboxSessionAgentsUsesSavedRegistryIdentity(t *testing.T) {
 	}
 
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 

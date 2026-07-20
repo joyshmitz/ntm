@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/cass"
@@ -54,6 +56,88 @@ func newTestModel(width int) Model {
 		ContextLimit:   1000,
 	}
 	return m
+}
+
+type dashboardReplayTestClient struct {
+	panes       []tmux.Pane
+	getErr      error
+	getCalls    int
+	sentTargets []string
+}
+
+func (c *dashboardReplayTestClient) GetPanes(string) ([]tmux.Pane, error) {
+	c.getCalls++
+	return append([]tmux.Pane(nil), c.panes...), c.getErr
+}
+
+func (c *dashboardReplayTestClient) SendKeys(target string, _ string, _ bool) error {
+	c.sentTargets = append(c.sentTargets, target)
+	return nil
+}
+
+func TestDashboardHistoryReplayRejectsMixedGrokBatchBeforeSend(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	m := New("replay-grok", "")
+	client := &dashboardReplayTestClient{panes: []tmux.Pane{
+		{ID: "%1", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude},
+		{ID: "%2", WindowIndex: 0, Index: 2, Type: tmux.AgentType("grok-build")},
+	}}
+	entry := history.HistoryEntry{
+		Targets: []string{"1", "2"},
+		Prompt:  "do not deliver",
+	}
+
+	msg := m.executeReplayWithClient(entry, client)()
+	result, ok := msg.(dashboardReplayResultMsg)
+	if !ok {
+		t.Fatalf("executeReplayWithClient() message = %T, want dashboardReplayResultMsg", msg)
+	}
+	if !errors.Is(result.Err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		t.Fatalf("executeReplayWithClient() error = %v, want Grok prompt-delivery sentinel", result.Err)
+	}
+	if client.getCalls != 1 || len(client.sentTargets) != 0 {
+		t.Fatalf("replay client calls = get:%d targets:%v, want get:1 targets:[]", client.getCalls, client.sentTargets)
+	}
+	if _, err := os.Stat(history.StoragePath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsupported replay mutated history storage: stat error = %v", err)
+	}
+
+	updated, _ := m.Update(result)
+	next := updated.(Model)
+	if !strings.Contains(next.healthMessage, agent.GrokPromptDeliveryCapabilityHint) {
+		t.Fatalf("dashboard replay message = %q, want unsupported Grok hint", next.healthMessage)
+	}
+}
+
+func TestDashboardHistoryReplaySendsResolvedStablePaneIDs(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	m := New("replay-resolved", "")
+	client := &dashboardReplayTestClient{panes: []tmux.Pane{
+		{ID: "%11", WindowIndex: 3, Index: 1, Type: tmux.AgentClaude},
+		{ID: "%22", WindowIndex: 8, Index: 2, Type: tmux.AgentCodex},
+	}}
+	entry := history.HistoryEntry{
+		Targets: []string{"3.1", "%22"},
+		Prompt:  "deliver to resolved panes",
+	}
+
+	msg := m.executeReplayWithClient(entry, client)()
+	result, ok := msg.(dashboardReplayResultMsg)
+	if !ok {
+		t.Fatalf("executeReplayWithClient() message = %T, want dashboardReplayResultMsg", msg)
+	}
+	if result.Err != nil {
+		t.Fatalf("executeReplayWithClient() error = %v", result.Err)
+	}
+	if client.getCalls != 1 {
+		t.Fatalf("GetPanes calls = %d, want 1", client.getCalls)
+	}
+	wantTargets := []string{"%11", "%22"}
+	if !reflect.DeepEqual(client.sentTargets, wantTargets) {
+		t.Fatalf("replay send targets = %v, want resolved IDs %v", client.sentTargets, wantTargets)
+	}
 }
 
 func maxRenderedLineWidth(s string) int {
@@ -3237,8 +3321,13 @@ func TestAgentBorderColor(t *testing.T) {
 		string(tmux.AgentClaude),
 		string(tmux.AgentCodex),
 		string(tmux.AgentGemini),
+		string(tmux.AgentGrok),
 		string(tmux.AgentUser),
 		"unknown",
+	}
+
+	if got := AgentBorderColor(string(tmux.AgentGrok), m.theme); got != m.theme.Pink {
+		t.Errorf("AgentBorderColor(%q) = %q, want Grok pink %q", tmux.AgentGrok, got, m.theme.Pink)
 	}
 
 	for _, agentType := range types {
@@ -3253,6 +3342,7 @@ func TestAgentBorderColor(t *testing.T) {
 		{"claude_code", string(tmux.AgentClaude)},
 		{"openai-codex", string(tmux.AgentCodex)},
 		{"google-gemini", string(tmux.AgentGemini)},
+		{"grok-build", string(tmux.AgentGrok)},
 		{"ws", string(tmux.AgentWindsurf)},
 	}
 
@@ -3273,6 +3363,7 @@ func TestAgentRowTypePresentation_CanonicalizesAliases(t *testing.T) {
 		{"claude_code", string(tmux.AgentClaude)},
 		{"openai-codex", string(tmux.AgentCodex)},
 		{"google-gemini", string(tmux.AgentGemini)},
+		{"grok-build", string(tmux.AgentGrok)},
 	}
 
 	for _, pair := range aliasPairs {
@@ -3282,6 +3373,18 @@ func TestAgentRowTypePresentation_CanonicalizesAliases(t *testing.T) {
 			t.Errorf("agentRowTypePresentation(%q) = (%q, %q), want same presentation as %q (%q, %q)",
 				pair[0], gotColor, gotIcon, pair[1], wantColor, wantIcon)
 		}
+	}
+}
+
+func TestAgentRowTypePresentation_Grok(t *testing.T) {
+	m := newTestModel(120)
+
+	gotColor, gotIcon := agentRowTypePresentation(string(tmux.AgentGrok), m.theme)
+	if gotColor != m.theme.Pink {
+		t.Errorf("agentRowTypePresentation(%q) color = %q, want %q", tmux.AgentGrok, gotColor, m.theme.Pink)
+	}
+	if gotIcon != "󰚩" {
+		t.Errorf("agentRowTypePresentation(%q) icon = %q, want robot glyph", tmux.AgentGrok, gotIcon)
 	}
 }
 
@@ -3318,6 +3421,7 @@ func TestAgentBorderStyle(t *testing.T) {
 		string(tmux.AgentClaude),
 		string(tmux.AgentCodex),
 		string(tmux.AgentGemini),
+		string(tmux.AgentGrok),
 		string(tmux.AgentUser),
 	}
 
@@ -3346,6 +3450,7 @@ func TestAgentPanelStyles(t *testing.T) {
 		string(tmux.AgentClaude),
 		string(tmux.AgentCodex),
 		string(tmux.AgentGemini),
+		string(tmux.AgentGrok),
 		string(tmux.AgentUser),
 	}
 
@@ -3637,7 +3742,7 @@ func TestFleetCount_Consistent(t *testing.T) {
 	}
 
 	// Verify agent type counts sum correctly
-	sumAgentTypes := m.claudeCount + m.codexCount + m.geminiCount + m.cursorCount + m.windsurfCount + m.aiderCount + m.ollamaCount + m.userCount
+	sumAgentTypes := m.claudeCount + m.codexCount + m.geminiCount + m.grokCount + m.cursorCount + m.windsurfCount + m.aiderCount + m.ollamaCount + m.userCount
 	if sumAgentTypes != totalPanes {
 		t.Errorf("agent type counts (%d) should equal total panes (%d)", sumAgentTypes, totalPanes)
 	}
@@ -3731,16 +3836,18 @@ func TestFleetCount_AgentTypesSumCorrectly(t *testing.T) {
 		claudeCount   int
 		codexCount    int
 		geminiCount   int
+		grokCount     int
 		cursorCount   int
 		windsurfCount int
 		aiderCount    int
 		ollamaCount   int
 		userCount     int
 	}{
-		{"all_claude", 5, 0, 0, 0, 0, 0, 0, 0},
-		{"mixed_agents", 2, 2, 1, 1, 1, 1, 1, 1},
-		{"all_user", 0, 0, 0, 0, 0, 0, 0, 4},
-		{"empty", 0, 0, 0, 0, 0, 0, 0, 0},
+		{"all_claude", 5, 0, 0, 0, 0, 0, 0, 0, 0},
+		{"all_grok", 0, 0, 0, 4, 0, 0, 0, 0, 0},
+		{"mixed_agents", 2, 2, 1, 1, 1, 1, 1, 1, 1},
+		{"all_user", 0, 0, 0, 0, 0, 0, 0, 0, 4},
+		{"empty", 0, 0, 0, 0, 0, 0, 0, 0, 0},
 	}
 
 	for _, tc := range tests {
@@ -3770,6 +3877,13 @@ func TestFleetCount_AgentTypesSumCorrectly(t *testing.T) {
 			for i := 0; i < tc.geminiCount; i++ {
 				m.panes = append(m.panes, tmux.Pane{
 					ID: fmt.Sprintf("%d", idx), Index: idx, Type: tmux.AgentGemini,
+				})
+				idx++
+			}
+			// Add Grok panes
+			for i := 0; i < tc.grokCount; i++ {
+				m.panes = append(m.panes, tmux.Pane{
+					ID: fmt.Sprintf("%d", idx), Index: idx, Type: tmux.AgentType("grok-build"),
 				})
 				idx++
 			}
@@ -3811,12 +3925,15 @@ func TestFleetCount_AgentTypesSumCorrectly(t *testing.T) {
 
 			m.updateStats()
 
-			expectedTotal := tc.claudeCount + tc.codexCount + tc.geminiCount + tc.cursorCount + tc.windsurfCount + tc.aiderCount + tc.ollamaCount + tc.userCount
-			actualSum := m.claudeCount + m.codexCount + m.geminiCount + m.cursorCount + m.windsurfCount + m.aiderCount + m.ollamaCount + m.userCount
+			expectedTotal := tc.claudeCount + tc.codexCount + tc.geminiCount + tc.grokCount + tc.cursorCount + tc.windsurfCount + tc.aiderCount + tc.ollamaCount + tc.userCount
+			actualSum := m.claudeCount + m.codexCount + m.geminiCount + m.grokCount + m.cursorCount + m.windsurfCount + m.aiderCount + m.ollamaCount + m.userCount
 
 			if actualSum != expectedTotal {
-				t.Errorf("expected sum %d, got %d (claude=%d codex=%d gemini=%d cursor=%d windsurf=%d aider=%d ollama=%d user=%d)",
-					expectedTotal, actualSum, m.claudeCount, m.codexCount, m.geminiCount, m.cursorCount, m.windsurfCount, m.aiderCount, m.ollamaCount, m.userCount)
+				t.Errorf("expected sum %d, got %d (claude=%d codex=%d gemini=%d grok=%d cursor=%d windsurf=%d aider=%d ollama=%d user=%d)",
+					expectedTotal, actualSum, m.claudeCount, m.codexCount, m.geminiCount, m.grokCount, m.cursorCount, m.windsurfCount, m.aiderCount, m.ollamaCount, m.userCount)
+			}
+			if m.grokCount != tc.grokCount {
+				t.Errorf("grokCount = %d, want %d", m.grokCount, tc.grokCount)
 			}
 			if m.ollamaCount != tc.ollamaCount {
 				t.Errorf("ollamaCount = %d, want %d", m.ollamaCount, tc.ollamaCount)

@@ -187,8 +187,12 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 	if format == "json" && fromFile == "" && !auto && (goal == "" || now == "") {
 		return fmt.Errorf("invalid argument: JSON handoff creation requires --goal and --now, --auto, or --from-file")
 	}
+	parent, err := requireHandoffCommandContext(cmd, "create")
+	if err != nil {
+		return err
+	}
 
-	projectDir, err := resolveWorkspaceBackedHandoffProjectDir(sessionName)
+	projectDir, err := resolveWorkspaceBackedHandoffProjectDir(parent, sessionName)
 	if err != nil {
 		return err
 	}
@@ -224,8 +228,11 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 		if sessionName == "" {
 			sessionName = "general"
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 		defer cancel()
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("auto-generation failed: %w", err)
+		}
 
 		agentName := ""
 		if sessionName != "" && sessionName != "general" {
@@ -250,6 +257,9 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 			TransferGraceSeconds: 2,
 		}
 		h, err = generator.GenerateHandoff(ctx, opts)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("auto-generation failed: %w", ctxErr)
+		}
 		if err != nil {
 			return fmt.Errorf("auto-generation failed: %w", err)
 		}
@@ -275,10 +285,16 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 
 		// Enrich with git state if requested
 		if includeGit {
-			if err := generator.EnrichWithGitState(h); err != nil {
+			if err := generator.EnrichWithGitState(parent, h); err != nil {
+				if ctxErr := parent.Err(); ctxErr != nil {
+					return fmt.Errorf("git enrichment failed: %w", ctxErr)
+				}
 				slog.Warn("git enrichment failed", "error", err)
 			}
 		}
+	}
+	if err := requireLiveHandoffContext(parent, "create"); err != nil {
+		return err
 	}
 
 	// Validate
@@ -288,6 +304,9 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 
 	// Handle output to stdout
 	if output == "-" {
+		if err := requireLiveHandoffContext(parent, "create"); err != nil {
+			return err
+		}
 		return outputHandoffToStdout(cmd, h, format)
 	}
 
@@ -297,6 +316,9 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 	}
 
 	// Write handoff to file
+	if err := requireLiveHandoffContext(parent, "create"); err != nil {
+		return err
+	}
 	var path string
 	if output != "" {
 		// Write to specified path
@@ -348,8 +370,12 @@ func runHandoffLedger(cmd *cobra.Command, sessionName string, jsonFormat bool) e
 	if err != nil {
 		return err
 	}
+	ctx, err := requireHandoffCommandContext(cmd, "ledger")
+	if err != nil {
+		return err
+	}
 
-	projectDir, err := resolveWorkspaceBackedHandoffProjectDir(sessionName)
+	projectDir, err := resolveWorkspaceBackedHandoffProjectDir(ctx, sessionName)
 	if err != nil {
 		return err
 	}
@@ -361,6 +387,9 @@ func runHandoffLedger(cmd *cobra.Command, sessionName string, jsonFormat bool) e
 			return fmt.Errorf("no continuity ledger found for session: %s", sessionName)
 		}
 		return fmt.Errorf("read ledger: %w", err)
+	}
+	if err := requireLiveHandoffContext(ctx, "ledger"); err != nil {
+		return err
 	}
 
 	if jsonFormat {
@@ -547,8 +576,12 @@ func runHandoffList(cmd *cobra.Command, sessionName string, limit int, jsonForma
 		}
 		sessionName = normalizedSession
 	}
+	ctx, err := requireHandoffCommandContext(cmd, "list")
+	if err != nil {
+		return err
+	}
 
-	projectDir, err := resolveWorkspaceBackedHandoffProjectDir(sessionName)
+	projectDir, err := resolveWorkspaceBackedHandoffProjectDir(ctx, sessionName)
 	if err != nil {
 		return err
 	}
@@ -565,6 +598,9 @@ func runHandoffList(cmd *cobra.Command, sessionName string, limit int, jsonForma
 		sessions, err := reader.ListSessions()
 		if err != nil {
 			return fmt.Errorf("failed to list sessions: %w", err)
+		}
+		if err := requireLiveHandoffContext(ctx, "list"); err != nil {
+			return err
 		}
 
 		if jsonFormat {
@@ -590,6 +626,9 @@ func runHandoffList(cmd *cobra.Command, sessionName string, limit int, jsonForma
 	metas, err := reader.ListHandoffs(sessionName)
 	if err != nil {
 		return fmt.Errorf("failed to list handoffs: %w", err)
+	}
+	if err := requireLiveHandoffContext(ctx, "list"); err != nil {
+		return err
 	}
 
 	if len(metas) > limit && limit > 0 {
@@ -648,6 +687,10 @@ func runHandoffShow(cmd *cobra.Command, path string, jsonFormat bool) error {
 	if IsJSONOutput() {
 		jsonFormat = true
 	}
+	ctx, err := requireHandoffCommandContext(cmd, "show")
+	if err != nil {
+		return err
+	}
 
 	// Handle relative paths
 	if !filepath.IsAbs(path) {
@@ -663,6 +706,9 @@ func runHandoffShow(cmd *cobra.Command, path string, jsonFormat bool) error {
 	h, err := reader.Read(path)
 	if err != nil {
 		return fmt.Errorf("failed to read handoff: %w", err)
+	}
+	if err := requireLiveHandoffContext(ctx, "show"); err != nil {
+		return err
 	}
 
 	slog.Debug("handoff show",
@@ -818,7 +864,10 @@ func normalizeHandoffSession(sessionName string) (string, error) {
 	return sessionName, nil
 }
 
-func resolveHandoffProjectDir(sessionName string) (string, error) {
+func resolveHandoffProjectDir(ctx context.Context, sessionName string) (string, error) {
+	if err := requireLiveHandoffContext(ctx, "project resolution"); err != nil {
+		return "", err
+	}
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" || sessionName == "general" {
 		projectDir := GetProjectRoot()
@@ -827,12 +876,12 @@ func resolveHandoffProjectDir(sessionName string) (string, error) {
 		}
 		return projectDir, nil
 	}
-	resolved, err := normalizeProjectScopedSessionName(sessionName, !IsJSONOutput())
+	resolved, err := normalizeProjectScopedSessionName(ctx, sessionName, !IsJSONOutput())
 	if err != nil {
 		return "", err
 	}
 	sessionName = resolved
-	projectDir, err := resolveExplicitProjectDirForSession(sessionName)
+	projectDir, err := resolveExplicitProjectDirForSessionContext(ctx, sessionName)
 	if err != nil {
 		return "", err
 	}
@@ -840,8 +889,29 @@ func resolveHandoffProjectDir(sessionName string) (string, error) {
 	return projectDir, nil
 }
 
-func resolveWorkspaceBackedHandoffProjectDir(sessionName string) (string, error) {
-	projectDir, err := resolveHandoffProjectDir(sessionName)
+func requireHandoffCommandContext(cmd *cobra.Command, operation string) (context.Context, error) {
+	if cmd == nil {
+		return nil, fmt.Errorf("handoff %s requires a command context", operation)
+	}
+	ctx := cmd.Context()
+	if err := requireLiveHandoffContext(ctx, operation); err != nil {
+		return nil, err
+	}
+	return ctx, nil
+}
+
+func requireLiveHandoffContext(ctx context.Context, operation string) error {
+	if ctx == nil {
+		return fmt.Errorf("handoff %s requires a command context", operation)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("handoff %s canceled: %w", operation, err)
+	}
+	return nil
+}
+
+func resolveWorkspaceBackedHandoffProjectDir(ctx context.Context, sessionName string) (string, error) {
+	projectDir, err := resolveHandoffProjectDir(ctx, sessionName)
 	if err == nil {
 		return projectDir, nil
 	}

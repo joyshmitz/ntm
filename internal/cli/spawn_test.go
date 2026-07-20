@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/cm"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
@@ -82,6 +83,263 @@ func TestResolveSpawnProjectDirRejectsRelativeOverride(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "must be absolute") {
 		t.Fatalf("expected absolute-path error, got %v", err)
+	}
+}
+
+func TestPreflightWorktreeProject(t *testing.T) {
+	t.Run("nil context", func(t *testing.T) {
+		err := preflightWorktreeProject(nil, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+			t.Fatalf("preflightWorktreeProject() error = %v", err)
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := preflightWorktreeProject(ctx, t.TempDir())
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("preflightWorktreeProject() error = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("missing directory", func(t *testing.T) {
+		err := preflightWorktreeProject(t.Context(), filepath.Join(t.TempDir(), "missing"))
+		if err == nil || !strings.Contains(err.Error(), "inspect project") {
+			t.Fatalf("preflightWorktreeProject() error = %v", err)
+		}
+	})
+
+	t.Run("project path is a file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "project-file")
+		if err := os.WriteFile(path, []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatalf("write project fixture: %v", err)
+		}
+		err := preflightWorktreeProject(t.Context(), path)
+		if err == nil || !strings.Contains(err.Error(), "not a directory") {
+			t.Fatalf("preflightWorktreeProject() error = %v", err)
+		}
+	})
+
+	t.Run("ordinary directory", func(t *testing.T) {
+		err := preflightWorktreeProject(t.Context(), t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "not an initialized Git working tree") {
+			t.Fatalf("preflightWorktreeProject() error = %v", err)
+		}
+	})
+
+	t.Run("repository without commit", func(t *testing.T) {
+		repo := t.TempDir()
+		cmd := exec.CommandContext(t.Context(), "git", "init", "-q", repo)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Skipf("git init unavailable: %v: %s", err, output)
+		}
+		err := preflightWorktreeProject(t.Context(), repo)
+		if err == nil || !strings.Contains(err.Error(), "no valid HEAD commit") {
+			t.Fatalf("preflightWorktreeProject() error = %v", err)
+		}
+		if !strings.Contains(err.Error(), "fatal:") && !strings.Contains(err.Error(), "exit status") {
+			t.Fatalf("preflightWorktreeProject() error omits Git diagnostic: %v", err)
+		}
+	})
+
+	t.Run("repository with commit", func(t *testing.T) {
+		repo := setupCLIWorktreeGitRepo(t)
+		if err := preflightWorktreeProject(t.Context(), repo); err != nil {
+			t.Fatalf("preflightWorktreeProject() error = %v", err)
+		}
+	})
+
+	t.Run("repository with detached head", func(t *testing.T) {
+		repo := setupCLIWorktreeGitRepo(t)
+		cmd := exec.CommandContext(t.Context(), "git", "-C", repo, "checkout", "--detach", "--quiet")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("detach fixture HEAD: %v: %s", err, output)
+		}
+		if err := preflightWorktreeProject(t.Context(), repo); err != nil {
+			t.Fatalf("preflightWorktreeProject() detached HEAD error = %v", err)
+		}
+	})
+
+	t.Run("cancellation during git command remains classifiable", func(t *testing.T) {
+		fakeBin := t.TempDir()
+		fakeGit := filepath.Join(fakeBin, "git")
+		if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+			t.Fatalf("write blocking git fixture: %v", err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		err := preflightWorktreeProject(ctx, t.TempDir())
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("preflightWorktreeProject() error = %v, want context deadline", err)
+		}
+	})
+}
+
+func TestValidateSpawnWorktreeOptions(t *testing.T) {
+	if err := validateSpawnWorktreeOptions(SpawnOptions{WorktreeName: "shared", Agents: []FlatAgent{{}, {}}}); err != nil {
+		t.Fatalf("disabled worktrees should ignore worktree name: %v", err)
+	}
+	if err := validateSpawnWorktreeOptions(SpawnOptions{UseWorktrees: true, WorktreeName: "isolated", Agents: []FlatAgent{{}}}); err != nil {
+		t.Fatalf("single-agent worktree name rejected: %v", err)
+	}
+	err := validateSpawnWorktreeOptions(SpawnOptions{UseWorktrees: true, WorktreeName: "shared", Agents: []FlatAgent{{}, {}}})
+	if err == nil || !strings.Contains(err.Error(), "only valid for single-agent spawns") {
+		t.Fatalf("multi-agent worktree name error = %v", err)
+	}
+}
+
+func TestSpawnSafetySessionExistsErrorIsStable(t *testing.T) {
+	want := "session 'race-session' already exists (--safety mode prevents reuse; use 'ntm kill race-session' first)"
+	if got := spawnSafetySessionExistsError("race-session").Error(); got != want {
+		t.Fatalf("spawn safety error = %q, want %q", got, want)
+	}
+}
+
+func TestPreflightSpawnAssignmentFailsClosedInAdmissionOrder(t *testing.T) {
+	policyErr := errors.New("policy unavailable")
+	planErr := fmt.Errorf("%w: synthetic planner failure", bv.ErrActionablePlanUnverified)
+
+	for _, test := range []struct {
+		name       string
+		policyErr  error
+		planErr    error
+		wantCalls  []string
+		wantErr    error
+		wantPhrase string
+	}{
+		{
+			name:       "policy failure stops before planning",
+			policyErr:  policyErr,
+			wantCalls:  []string{"policy"},
+			wantErr:    policyErr,
+			wantPhrase: "policy preflight",
+		},
+		{
+			name:       "unverified plan is terminal",
+			planErr:    planErr,
+			wantCalls:  []string{"policy", "actionable"},
+			wantErr:    bv.ErrActionablePlanUnverified,
+			wantPhrase: "could not be verified",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls []string
+			admission, err := preflightSpawnAssignment(
+				t.Context(),
+				filepath.Join(t.TempDir(), "project"),
+				time.Second,
+				spawnAssignmentPreflightDependencies{
+					configurePolicy: func(string) error {
+						calls = append(calls, "policy")
+						return test.policyErr
+					},
+					fetchActionable: func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+						calls = append(calls, "actionable")
+						return nil, test.planErr
+					},
+				},
+			)
+			if admission != nil || !errors.Is(err, test.wantErr) || !strings.Contains(err.Error(), test.wantPhrase) {
+				t.Fatalf("admission=%+v err=%v, want wrapped %v containing %q", admission, err, test.wantErr, test.wantPhrase)
+			}
+			if got := strings.Join(calls, ","); got != strings.Join(test.wantCalls, ",") {
+				t.Fatalf("preflight calls=%q, want %q", got, strings.Join(test.wantCalls, ","))
+			}
+		})
+	}
+}
+
+func TestPreflightSpawnAssignmentAcceptsVerifiedEmptyPlan(t *testing.T) {
+	projectDir := filepath.Join(t.TempDir(), "project", "..", "project")
+	var calls []string
+	admission, err := preflightSpawnAssignment(
+		t.Context(),
+		projectDir,
+		time.Second,
+		spawnAssignmentPreflightDependencies{
+			configurePolicy: func(gotProject string) error {
+				calls = append(calls, "policy:"+gotProject)
+				return nil
+			},
+			fetchActionable: func(_ context.Context, gotProject string, limit int) ([]bv.TriageRecommendation, error) {
+				calls = append(calls, fmt.Sprintf("actionable:%s:%d", gotProject, limit))
+				return nil, nil
+			},
+		},
+	)
+	cleanProject := filepath.Clean(projectDir)
+	if err != nil || admission == nil {
+		t.Fatalf("verified empty preflight admission=%+v err=%v", admission, err)
+	}
+	if admission.projectDir != cleanProject || admission.actionable == nil || len(admission.actionable) != 0 {
+		t.Fatalf("verified empty admission=%+v, want project=%q and non-nil empty actionable set", admission, cleanProject)
+	}
+	wantCalls := []string{"policy:" + cleanProject, "actionable:" + cleanProject + ":100"}
+	if got := strings.Join(calls, ","); got != strings.Join(wantCalls, ",") {
+		t.Fatalf("preflight calls=%q, want %q", got, strings.Join(wantCalls, ","))
+	}
+}
+
+func TestPreflightSpawnAssignmentTimeoutRemainsClassifiable(t *testing.T) {
+	var calls []string
+	admission, err := preflightSpawnAssignment(
+		t.Context(),
+		t.TempDir(),
+		10*time.Millisecond,
+		spawnAssignmentPreflightDependencies{
+			configurePolicy: func(string) error {
+				calls = append(calls, "policy")
+				return nil
+			},
+			fetchActionable: func(ctx context.Context, _ string, _ int) ([]bv.TriageRecommendation, error) {
+				calls = append(calls, "actionable")
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		},
+	)
+	if admission != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timed preflight admission=%+v err=%v, want deadline exceeded", admission, err)
+	}
+	if got := strings.Join(calls, ","); got != "policy,actionable" {
+		t.Fatalf("timed preflight calls=%q, want policy,actionable", got)
+	}
+}
+
+func TestSpawnAssignCommandOptionsReusesVerifiedAdmissionSnapshot(t *testing.T) {
+	recommendation := bv.TriageRecommendation{
+		ID:      "ntm-verified",
+		Title:   "verified work",
+		Labels:  []string{"backend"},
+		Reasons: []string{"authorized by plan"},
+	}
+	spawnOpts := SpawnOptions{
+		AssignStrategy:  "quality",
+		AssignLimit:     2,
+		AssignAgentType: "codex",
+		assignAdmission: &spawnAssignmentAdmission{
+			projectDir: "/tmp/verified-project",
+			actionable: []bv.TriageRecommendation{recommendation},
+		},
+	}
+
+	assignOpts := spawnAssignCommandOptions("verified-session", spawnOpts, true, false, 7*time.Second)
+	if assignOpts.ProjectDir != spawnOpts.assignAdmission.projectDir ||
+		assignOpts.policyProject != spawnOpts.assignAdmission.projectDir ||
+		!assignOpts.actionablePreflightVerified || len(assignOpts.verifiedActionable) != 1 {
+		t.Fatalf("spawn assignment options did not carry verified admission: %+v", assignOpts)
+	}
+	if assignOpts.Session != "verified-session" || assignOpts.Strategy != "quality" ||
+		assignOpts.Limit != 2 || assignOpts.AgentTypeFilter != "codex" ||
+		!assignOpts.Verbose || assignOpts.Quiet || assignOpts.Timeout != 7*time.Second {
+		t.Fatalf("spawn assignment options lost command settings: %+v", assignOpts)
+	}
+
+	spawnOpts.assignAdmission.actionable[0].Labels[0] = "mutated"
+	if assignOpts.verifiedActionable[0].Labels[0] != "backend" {
+		t.Fatalf("verified admission was aliased across phases: %+v", assignOpts.verifiedActionable[0])
 	}
 }
 
@@ -223,22 +481,59 @@ func TestValidateSpawnAgentTypes(t *testing.T) {
 
 func TestValidateGrokPhaseOneSpawnFailsClosed(t *testing.T) {
 	base := SpawnOptions{Agents: []FlatAgent{{Type: AgentTypeGrok, Index: 1}}}
-	if err := validateGrokPhaseOneSpawn(base); err != nil {
+	effectiveConfig := config.Default()
+	if err := validateGrokPhaseOneSpawn(base, effectiveConfig); err != nil {
 		t.Fatalf("plain Grok spawn should be supported: %v", err)
+	}
+	if err := validateGrokPhaseOneSpawn(SpawnOptions{
+		Agents: base.Agents, NoCassContext: true, CassContextQuery: "ignored",
+	}, effectiveConfig); err != nil {
+		t.Fatalf("disabled CASS context should not block Grok spawn: %v", err)
 	}
 
 	tests := []SpawnOptions{
 		{Agents: base.Agents, Prompt: "work"},
 		{Agents: base.Agents, InitPrompt: "work"},
+		{Agents: base.Agents, CassContextQuery: "history"},
 		{Agents: base.Agents, MarchingOrders: map[int]string{0: "work"}},
 		{Agents: base.Agents, Assign: true},
 		{Agents: base.Agents, AutoRestart: true},
 		{Agents: []FlatAgent{{Type: AgentTypeGrok, Index: 1, Persona: &persona.Persona{Name: "reviewer"}}}},
 	}
 	for _, opts := range tests {
-		if err := validateGrokPhaseOneSpawn(opts); err == nil {
+		if err := validateGrokPhaseOneSpawn(opts, effectiveConfig); err == nil {
 			t.Fatalf("unsupported Grok options unexpectedly accepted: %+v", opts)
 		}
+	}
+
+	effectiveConfig.Resilience.AutoRestart = true
+	if err := validateGrokPhaseOneSpawn(base, effectiveConfig); err == nil {
+		t.Fatal("config-enabled automatic restart unexpectedly accepted for Grok")
+	}
+}
+
+func TestGrokSpawnSuppressesAmbientContextPromptDelivery(t *testing.T) {
+	grokOnly := []FlatAgent{{Type: AgentTypeGrok, Index: 1}}
+	if spawnHasAutomatedPromptDeliveryTarget(grokOnly) {
+		t.Fatal("Grok-only spawn unexpectedly has an automated prompt-delivery target")
+	}
+	if steps := buildSpawnPromptSequenceForAgent(
+		AgentTypeGrok,
+		"ambient CASS context",
+		"ambient recovery context",
+		"defensive user prompt",
+		time.Second,
+	); len(steps) != 0 {
+		t.Fatalf("Grok prompt steps = %+v, want empty defensive sequence", steps)
+	}
+
+	mixed := append([]FlatAgent{{Type: AgentTypeClaude, Index: 1}}, grokOnly...)
+	if !spawnHasAutomatedPromptDeliveryTarget(mixed) {
+		t.Fatal("mixed spawn should retain automated context for supported agents")
+	}
+	steps := buildSpawnPromptSequenceForAgent(AgentTypeClaude, "cass", "recovery", "prompt", time.Second)
+	if len(steps) != 2 || steps[0].Kind != "recovery_context" || steps[1].Kind != "user_prompt" {
+		t.Fatalf("supported-agent prompt steps = %+v, want recovery plus CASS-enriched user prompt", steps)
 	}
 }
 
@@ -317,6 +612,48 @@ func TestValidateSpawnPaneCapacity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateSpawnGrokPaneBaselinesPreflightsCompleteAssignment(t *testing.T) {
+	agents := []FlatAgent{
+		{Type: AgentTypeClaude, Index: 1},
+		{Type: AgentTypeGrok, Index: 1},
+	}
+
+	t.Run("late occupied Grok target rejects mixed batch", func(t *testing.T) {
+		panes := []tmux.Pane{
+			{ID: "%idle", Index: 0, Command: "zsh"},
+			{ID: "%occupied", Index: 1, Command: "sleep"},
+		}
+		err := validateSpawnGrokPaneBaselines(panes, 0, agents)
+		if err == nil {
+			t.Fatal("validateSpawnGrokPaneBaselines() error = nil")
+		}
+		for _, want := range []string{"Grok Build agent 1", "%occupied", "sleep", "non-shell"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("validateSpawnGrokPaneBaselines() error = %q, want %q", err, want)
+			}
+		}
+	})
+
+	t.Run("user pane offset reaches assigned Grok shell", func(t *testing.T) {
+		panes := []tmux.Pane{
+			{ID: "%user", Index: 0, Command: "zsh"},
+			{ID: "%claude", Index: 1, Command: "bash"},
+			{ID: "%grok", Index: 2, Command: "fish"},
+		}
+		if err := validateSpawnGrokPaneBaselines(panes, 1, agents); err != nil {
+			t.Fatalf("validateSpawnGrokPaneBaselines() error = %v", err)
+		}
+	})
+
+	t.Run("missing assigned Grok pane fails closed", func(t *testing.T) {
+		panes := []tmux.Pane{{ID: "%claude", Index: 0, Command: "zsh"}}
+		err := validateSpawnGrokPaneBaselines(panes, 0, agents)
+		if err == nil || !strings.Contains(err.Error(), "no assigned pane for Grok Build agent 1 at offset 1") {
+			t.Fatalf("validateSpawnGrokPaneBaselines() error = %v", err)
+		}
+	})
 }
 
 func TestSpawnUnknownAgentTextReturnsErrorWithoutWarning(t *testing.T) {
@@ -1279,31 +1616,35 @@ func TestGetMemoryContext_EmptyTask(t *testing.T) {
 	_ = result // Just verify no panic
 }
 
-func TestLegacySpawnTotalAgentCount_IncludesOllama(t *testing.T) {
+func TestLegacySpawnTotalAgentCount_IncludesModernTypes(t *testing.T) {
 
 	opts := SpawnOptions{
 		CCCount:       1,
 		CodCount:      2,
 		GmiCount:      3,
-		CursorCount:   4,
-		WindsurfCount: 5,
-		AiderCount:    6,
-		OllamaCount:   7,
+		GrokCount:     4,
+		CursorCount:   5,
+		WindsurfCount: 6,
+		AiderCount:    7,
+		OllamaCount:   8,
 	}
 
-	if got := legacySpawnTotalAgentCount(opts); got != 28 {
-		t.Fatalf("legacySpawnTotalAgentCount() = %d, want 28", got)
+	if got := legacySpawnTotalAgentCount(opts); got != 36 {
+		t.Fatalf("legacySpawnTotalAgentCount() = %d, want 36", got)
 	}
 }
 
-func TestSpawnHookCountEnv_IncludesOllama(t *testing.T) {
+func TestSpawnHookCountEnv_IncludesGrok(t *testing.T) {
 
-	env := spawnHookCountEnv(5, SpawnOptions{OllamaCount: 2, CursorCount: 3})
+	env := spawnHookCountEnv(7, SpawnOptions{GrokCount: 2, OllamaCount: 2, CursorCount: 3})
+	if env["NTM_AGENT_COUNT_GROK"] != "2" {
+		t.Fatalf("NTM_AGENT_COUNT_GROK = %q, want 2", env["NTM_AGENT_COUNT_GROK"])
+	}
 	if env["NTM_AGENT_COUNT_OLLAMA"] != "2" {
 		t.Fatalf("NTM_AGENT_COUNT_OLLAMA = %q, want 2", env["NTM_AGENT_COUNT_OLLAMA"])
 	}
-	if env["NTM_AGENT_COUNT_TOTAL"] != "5" {
-		t.Fatalf("NTM_AGENT_COUNT_TOTAL = %q, want 5", env["NTM_AGENT_COUNT_TOTAL"])
+	if env["NTM_AGENT_COUNT_TOTAL"] != "7" {
+		t.Fatalf("NTM_AGENT_COUNT_TOTAL = %q, want 7", env["NTM_AGENT_COUNT_TOTAL"])
 	}
 }
 
@@ -1312,16 +1653,17 @@ func TestSpawnSessionCreatedEventFields_IncludeModernTypes(t *testing.T) {
 	fields := spawnSessionCreatedEventFields(SpawnOptions{
 		RecipeName:    "default",
 		CCCount:       1,
-		CursorCount:   2,
-		WindsurfCount: 3,
-		AiderCount:    4,
-		OllamaCount:   5,
+		GrokCount:     2,
+		CursorCount:   3,
+		WindsurfCount: 4,
+		AiderCount:    5,
+		OllamaCount:   6,
 	}, "/tmp/project")
 
-	if fields["agent_count"] != "15" {
-		t.Fatalf("agent_count = %q, want 15", fields["agent_count"])
+	if fields["agent_count"] != "21" {
+		t.Fatalf("agent_count = %q, want 21", fields["agent_count"])
 	}
-	if fields["agent_cursor"] != "2" || fields["agent_windsurf"] != "3" || fields["agent_aider"] != "4" || fields["agent_ollama"] != "5" {
+	if fields["agent_grok"] != "2" || fields["agent_cursor"] != "3" || fields["agent_windsurf"] != "4" || fields["agent_aider"] != "5" || fields["agent_ollama"] != "6" {
 		t.Fatalf("spawnSessionCreatedEventFields() missing modern counts: %+v", fields)
 	}
 }

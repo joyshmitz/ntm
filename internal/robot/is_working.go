@@ -116,9 +116,8 @@ type IsWorkingOutput struct {
 }
 
 // PrintIsWorking outputs the work state for specified panes in a session.
-// This is a thin wrapper around GetIsWorking() for CLI output.
-func PrintIsWorking(opts IsWorkingOptions) error {
-	output, err := GetIsWorking(opts)
+func PrintIsWorking(ctx context.Context, opts IsWorkingOptions) error {
+	output, err := GetIsWorking(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -227,7 +226,7 @@ func ParsePaneSelectorsArg(panesArg string) ([]string, error) {
 
 // GetIsWorking returns the work state for specified panes in a session.
 // This function returns the data struct directly, enabling CLI/REST parity.
-func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
+func GetIsWorking(ctx context.Context, opts IsWorkingOptions) (*IsWorkingOutput, error) {
 	if opts.LinesCaptured <= 0 {
 		opts.LinesCaptured = DefaultIsWorkingOptions().LinesCaptured
 	}
@@ -244,9 +243,28 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 			ByRecommendation: make(map[string][]string),
 		},
 	}
+	if ctx == nil {
+		output.RobotResponse = NewErrorResponse(errors.New("is-working context is required"), ErrCodeInternalError, "Retry the command")
+		return output, nil
+	}
+	if err := ctx.Err(); err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry after the cancellation or timeout condition clears")
+		return output, nil
+	}
 
 	// Validate session exists
-	if !tmux.SessionExists(opts.Session) {
+	exists, err := tmux.SessionExistsContext(ctx, opts.Session)
+	if err != nil {
+		code := ErrCodeInternalError
+		hint := "Check tmux session state"
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			code = ErrCodeTimeout
+			hint = "Retry after the cancellation or timeout condition clears"
+		}
+		output.RobotResponse = NewErrorResponse(err, code, hint)
+		return output, nil
+	}
+	if !exists {
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("session '%s' not found", opts.Session),
 			ErrCodeSessionNotFound,
@@ -256,12 +274,18 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 	}
 
 	observer := newRobotSessionObserver(opts.LinesCaptured)
-	observation, err := observer.Observe(context.Background(), opts.Session)
+	observation, err := observer.Observe(ctx, opts.Session)
 	if err != nil {
+		code := ErrCodeInternalError
+		hint := "Check tmux session state"
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			code = ErrCodeTimeout
+			hint = "Retry after the cancellation or timeout condition clears"
+		}
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("failed to observe panes: %w", err),
-			ErrCodeInternalError,
-			"Check tmux session state",
+			code,
+			hint,
 		)
 		return output, nil
 	}
@@ -298,6 +322,10 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 
 	// Process each selected pane.
 	for _, sel := range selected {
+		if err := ctx.Err(); err != nil {
+			output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Inspect completed pane observations before retrying")
+			return output, nil
+		}
 		paneKey := isWorkingPaneKey(sel, multiWindow)
 		requestedTargets = append(requestedTargets, paneKey)
 
@@ -433,7 +461,7 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 		// to flip IsWorking/IsIdle or the recommendation. We attach it AFTER the
 		// summary-affecting fields are finalized for exactly that reason.
 		if opts.Semantic {
-			repoDir := paneCurrentPathForTarget(sel.target)
+			repoDir := paneCurrentPathForTarget(ctx, sel.target)
 			addr := PaneAddr{Session: opts.Session, Window: sel.WindowIndex, Pane: sel.Index}
 			status.SemanticProgress = PaneSemanticProgress(addr, repoDir, opts.SemanticWindow, status.IsWorking, time.Now())
 		}
@@ -715,8 +743,8 @@ func isWorkingPaneKey(sel selectedPane, multiWindow bool) string {
 // paneCurrentPathForTarget resolves a pane's working directory via tmux's
 // pane_current_path. Used only by the --semantic path to locate the repo for
 // token-attributed reads; returns "" on any failure (degrades to source none).
-func paneCurrentPathForTarget(target string) string {
-	output, err := tmux.DefaultClient.Run("display-message", "-t", target, "-p", "#{pane_current_path}")
+func paneCurrentPathForTarget(ctx context.Context, target string) string {
+	output, err := tmux.DefaultClient.RunContext(ctx, "display-message", "-t", target, "-p", "#{pane_current_path}")
 	if err != nil {
 		return ""
 	}

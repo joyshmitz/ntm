@@ -286,7 +286,7 @@ Examples:
 			}
 			session = res.Session
 
-			projectDir, err := resolvePipelineProjectDirForSession(session)
+			projectDir, err := resolvePipelineProjectDirForSession(cmd.Context(), session)
 			if err != nil {
 				return err
 			}
@@ -651,7 +651,7 @@ Examples:
 				resolvedSession = res.Session
 			}
 
-			projectDir, err := resolvePipelineProjectDirForSession(resolvedSession)
+			projectDir, err := resolvePipelineProjectDirForSession(cmd.Context(), resolvedSession)
 			if err != nil {
 				return err
 			}
@@ -885,7 +885,7 @@ Examples:
 			}
 
 			// Get project directory
-			projectDir, err := resolvePipelineProjectDirForSession("")
+			projectDir, err := resolvePipelineProjectDirForSession(cmd.Context(), "")
 			if err != nil {
 				return err
 			}
@@ -1053,15 +1053,15 @@ Examples:
 	return cmd
 }
 
-func resolvePipelineProjectDirForSession(session string) (string, error) {
+func resolvePipelineProjectDirForSession(ctx context.Context, session string) (string, error) {
 	session = strings.TrimSpace(session)
 	if session != "" {
-		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+		resolved, err := normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 		if err != nil {
 			return "", err
 		}
 		session = resolved
-		return resolveExplicitProjectDirForSession(session)
+		return resolveExplicitProjectDirForSessionContext(ctx, session)
 	}
 
 	projectDir := GetProjectRoot()

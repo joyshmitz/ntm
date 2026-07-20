@@ -20,6 +20,7 @@ type SpawnWizardResult struct {
 	CodCount      int
 	GmiCount      int
 	AgyCount      int
+	GrokCount     int
 	CursorCount   int
 	WindsurfCount int
 	AiderCount    int
@@ -52,6 +53,7 @@ func wizardAgentSpecs(result SpawnWizardResult) AgentSpecs {
 		{agentType: AgentTypeCodex, count: result.CodCount},
 		{agentType: AgentTypeGemini, count: result.GmiCount},
 		{agentType: AgentTypeAntigravity, count: result.AgyCount},
+		{agentType: AgentTypeGrok, count: result.GrokCount},
 		{agentType: AgentTypeCursor, count: result.CursorCount},
 		{agentType: AgentTypeWindsurf, count: result.WindsurfCount},
 		{agentType: AgentTypeAider, count: result.AiderCount},
@@ -73,6 +75,7 @@ func spawnWizardResultFromCounts(counts map[string]int) SpawnWizardResult {
 		CodCount:      counts["cod"],
 		GmiCount:      counts["gmi"],
 		AgyCount:      counts["agy"],
+		GrokCount:     counts["grok"],
 		CursorCount:   counts["cursor"],
 		WindsurfCount: counts["windsurf"],
 		AiderCount:    counts["aider"],
@@ -89,6 +92,7 @@ func formatWizardAgentCountSummary(counts map[string]int) string {
 		{key: "cod"},
 		{key: "gmi"},
 		{key: "agy"},
+		{key: "grok"},
 		{key: "cursor"},
 		{key: "windsurf"},
 		{key: "aider"},
@@ -150,7 +154,7 @@ func runSpawnWizard(sessionName string) (SpawnWizardResult, error) {
 func runManualWizard(sessionName string) (SpawnWizardResult, error) {
 	var result SpawnWizardResult
 
-	var ccStr, codStr, gmiStr, agyStr string
+	var ccStr, codStr, gmiStr, agyStr, grokStr string
 	var autoRestart bool
 
 	agentForm := huh.NewForm(
@@ -179,6 +183,12 @@ func runManualWizard(sessionName string) (SpawnWizardResult, error) {
 				Placeholder("0").
 				Value(&agyStr).
 				Validate(validateAgentCount),
+			huh.NewInput().
+				Title("Grok Build agents (grok)").
+				Description("Number of Grok Build agents to launch (phase one: no automated prompt delivery or restart)").
+				Placeholder("0").
+				Value(&grokStr).
+				Validate(validateAgentCount),
 		).Title("Agent Configuration"),
 		huh.NewGroup(
 			huh.NewConfirm().
@@ -196,16 +206,17 @@ func runManualWizard(sessionName string) (SpawnWizardResult, error) {
 	result.CodCount = parseCount(codStr)
 	result.GmiCount = parseCount(gmiStr)
 	result.AgyCount = parseCount(agyStr)
+	result.GrokCount = parseCount(grokStr)
 	result.AutoRestart = autoRestart
 
-	if result.CCCount+result.CodCount+result.GmiCount+result.AgyCount == 0 {
+	if result.CCCount+result.CodCount+result.GmiCount+result.AgyCount+result.GrokCount == 0 {
 		return result, fmt.Errorf("no agents specified — at least one agent is required")
 	}
 
 	// Confirmation
-	total := result.CCCount + result.CodCount + result.GmiCount + result.AgyCount
-	summary := fmt.Sprintf("Spawn %d agent(s) in session %q:\n  Claude: %d, Codex: %d, Gemini: %d, Antigravity: %d",
-		total, sessionName, result.CCCount, result.CodCount, result.GmiCount, result.AgyCount)
+	total := result.CCCount + result.CodCount + result.GmiCount + result.AgyCount + result.GrokCount
+	summary := fmt.Sprintf("Spawn %d agent(s) in session %q:\n  Claude: %d, Codex: %d, Gemini: %d, Antigravity: %d, Grok Build: %d",
+		total, sessionName, result.CCCount, result.CodCount, result.GmiCount, result.AgyCount, result.GrokCount)
 	if result.AutoRestart {
 		summary += "\n  Auto-restart: enabled"
 	}

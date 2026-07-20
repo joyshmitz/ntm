@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,6 +156,20 @@ func TestPassesFilter(t *testing.T) {
 			want:      false,
 		},
 		{
+			name:      "filter_grok_type_match",
+			agentType: "grok",
+			pane:      tmux.Pane{Index: 4, Title: "grok_4"},
+			opts:      activityOptions{filterGrok: true},
+			want:      true,
+		},
+		{
+			name:      "filter_grok_type_no_match",
+			agentType: "codex",
+			pane:      tmux.Pane{Index: 2, Title: "cod_2"},
+			opts:      activityOptions{filterGrok: true},
+			want:      false,
+		},
+		{
 			name:      "multiple_type_filters_match_first",
 			agentType: "claude",
 			pane:      tmux.Pane{Index: 1, Title: "cc_1"},
@@ -209,6 +224,13 @@ func TestPassesFilter(t *testing.T) {
 	}
 }
 
+func TestDetectAgentTypeFromPane_GrokAlias(t *testing.T) {
+	pane := tmux.Pane{Type: tmux.AgentType("xai-grok-build")}
+	if got := detectAgentTypeFromPane(pane); got != "grok" {
+		t.Fatalf("detectAgentTypeFromPane(%q) = %q, want grok", pane.Type, got)
+	}
+}
+
 func TestActivityAgentTypeColor(t *testing.T) {
 
 	current := theme.Current()
@@ -220,6 +242,7 @@ func TestActivityAgentTypeColor(t *testing.T) {
 		{"claude", "claude", string(current.Claude)},
 		{"codex alias", "openai-codex", string(current.Codex)},
 		{"gemini alias", "google-gemini", string(current.Gemini)},
+		{"grok alias", "xai-grok-build", string(current.Pink)},
 		{"cursor", "cursor", string(current.Cursor)},
 		{"windsurf alias", "ws", string(current.Windsurf)},
 		{"aider", "aider", string(current.Aider)},
@@ -236,6 +259,16 @@ func TestActivityAgentTypeColor(t *testing.T) {
 				t.Fatalf("activityAgentTypeColor(%q) = %q, want %q", tc.agentType, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestActivityCommandAdvertisesGrokFilter(t *testing.T) {
+	flag := newActivityCmd().Flags().Lookup("grok")
+	if flag == nil {
+		t.Fatal("activity command omits --grok filter")
+	}
+	if !strings.Contains(flag.Usage, "Grok Build") {
+		t.Fatalf("--grok usage = %q, want Grok Build", flag.Usage)
 	}
 }
 

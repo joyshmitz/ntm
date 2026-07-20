@@ -20,6 +20,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 // buildCache caches compiled binaries keyed by build tags so each tag
@@ -139,7 +141,7 @@ func isolatedSurfaceRuntime(t *testing.T) (string, []string) {
 	homeDir := filepath.Join(root, "home")
 	configDir := filepath.Join(root, "config")
 	configPath := filepath.Join(configDir, "ntm", "config.toml")
-	tmuxDir := filepath.Join(root, "tmux")
+	tmuxDir := testutil.ShortTmuxTempDir(t)
 	for _, dir := range []string{homeDir, filepath.Dir(configPath), tmuxDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("create isolated surface directory %s: %v", dir, err)

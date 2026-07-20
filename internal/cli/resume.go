@@ -168,7 +168,7 @@ func runResume(cmd *cobra.Command, sessionName, fromPath string, spawn, inject, 
 		path = fromPath
 	} else {
 		allowPrefix := !jsonFormat && !IsJSONOutput()
-		sessionName, projectDir, err = resolveResumeScope(sessionName, allowPrefix)
+		sessionName, projectDir, err = resolveResumeScope(cmd.Context(), sessionName, allowPrefix)
 		if err != nil {
 			return err
 		}
@@ -268,7 +268,7 @@ func runResume(cmd *cobra.Command, sessionName, fromPath string, spawn, inject, 
 	if spawn {
 		if fromPath != "" {
 			allowPrefix := !jsonFormat && !IsJSONOutput()
-			projectDir, err = resolveResumeSourceProjectDir(sessionName, h.Session, path, allowPrefix)
+			projectDir, err = resolveResumeSourceProjectDir(cmd.Context(), sessionName, h.Session, path, allowPrefix)
 			if err != nil {
 				return err
 			}
@@ -571,7 +571,7 @@ func injectHandoff(cmd *cobra.Command, sessionName string, h *handoff.Handoff,
 	return nil
 }
 
-func resolveResumeScope(sessionName string, allowPrefix bool) (string, string, error) {
+func resolveResumeScope(ctx context.Context, sessionName string, allowPrefix bool) (string, string, error) {
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" {
 		projectDir := GetProjectRoot()
@@ -581,7 +581,7 @@ func resolveResumeScope(sessionName string, allowPrefix bool) (string, string, e
 		return "", projectDir, nil
 	}
 
-	resolvedSession, err := normalizeProjectScopedSessionName(sessionName, allowPrefix)
+	resolvedSession, err := normalizeProjectScopedSessionName(ctx, sessionName, allowPrefix)
 	if err != nil {
 		return "", "", err
 	}
@@ -592,7 +592,7 @@ func resolveResumeScope(sessionName string, allowPrefix bool) (string, string, e
 		return resolvedStoredSession, configuredProjectDir, nil
 	}
 
-	projectDir, explicitErr := resolveExplicitProjectDirForSession(resolvedSession)
+	projectDir, explicitErr := resolveExplicitProjectDirForSessionContext(ctx, resolvedSession)
 	if explicitErr != nil {
 		localProjectDir, localSession, matched, err := resolveLocalStoredHandoffProjectDir(resolvedSession, allowPrefix)
 		if err != nil {
@@ -644,7 +644,7 @@ func resolveLocalStoredHandoffProjectDir(sessionName string, allowPrefix bool) (
 	return "", sessionName, false, nil
 }
 
-func resolveResumeSourceProjectDir(sessionName, handoffSession, handoffPath string, allowPrefix bool) (string, error) {
+func resolveResumeSourceProjectDir(ctx context.Context, sessionName, handoffSession, handoffPath string, allowPrefix bool) (string, error) {
 	if projectDir, ok := projectDirFromHandoffPath(handoffPath); ok {
 		return projectDir, nil
 	}
@@ -662,7 +662,7 @@ func resolveResumeSourceProjectDir(sessionName, handoffSession, handoffPath stri
 		return "", fmt.Errorf("getting project root failed")
 	}
 
-	_, projectDir, err := resolveResumeScope(effectiveSession, allowPrefix)
+	_, projectDir, err := resolveResumeScope(ctx, effectiveSession, allowPrefix)
 	if err != nil {
 		return "", err
 	}

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,7 +35,7 @@ func newChangesCmd() *cobra.Command {
 			if len(args) > 0 {
 				session = args[0]
 			}
-			return runChanges(session)
+			return runChanges(cmd.Context(), session)
 		},
 	}
 	return cmd
@@ -62,7 +63,7 @@ func newConflictsCmd() *cobra.Command {
 			if len(args) > 0 {
 				session = args[0]
 			}
-			return runConflicts(session, since, limit)
+			return runConflicts(cmd.Context(), session, since, limit)
 		},
 	}
 	cmd.Flags().StringVar(&since, "since", "24h", "Look back window (e.g. 6h, 30m)")
@@ -70,8 +71,8 @@ func newConflictsCmd() *cobra.Command {
 	return cmd
 }
 
-func runChanges(sessionFilter string) error {
-	resolvedSessionFilter, err := normalizeTrackedSessionFilter(sessionFilter)
+func runChanges(ctx context.Context, sessionFilter string) error {
+	resolvedSessionFilter, err := normalizeTrackedSessionFilter(ctx, sessionFilter)
 	if err != nil {
 		return err
 	}
@@ -141,8 +142,8 @@ func runChanges(sessionFilter string) error {
 	return nil
 }
 
-func runConflicts(sessionFilter, since string, limit int) error {
-	resolvedSessionFilter, err := normalizeTrackedSessionFilter(sessionFilter)
+func runConflicts(ctx context.Context, sessionFilter, since string, limit int) error {
+	resolvedSessionFilter, err := normalizeTrackedSessionFilter(ctx, sessionFilter)
 	if err != nil {
 		return err
 	}
@@ -212,10 +213,10 @@ func sortConflictsByLastAtThenPath(conflicts []tracker.Conflict) {
 	})
 }
 
-func normalizeTrackedSessionFilter(session string) (string, error) {
+func normalizeTrackedSessionFilter(ctx context.Context, session string) (string, error) {
 	session = strings.TrimSpace(session)
 	if session == "" {
 		return "", nil
 	}
-	return normalizeProjectScopedSessionName(session, !IsJSONOutput())
+	return normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 }

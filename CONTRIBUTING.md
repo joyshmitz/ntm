@@ -12,7 +12,7 @@ The rest of this document is a **developer reference** for anyone building NTM l
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26.3+
 - tmux (for testing)
 - golangci-lint (for linting)
 
@@ -40,10 +40,14 @@ golangci-lint run
 
 ### Upgrade Command & Asset Naming
 
-The `ntm upgrade` command downloads release assets from GitHub Releases. For this to work, `internal/cli/upgrade.go` must know exactly what asset names GoReleaser produces.
+The `ntm upgrade` command downloads release assets from GitHub Releases. Releases
+are built and published exclusively with DSR; do not dispatch GitHub Actions or
+fall back to manual `gh release create`. `internal/cli/upgrade.go` must know the
+asset names produced by DSR.
 
-This creates a **naming contract** between two files:
-- **`.goreleaser.yaml`**: Defines asset names via `archives.name_template`
+This creates a **naming contract** among:
+- **DSR target/artifact configuration**: Defines the published native-platform assets
+- **`.goreleaser.yaml`**: Retains the legacy naming reference used by compatibility tests
 - **`internal/cli/upgrade.go`**: Contains logic to find and match assets
 
 If these drift apart, users get "no suitable release asset found" errors. The contract is enforced by `TestUpgradeAssetNamingContract` in `internal/cli/cli_test.go`.
@@ -64,7 +68,8 @@ ntm_{os}_{arch}
 
 | Case | Convention | Reason |
 |------|-----------|--------|
-| macOS | Uses `all` instead of arch | Universal binary (arm64+amd64) |
+| macOS (DSR) | Uses native `arm64` or `amd64` | DSR builds each architecture directly |
+| macOS (GoReleaser) | Uses `all` instead of arch | Universal binary (arm64+amd64) |
 | Windows | Uses `.zip` instead of `.tar.gz` | Native Windows archive format |
 | ARM Linux | Uses `armv7` suffix | Distinguish from arm64 |
 
@@ -72,14 +77,16 @@ ntm_{os}_{arch}
 
 | Platform | Archive Name | Binary Pattern |
 |----------|-------------|----------------|
-| macOS ARM | `ntm_1.4.1_darwin_all.tar.gz` | `ntm_darwin_all` |
-| macOS Intel | `ntm_1.4.1_darwin_all.tar.gz` | `ntm_darwin_all` |
-| Linux x64 | `ntm_1.4.1_linux_amd64.tar.gz` | `ntm_linux_amd64` |
-| Linux ARM64 | `ntm_1.4.1_linux_arm64.tar.gz` | `ntm_linux_arm64` |
-| Linux ARM (32-bit) | `ntm_1.4.1_linux_armv7.tar.gz` | `ntm_linux_armv7` |
-| Windows | `ntm_1.4.1_windows_amd64.zip` | `ntm_windows_amd64` |
+| macOS ARM (DSR) | `ntm_1.20.0_darwin_arm64.tar.gz` | `ntm_darwin_arm64` |
+| macOS Intel (DSR) | `ntm_1.20.0_darwin_amd64.tar.gz` | `ntm_darwin_amd64` |
+| macOS universal (GoReleaser) | `ntm_1.20.0_darwin_all.tar.gz` | `ntm_darwin_all` |
+| Linux x64 | `ntm_1.20.0_linux_amd64.tar.gz` | `ntm_linux_amd64` |
+| Linux ARM64 | `ntm_1.20.0_linux_arm64.tar.gz` | `ntm_linux_arm64` |
+| Linux ARM (32-bit) | `ntm_1.20.0_linux_armv7.tar.gz` | `ntm_linux_armv7` |
+| Windows | `ntm_1.20.0_windows_amd64.zip` | `ntm_windows_amd64` |
+| FreeBSD x64 | `ntm_1.20.0_freebsd_amd64.tar.gz` | `ntm_freebsd_amd64` |
 
-**Note**: The "Binary Pattern" column shows the asset name prefix used by `upgrade.go` to find assets. The actual binary inside archives is always named `ntm` (or `ntm.exe` on Windows).
+**Note**: The "Binary Pattern" column shows the asset name prefix used by `upgrade.go` to find assets. The upgrader and installer prefer native DSR macOS assets and retain exact `darwin_all` support for GoReleaser releases. The actual binary inside archives is always named `ntm` (or `ntm.exe` on Windows).
 
 ### Making Changes Safely
 
@@ -89,8 +96,9 @@ Before making **ANY** changes to asset naming:
    - Read this document fully
    - Review `TestUpgradeAssetNamingContract` in `internal/cli/cli_test.go`
 
-2. **Update both files together**:
-   - [ ] `.goreleaser.yaml`: Update `archives.name_template`
+2. **Update every contract surface together**:
+   - [ ] DSR target/artifact configuration: Update the authoritative release names
+   - [ ] `.goreleaser.yaml`: Keep the legacy compatibility names aligned where applicable
    - [ ] `internal/cli/upgrade.go`: Update `getAssetName()` and `getArchiveAssetName()`
    - [ ] `internal/cli/cli_test.go`: Update `TestUpgradeAssetNamingContract` expected values
 
@@ -106,12 +114,13 @@ Before making **ANY** changes to asset naming:
    ```
    `make pre-commit` only runs the contract tests when relevant files are staged.
 
-4. **CI will validate**:
-   - `upgrade-check` job tests against latest release
-   - If naming changed, expect CI to fail until new release with new naming
+4. **Verify through DSR before publication**:
+   - Run the repository's DSR quality matrix, including the upgrade asset contract.
+   - Build every configured release target into a fresh retained artifact directory.
 
-5. **After release**:
-   - `upgrade-verify` job confirms all platforms can find assets
+5. **Verify through DSR after publication**:
+   - `dsr release verify ntm X.Y.Z --verify-checksums`
+   - `dsr verify upgrade ntm --build-from-source`
 
 ### Troubleshooting Upgrade Failures
 
@@ -128,15 +137,15 @@ Common causes:
    - Check actual names at https://github.com/Dicklesworthstone/ntm/releases/latest
    - Compare against `TestUpgradeAssetNamingContract` expectations
 
-2. **GoReleaser config changed**:
-   - Check recent changes to `.goreleaser.yaml`
-   - Verify `archives.name_template` matches `upgrade.go` logic
+2. **Release naming config changed**:
+   - Check the DSR target/artifact configuration and legacy `.goreleaser.yaml` reference.
+   - Verify every emitted archive name matches `upgrade.go` logic.
 
 3. **New platform not supported**:
    - Add platform to `getAssetName()` / `getArchiveAssetName()`
    - Add test case to `TestUpgradeAssetNamingContract`
 
-**Error: CI `upgrade-check` failing**
+**Error: DSR upgrade verification failing**
 
 The current code can't find assets from the latest release. Either:
 - Roll back the code change, or
@@ -147,9 +156,17 @@ The current code can't find assets from the latest release. Either:
 The upgrade system has multiple protection layers:
 
 1. **Contract Tests** (`TestUpgradeAssetNamingContract`): Catch naming drift at development time
-2. **CI Upgrade Check**: Test against real releases before merge
-3. **Post-Release Verification**: Verify all platforms after release
+2. **DSR Quality Check**: Test the upgrade contract before publication
+3. **DSR Post-Release Verification**: Verify checksums and source-build upgrade behavior
 4. **Enhanced Error Messages**: Guide users to diagnose issues themselves
+
+### Configuration Contract
+
+Configuration loading rejects unknown fields. `[resilience]` is the canonical
+restart and monitoring section; the former unused `[health]` section is rejected.
+`coordinator enable|disable` persists the selected config file and preserves
+unrelated content. Project `[assign] operator_gated_labels` extend global and
+built-in approval gates; they cannot remove them.
 
 ---
 

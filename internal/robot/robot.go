@@ -1573,7 +1573,7 @@ type SessionInfo struct {
 
 // Agent represents an AI agent in a session
 type Agent struct {
-	Type     string `json:"type"`              // claude, codex, gemini
+	Type     string `json:"type"`              // claude, codex, antigravity, grok, gemini, or another supported type
 	Variant  string `json:"variant,omitempty"` // Model alias or persona name
 	Pane     string `json:"pane"`
 	Name     string `json:"name,omitempty"` // Memorable agent name (e.g., claude-alpha)
@@ -2023,7 +2023,7 @@ Common Modifiers:
 --robot-limit=N  Explicit pagination alias for robot list outputs
 --robot-offset=N Explicit pagination alias for robot list outputs
 --since=VALUE   Time filter for commands that support it (history, diff, and summary accept duration or RFC3339; snapshot requires RFC3339; mail-check uses YYYY-MM-DD)
---type=TYPE     Agent type filter for commands that support it (claude, codex, gemini, cursor, windsurf, aider)
+--type=TYPE     Agent type filter for commands that support it (claude, codex, antigravity, grok, gemini, cursor, windsurf, aider)
 --timeout=VALUE Shared timeout for wait/ack/interrupt and spawn --spawn-wait
 --poll=VALUE    Shared polling interval for wait/ack/send --track
 --strategy=NAME Strategy override for assign, route, and spawn --spawn-assign-work
@@ -4556,7 +4556,7 @@ type SnapshotSession struct {
 // SnapshotAgent represents an agent in the snapshot
 type SnapshotAgent struct {
 	Pane             string  `json:"pane"`
-	Type             string  `json:"type"`              // claude, codex, gemini
+	Type             string  `json:"type"`              // claude, codex, antigravity, grok, gemini, or another supported type
 	Variant          string  `json:"variant,omitempty"` // Model alias or persona name
 	TypeConfidence   float64 `json:"type_confidence"`
 	TypeMethod       string  `json:"type_method"`
@@ -5889,8 +5889,9 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 	if pane.Variant != "" {
 		return pane.Variant
 	}
+	agentType := tmux.AgentType(pane.Type).Canonical()
 	if cfg != nil {
-		switch pane.Type {
+		switch agentType {
 		case tmux.AgentClaude:
 			if cfg.Models.DefaultClaude != "" {
 				return cfg.Models.DefaultClaude
@@ -5904,6 +5905,10 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 			if cfg.Models.DefaultGemini != "" {
 				return cfg.Models.DefaultGemini
 			}
+		case tmux.AgentGrok:
+			if cfg.Models.DefaultGrok != "" {
+				return cfg.Models.DefaultGrok
+			}
 		case tmux.AgentOllama:
 			if cfg.Models.DefaultOllama != "" {
 				return cfg.Models.DefaultOllama
@@ -5913,13 +5918,15 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 	// Fall back to compiled-in defaults from config.DefaultModels() so the
 	// values stay in sync with the canonical defaults. (ntm#105)
 	defaults := config.DefaultModels()
-	switch pane.Type {
+	switch agentType {
 	case tmux.AgentClaude:
 		return defaults.DefaultClaude
 	case tmux.AgentCodex:
 		return defaults.DefaultCodex
 	case tmux.AgentGemini, tmux.AgentAntigravity:
 		return defaults.DefaultGemini
+	case tmux.AgentGrok:
+		return defaults.DefaultGrok
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:
@@ -6419,7 +6426,7 @@ func finalizeTerminalInterruptActuation(trace actuationTrace, opts InterruptOpti
 }
 
 func publishInterruptActuationVerification(trace actuationTrace, opts InterruptOptions, targets []string, output *InterruptOutput) {
-	if output == nil || len(targets) == 0 {
+	if output == nil || len(targets) == 0 || (output.ErrorCode == ErrCodeNotImplemented && len(output.Interrupted) == 0) {
 		return
 	}
 
@@ -6696,7 +6703,34 @@ func newRobotDispatchService(redactCfg redaction.Config, deliverer dispatchsvc.D
 	return service, redactor, err
 }
 
+func robotDispatchPrepareErrorResponse(err error) RobotResponse {
+	errorCode := ErrCodeInternalError
+	hint := "Inspect the dispatch target and message policy"
+	var dispatchErr *dispatchsvc.Error
+	if !errors.As(err, &dispatchErr) {
+		return NewErrorResponse(err, errorCode, hint)
+	}
+
+	switch dispatchErr.Code {
+	case dispatchsvc.ErrPromptDeliveryUnsupported:
+		errorCode = ErrCodeNotImplemented
+		hint = agent.GrokPromptDeliveryCapabilityHint
+	case dispatchsvc.ErrInvalidRequest, dispatchsvc.ErrInvalidSelector, dispatchsvc.ErrNoTargets:
+		errorCode = ErrCodeInvalidFlag
+		hint = "Check pane selectors, agent filters, delay, and message options"
+	}
+	return NewErrorResponse(err, errorCode, hint)
+}
+
 func robotPreparedDispatchRequest(allPanes, targetPanes []tmux.Pane, opts SendOptions, message string, submit bool) dispatchsvc.Request {
+	planningPanes := make([]tmux.Pane, len(allPanes))
+	for i, pane := range allPanes {
+		planningPanes[i] = pane
+		planningPanes[i].Tags = append([]string(nil), pane.Tags...)
+		if paneAgentType(pane) == "grok" {
+			planningPanes[i].Type = tmux.AgentGrok
+		}
+	}
 	selectors := make([]string, 0, len(targetPanes))
 	for _, pane := range targetPanes {
 		if pane.ID != "" {
@@ -6707,7 +6741,7 @@ func robotPreparedDispatchRequest(allPanes, targetPanes []tmux.Pane, opts SendOp
 	}
 	return dispatchsvc.Request{
 		Session:           opts.Session,
-		Panes:             allPanes,
+		Panes:             planningPanes,
 		Selectors:         selectors,
 		IncludeUser:       true,
 		Message:           message,
@@ -6716,6 +6750,14 @@ func robotPreparedDispatchRequest(allPanes, targetPanes []tmux.Pane, opts SendOp
 		Delay:             time.Duration(opts.DelayMs) * time.Millisecond,
 		DryRun:            opts.DryRun,
 	}
+}
+
+func validateRobotPromptDeliveryTargets(allPanes, targetPanes []tmux.Pane, opts SendOptions, message string, submit bool) error {
+	targets, err := dispatchsvc.PlanTargets(robotPreparedDispatchRequest(allPanes, targetPanes, opts, message, submit))
+	if err != nil {
+		return err
+	}
+	return dispatchsvc.ValidatePromptDeliveryTargets(targets)
 }
 
 func applyRobotDispatchResult(output *SendOutput, result dispatchsvc.Result) {
@@ -6730,6 +6772,24 @@ func applyRobotDispatchResult(output *SendOutput, result dispatchsvc.Result) {
 			}
 			output.Failed = append(output.Failed, SendError{Pane: receipt.Target.Address, Error: message})
 		}
+	}
+}
+
+func finalizeRobotSendDispatchStatus(output *SendOutput) {
+	if output == nil {
+		return
+	}
+	if !output.DryRun {
+		output.Success = len(output.Failed) == 0 && len(output.Successful) > 0
+	}
+	if len(output.Failed) == 0 {
+		return
+	}
+	if output.Error == "" {
+		output.Error = fmt.Sprintf("%d of %d sends failed", len(output.Failed), len(output.Targets))
+	}
+	if output.ErrorCode == "" {
+		output.ErrorCode = ErrCodeInternalError
 	}
 }
 
@@ -6937,13 +6997,7 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 			output.Blocked = true
 			return &output, nil
 		}
-		errorCode := ErrCodeInternalError
-		hint := "Inspect the dispatch target and message policy"
-		if errors.As(prepareErr, &dispatchErr) && (dispatchErr.Code == dispatchsvc.ErrInvalidRequest || dispatchErr.Code == dispatchsvc.ErrInvalidSelector || dispatchErr.Code == dispatchsvc.ErrNoTargets) {
-			errorCode = ErrCodeInvalidFlag
-			hint = "Check --panes, --agent-types, --exclude, --delay, and message options"
-		}
-		output.RobotResponse = NewErrorResponse(prepareErr, errorCode, hint)
+		output.RobotResponse = robotDispatchPrepareErrorResponse(prepareErr)
 		output.Failed = append(output.Failed, SendError{Pane: "dispatch", Error: prepareErr.Error()})
 		return finalizeTerminalSendActuation(trace, opts, &output), nil
 	}
@@ -6964,12 +7018,8 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 	result, _ := service.Dispatch(context.Background(), prepared)
 	applyRobotDispatchResult(&output, result)
 
-	// Update success based on results
-	output.Success = len(output.Failed) == 0 && len(output.Successful) > 0
-	if len(output.Failed) > 0 {
-		output.Error = fmt.Sprintf("%d of %d sends failed", len(output.Failed), len(output.Targets))
-		output.ErrorCode = ErrCodeInternalError
-	}
+	// Update success based on results without clobbering a typed preflight error.
+	finalizeRobotSendDispatchStatus(&output)
 
 	// Generate agent hints
 	output.AgentHints = generateSendHints(output)
@@ -10176,7 +10226,7 @@ func PrintContext(session string, lines int) error {
 type ActivityOptions struct {
 	Session    string   // Required: session name
 	Panes      []string // Optional: filter to specific pane indices
-	AgentTypes []string // Optional: filter to specific agent types (claude, codex, gemini)
+	AgentTypes []string // Optional: filter to specific agent types (claude, codex, antigravity, grok, gemini)
 }
 
 // ActivityOutput represents the output for --robot-activity
@@ -10201,7 +10251,7 @@ type ActivityOutput struct {
 type AgentActivityInfo struct {
 	Pane             string   `json:"pane"`                        // pane index as string
 	PaneIdx          int      `json:"pane_idx"`                    // pane index as int
-	AgentType        string   `json:"agent_type"`                  // claude, codex, gemini
+	AgentType        string   `json:"agent_type"`                  // claude, codex, antigravity, grok, gemini, or another supported type
 	State            string   `json:"state"`                       // GENERATING, WAITING, THINKING, ERROR, STALLED, UNKNOWN
 	Confidence       float64  `json:"confidence"`                  // 0.0-1.0
 	Velocity         float64  `json:"velocity"`                    // chars/sec

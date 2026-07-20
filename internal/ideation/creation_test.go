@@ -5,7 +5,22 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestNormalizeBeadCreationOptionsUsesDedicatedCommandTimeout(t *testing.T) {
+	plan := fixtureCreationPlan()
+
+	defaults := normalizeBeadCreationOptions(BeadCreationOptions{}, plan)
+	if defaults.CommandTimeout != 30*time.Second {
+		t.Fatalf("default command timeout = %s, want 30s", defaults.CommandTimeout)
+	}
+
+	explicit := normalizeBeadCreationOptions(BeadCreationOptions{CommandTimeout: 7 * time.Second}, plan)
+	if explicit.CommandTimeout != 7*time.Second {
+		t.Fatalf("explicit command timeout = %s, want 7s", explicit.CommandTimeout)
+	}
+}
 
 func TestRunBeadCreationDefaultsToDryRunPreview(t *testing.T) {
 	plan := fixtureCreationPlan()

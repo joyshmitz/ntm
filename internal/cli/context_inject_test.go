@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -261,6 +264,47 @@ func TestSelectContextInjectTargetPanes(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestInjectContextIntoPanesRejectsMixedGrokBatchBeforeSending(t *testing.T) {
+	for _, grokAlias := range []tmux.AgentType{tmux.AgentGrok, " Grok-Build ", "XAI_GROK_BUILD"} {
+		t.Run(string(grokAlias), func(t *testing.T) {
+			panes := []tmux.Pane{
+				{ID: "%1", Index: 1, Type: tmux.AgentClaude},
+				{ID: "%2", Index: 2, Type: grokAlias},
+				{ID: "%3", Index: 3, Type: tmux.AgentCodex},
+			}
+			calls := 0
+			injected, err := injectContextIntoPanes("demo", panes, "context", false, func(string, string, bool) error {
+				calls++
+				return nil
+			})
+
+			if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+				t.Fatalf("error = %v, want prompt-delivery sentinel", err)
+			}
+			if calls != 0 {
+				t.Fatalf("sender calls = %d, want 0", calls)
+			}
+			if len(injected) != 0 {
+				t.Fatalf("injected panes = %v, want empty", injected)
+			}
+		})
+	}
+}
+
+func TestRobotContextInjectGrokFailureUsesUnavailableExitCode(t *testing.T) {
+	code, hint := classifyRobotContextInjectError(agent.ErrAutomatedPromptDeliveryNotImplemented)
+	if code != robot.ErrCodeNotImplemented {
+		t.Fatalf("error code = %q, want %q", code, robot.ErrCodeNotImplemented)
+	}
+	if hint != agent.GrokPromptDeliveryCapabilityHint {
+		t.Fatalf("hint = %q, want %q", hint, agent.GrokPromptDeliveryCapabilityHint)
+	}
+	response := robot.NewErrorResponse(agent.ErrAutomatedPromptDeliveryNotImplemented, code, hint)
+	if exitCode := robot.ExitCodeForResponse(response); exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2", exitCode)
+	}
 }
 
 func TestNewContextInjectCmdRejectsInvalidSessionName(t *testing.T) {

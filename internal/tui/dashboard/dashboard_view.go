@@ -403,6 +403,7 @@ func (m Model) renderFooterSection() string {
 		ClaudeCount:      m.claudeCount,
 		CodexCount:       m.codexCount,
 		GeminiCount:      m.geminiCount,
+		GrokCount:        m.grokCount,
 		AntigravityCount: m.antigravityCount,
 		UserCount:        m.userCount,
 		FocusedPanel:     panelIDString(m.focusedPanel),
@@ -498,6 +499,14 @@ func (m Model) renderStatsBar() string {
 			Bold(true).
 			Padding(0, 1).
 			Render(fmt.Sprintf("%s %d", ic.Gemini, m.geminiCount)))
+	}
+	if m.grokCount > 0 {
+		parts = append(parts, lipgloss.NewStyle().
+			Background(t.Pink).
+			Foreground(t.Base).
+			Bold(true).
+			Padding(0, 1).
+			Render(fmt.Sprintf("GRK %d", m.grokCount)))
 	}
 	if m.antigravityCount > 0 {
 		parts = append(parts, lipgloss.NewStyle().

@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
@@ -1944,6 +1945,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle replay request from history panel
 		return m, m.executeReplay(msg.Entry)
 
+	case dashboardReplayResultMsg:
+		if msg.Err != nil {
+			m.healthMessage = "Replay failed: " + msg.Err.Error()
+			if m.toasts != nil {
+				m.toasts.Push(components.Toast{
+					ID:      "history-replay-failed",
+					Message: m.healthMessage,
+					Level:   components.ToastError,
+				})
+			}
+			return m, nil
+		}
+		m.healthMessage = "Prompt replayed"
+		if m.toasts != nil {
+			m.toasts.Push(components.Toast{
+				ID:      "history-replay-complete",
+				Message: m.healthMessage,
+				Level:   components.ToastSuccess,
+			})
+		}
+		return m, nil
+
 	case panels.OpenFileMsg:
 		return m, m.openFileInEditor(msg.Change)
 
@@ -3635,6 +3658,7 @@ func (m *Model) updateStats() {
 	m.claudeCount = 0
 	m.codexCount = 0
 	m.geminiCount = 0
+	m.grokCount = 0
 	m.antigravityCount = 0
 	m.cursorCount = 0
 	m.windsurfCount = 0
@@ -3643,13 +3667,15 @@ func (m *Model) updateStats() {
 	m.userCount = 0
 
 	for _, p := range m.panes {
-		switch p.Type {
+		switch p.Type.Canonical() {
 		case tmux.AgentClaude:
 			m.claudeCount++
 		case tmux.AgentCodex:
 			m.codexCount++
 		case tmux.AgentGemini:
 			m.geminiCount++
+		case tmux.AgentGrok:
+			m.grokCount++
 		case tmux.AgentAntigravity:
 			m.antigravityCount++
 		case tmux.AgentCursor:
@@ -3705,7 +3731,7 @@ func (m *Model) updateTickerData() {
 	if activeAgents == 0 && len(m.panes) > 0 {
 		// Status detection hasn't populated yet; show total agents as placeholder
 		// This prevents showing "0/17" when we simply haven't fetched status yet
-		activeAgents = m.claudeCount + m.codexCount + m.geminiCount + m.antigravityCount + m.cursorCount + m.windsurfCount + m.aiderCount + m.ollamaCount
+		activeAgents = m.claudeCount + m.codexCount + m.geminiCount + m.grokCount + m.antigravityCount + m.cursorCount + m.windsurfCount + m.aiderCount + m.ollamaCount
 	}
 
 	// Count alerts by severity
@@ -3728,6 +3754,7 @@ func (m *Model) updateTickerData() {
 		ClaudeCount:      m.claudeCount,
 		CodexCount:       m.codexCount,
 		GeminiCount:      m.geminiCount,
+		GrokCount:        m.grokCount,
 		AntigravityCount: m.antigravityCount,
 		CursorCount:      m.cursorCount,
 		WindsurfCount:    m.windsurfCount,
@@ -3932,7 +3959,7 @@ func (m Model) renderPaneGrid() string {
 		var borderColor, iconColor lipgloss.Color
 		var agentIcon string
 
-		switch p.Type {
+		switch p.Type.Canonical() {
 		case tmux.AgentClaude:
 			borderColor = t.Claude
 			iconColor = t.Claude
@@ -3945,6 +3972,10 @@ func (m Model) renderPaneGrid() string {
 			borderColor = t.Gemini
 			iconColor = t.Gemini
 			agentIcon = ic.Gemini
+		case tmux.AgentGrok:
+			borderColor = t.Pink
+			iconColor = t.Pink
+			agentIcon = ic.Robot
 		case tmux.AgentAntigravity:
 			borderColor = t.Lavender
 			iconColor = t.Lavender
@@ -5652,7 +5683,7 @@ func (m Model) renderPaneDetail(width int) string {
 	// Type badge
 	var typeColor lipgloss.Color
 	var typeIcon string
-	switch p.Type {
+	switch p.Type.Canonical() {
 	case tmux.AgentClaude:
 		typeColor = t.Claude
 		typeIcon = ic.Claude
@@ -5662,6 +5693,9 @@ func (m Model) renderPaneDetail(width int) string {
 	case tmux.AgentGemini:
 		typeColor = t.Gemini
 		typeIcon = ic.Gemini
+	case tmux.AgentGrok:
+		typeColor = t.Pink
+		typeIcon = ic.Robot
 	case tmux.AgentAntigravity:
 		typeColor = t.Lavender
 		typeIcon = ic.Gemini
@@ -6037,32 +6071,69 @@ func (m *Model) handleConflictAction(conflict watcher.FileConflict, action watch
 	}
 }
 
-// executeReplay executes a replay of a history entry
+type dashboardReplayClient interface {
+	GetPanes(session string) ([]tmux.Pane, error)
+	SendKeys(target, keys string, enter bool) error
+}
+
+type dashboardReplayResultMsg struct {
+	Entry history.HistoryEntry
+	Err   error
+}
+
+func failedDashboardReplayResult(session string, entry history.HistoryEntry, err error) dashboardReplayResultMsg {
+	entry.Session = session
+	entry.Source = history.SourceReplay
+	entry.Success = false
+	entry.Error = err.Error()
+	return dashboardReplayResultMsg{Entry: entry, Err: err}
+}
+
+// executeReplay executes a replay of a history entry.
 func (m Model) executeReplay(entry history.HistoryEntry) tea.Cmd {
+	return m.executeReplayWithClient(entry, tmux.DefaultClient)
+}
+
+func (m Model) executeReplayWithClient(entry history.HistoryEntry, client dashboardReplayClient) tea.Cmd {
 	return func() tea.Msg {
-		// Create a new history entry for the replay
+		var targetPanes []tmux.Pane
+		if len(entry.Targets) > 0 {
+			panes, err := client.GetPanes(m.session)
+			if err != nil {
+				err = fmt.Errorf("resolve replay targets: %w", err)
+				return failedDashboardReplayResult(m.session, entry, err)
+			}
+
+			targetPanes, err = tmux.ResolvePaneSelectors(panes, entry.Targets, false)
+			if err != nil {
+				err = fmt.Errorf("resolve replay targets: %w", err)
+				return failedDashboardReplayResult(m.session, entry, err)
+			}
+			for _, pane := range targetPanes {
+				if strings.TrimSpace(pane.ID) == "" {
+					err = fmt.Errorf("replay target %s has no stable tmux pane ID", pane.Ref().Physical())
+					return failedDashboardReplayResult(m.session, entry, err)
+				}
+				if err := agent.AgentType(pane.Type).ValidateAutomatedPromptDelivery(); err != nil {
+					err = fmt.Errorf("replay target %s is %s: %w", pane.Ref().Physical(), pane.Type.ProfileName(), err)
+					return failedDashboardReplayResult(m.session, entry, err)
+				}
+			}
+		}
+
 		replayEntry := history.NewEntry(m.session, entry.Targets, entry.Prompt, history.SourceReplay)
 		replayEntry.SetAgentTypes(entry.AgentTypes)
-
-		// Set template if the original entry used one
 		if entry.Template != "" {
 			replayEntry.Template = entry.Template
 		}
 
-		// Execute the replay using tmux client
-		client := tmux.DefaultClient
-
-		// Parse targets - for now, replay to the same targets as the original entry
-		// In the future, we could show a dialog to let user choose new targets
-		for _, targetStr := range entry.Targets {
-			target := fmt.Sprintf("%s:%s", m.session, targetStr)
-			if err := client.SendKeys(target, entry.Prompt, true); err != nil {
-				log.Printf("[Replay] Failed to send to target %s: %v", targetStr, err)
-				replayEntry.SetError(fmt.Errorf("failed to send to target %s: %w", targetStr, err))
+		for _, pane := range targetPanes {
+			if err := client.SendKeys(pane.ID, entry.Prompt, true); err != nil {
+				log.Printf("[Replay] Failed to send to target %s: %v", pane.ID, err)
+				replayEntry.SetError(fmt.Errorf("failed to send to target %s: %w", pane.ID, err))
 			}
 		}
 
-		// If no errors occurred, mark as successful
 		if replayEntry.Error == "" {
 			replayEntry.SetSuccess()
 		}
@@ -6071,14 +6142,11 @@ func (m Model) executeReplay(entry history.HistoryEntry) tea.Cmd {
 			log.Printf("[Replay] Failed to append replay entry to history: %v", err)
 		}
 
-		// Return a message to update the status
-		return struct {
-			Entry   history.HistoryEntry
-			Success bool
-		}{
-			Entry:   *replayEntry,
-			Success: replayEntry.Success,
+		var replayErr error
+		if replayEntry.Error != "" {
+			replayErr = errors.New(replayEntry.Error)
 		}
+		return dashboardReplayResultMsg{Entry: *replayEntry, Err: replayErr}
 	}
 }
 

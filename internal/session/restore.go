@@ -189,6 +189,9 @@ func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands) 
 	if state == nil {
 		return fmt.Errorf("session state is nil")
 	}
+	if err := ValidateAutomatedRelaunch(state); err != nil {
+		return err
+	}
 
 	correlationID := audit.NewCorrelationID()
 	auditStart := time.Now()
@@ -347,6 +350,9 @@ func Resume(state *SessionState, cmds AgentCommands, opts ResumeOptions) (*Resum
 	if state == nil {
 		return nil, fmt.Errorf("session state is nil")
 	}
+	if err := ValidateAutomatedRelaunch(state); err != nil {
+		return nil, err
+	}
 
 	name := opts.Name
 	if name == "" {
@@ -466,6 +472,8 @@ func getAgentCommand(agentType string, cmds AgentCommands) string {
 		return cmds.Gemini
 	case tmux.AgentAntigravity:
 		return cmds.Antigravity
+	case tmux.AgentGrok:
+		return ""
 	case tmux.AgentCursor:
 		return cmds.Cursor
 	case tmux.AgentWindsurf:

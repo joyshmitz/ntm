@@ -94,12 +94,12 @@ func completeProfileSwitchArgs(cmd *cobra.Command, args []string, toComplete str
 		if session == "" {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		return filterByPrefix(listAgentIDs(session), toComplete), cobra.ShellCompDirectiveNoFileComp
+		return filterByPrefix(listProfileSwitchAgentIDs(session), toComplete), cobra.ShellCompDirectiveNoFileComp
 	case 1:
 		if session == "" {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		return filterByPrefix(listProfileNamesForSession(session), toComplete), cobra.ShellCompDirectiveNoFileComp
+		return filterByPrefix(listProfileNamesForSession(cmd.Context(), session), toComplete), cobra.ShellCompDirectiveNoFileComp
 	default:
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
@@ -263,20 +263,45 @@ func listAgentIDs(session string) []string {
 	return ids
 }
 
+func listProfileSwitchAgentIDs(session string) []string {
+	if session == "" {
+		return nil
+	}
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(panes))
+	for _, p := range panes {
+		if id, ok := profileSwitchCompletionAgentID(p); ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func profileSwitchCompletionAgentID(p tmux.Pane) (string, bool) {
+	if !supportsProfileSwitchAgentType(p.Type) {
+		return "", false
+	}
+	return completionAgentID(p)
+}
+
 func completionAgentID(p tmux.Pane) (string, bool) {
 	if p.NTMIndex <= 0 {
 		return "", false
 	}
 	switch canonical := p.Type.Canonical(); canonical {
-	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentAntigravity, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOpencode, tmux.AgentOllama:
+	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentAntigravity, tmux.AgentGrok, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOpencode, tmux.AgentOllama:
 		return fmt.Sprintf("%s_%d", canonical, p.NTMIndex), true
 	default:
 		return "", false
 	}
 }
 
-func listProfileNamesForSession(session string) []string {
-	projectDir, err := resolveProfileSwitchProjectDir(session)
+func listProfileNamesForSession(ctx context.Context, session string) []string {
+	projectDir, err := resolveProfileSwitchProjectDirContext(ctx, session)
 	if err != nil || projectDir == "" {
 		return nil
 	}

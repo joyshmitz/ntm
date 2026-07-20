@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -21,37 +22,265 @@ func (f smartRestartPromptDispatcherFunc) Execute(ctx context.Context, req dispa
 }
 
 type deterministicSmartRestartExecutor struct {
-	launches []string
+	launches                  []string
+	mutations                 []string
+	shellPID                  int
+	shellPIDErr               error
+	ready                     bool
+	readyConfigured           bool
+	readyErr                  error
+	childAlive                bool
+	captureOutput             string
+	captureErr                error
+	captureCancel             context.CancelFunc
+	observationContextsActive []bool
 }
 
-func (e *deterministicSmartRestartExecutor) exitAgent(_ string, _, _ int, _ string, seq *RestartSequence) error {
+type cancelAfterSmartRestartLaunchExecutor struct {
+	*deterministicSmartRestartExecutor
+	cancel context.CancelFunc
+}
+
+func (e *cancelAfterSmartRestartLaunchExecutor) sendKeys(ctx context.Context, session string, win, pane int, keys string) error {
+	if err := e.deterministicSmartRestartExecutor.sendKeys(ctx, session, win, pane, keys); err != nil {
+		return err
+	}
+	e.cancel()
+	return nil
+}
+
+func (e *deterministicSmartRestartExecutor) exitAgent(_ context.Context, _ string, _, _ int, _ string, seq *RestartSequence) error {
+	e.mutations = append(e.mutations, "exit")
 	seq.ExitMethod = "test_exit"
 	return nil
 }
 
-func (*deterministicSmartRestartExecutor) waitForShellReturn(string, int, int, time.Duration) (bool, string) {
-	return true, ""
+func (*deterministicSmartRestartExecutor) waitForShellReturn(context.Context, string, int, int, time.Duration) (bool, string, error) {
+	return true, "", nil
 }
 
-func (*deterministicSmartRestartExecutor) hardKillAgent(string, int, int, *RestartSequence) (*HardKillResult, error) {
+func (e *deterministicSmartRestartExecutor) hardKillAgent(context.Context, string, int, int, *RestartSequence) (*HardKillResult, error) {
+	e.mutations = append(e.mutations, "hard-kill")
 	return &HardKillResult{Success: true}, nil
 }
 
-func (e *deterministicSmartRestartExecutor) sendKeys(_ string, win, pane int, keys string) error {
+func (e *deterministicSmartRestartExecutor) sendKeys(_ context.Context, _ string, win, pane int, keys string) error {
+	e.mutations = append(e.mutations, "send-keys")
 	e.launches = append(e.launches, fmt.Sprintf("%d.%d:%s", win, pane, keys))
 	return nil
 }
 
-func (*deterministicSmartRestartExecutor) getShellPID(string, int, int) (int, error) {
-	return 0, nil
+func TestValidateSmartRestartTargetsRejectsWholeGrokBatch(t *testing.T) {
+	for _, panes := range []map[string]PaneWorkStatus{
+		{"0": {AgentType: "grok"}},
+		{
+			"0": {AgentType: "cc"},
+			"1": {AgentType: "grok-build"},
+		},
+	} {
+		if err := validateSmartRestartTargets(panes); !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+			t.Fatalf("validateSmartRestartTargets() error = %v, want Grok relaunch sentinel", err)
+		}
+	}
 }
 
-func (*deterministicSmartRestartExecutor) waitForPaneAgentReady(string, int, string, time.Duration) bool {
-	return true
+func TestExecuteRestartRejectsGrokBeforeMutation(t *testing.T) {
+	executor := &deterministicSmartRestartExecutor{}
+	seq, err := executeRestart(t.Context(), "proj", 0, 1, "grok-build", SmartRestartOptions{
+		Force:        true,
+		HardKill:     true,
+		HardKillOnly: true,
+		executor:     executor,
+	})
+	if seq == nil || seq.AgentType != "grok-build" || seq.AgentLaunched {
+		t.Fatalf("executeRestart() sequence = %+v, want unlaunched Grok sequence", seq)
+	}
+	var structured *StructuredError
+	if !errors.As(err, &structured) || structured.Code != ErrCodeNotImplemented || structured.Phase != "preflight" {
+		t.Fatalf("executeRestart() error = %T %+v, want NOT_IMPLEMENTED preflight error", err, err)
+	}
+	if len(executor.mutations) != 0 || len(executor.launches) != 0 {
+		t.Fatalf("executeRestart() mutated unsupported target: mutations=%v launches=%v", executor.mutations, executor.launches)
+	}
 }
 
-func (*deterministicSmartRestartExecutor) capturePaneOutput(string, int) (string, error) {
-	return "", nil
+func TestExecuteRestartReturnsCallerCancellationAfterLaunch(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	executor := &cancelAfterSmartRestartLaunchExecutor{
+		deterministicSmartRestartExecutor: &deterministicSmartRestartExecutor{
+			shellPID:        321,
+			ready:           true,
+			readyConfigured: true,
+			childAlive:      true,
+		},
+		cancel: cancel,
+	}
+	seq, err := executeRestart(ctx, "proj", 0, 1, "cc", SmartRestartOptions{
+		PostWaitTime: time.Minute,
+		executor:     executor,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("executeRestart() error=%v, want context.Canceled", err)
+	}
+	if seq == nil || !seq.AgentLaunched || seq.AgentLaunchStatus != SmartRestartLaunchReady || !seq.LaunchAttempted ||
+		seq.ShellPID != 321 || seq.ProcessAlive == nil || !*seq.ProcessAlive || len(executor.launches) != 1 {
+		t.Fatalf("canceled smart restart sequence=%+v launches=%v", seq, executor.launches)
+	}
+	if len(executor.observationContextsActive) != 2 || !executor.observationContextsActive[0] || !executor.observationContextsActive[1] {
+		t.Fatalf("independent observation did not use a live context: %v", executor.observationContextsActive)
+	}
+}
+
+func TestObserveSmartRestartLaunchAfterCancellationReportsStrongestKnownState(t *testing.T) {
+	tests := []struct {
+		name             string
+		executor         *deterministicSmartRestartExecutor
+		wantStatus       SmartRestartLaunchStatus
+		wantLaunched     bool
+		wantProcessAlive *bool
+		wantObservation  bool
+	}{
+		{
+			name: "ready child",
+			executor: &deterministicSmartRestartExecutor{
+				shellPID:        101,
+				ready:           true,
+				readyConfigured: true,
+				childAlive:      true,
+			},
+			wantStatus:       SmartRestartLaunchReady,
+			wantLaunched:     true,
+			wantProcessAlive: pointerToBool(true),
+		},
+		{
+			name: "live child without readiness",
+			executor: &deterministicSmartRestartExecutor{
+				shellPID:        102,
+				readyConfigured: true,
+				childAlive:      true,
+			},
+			wantStatus:       SmartRestartLaunchUnknown,
+			wantProcessAlive: pointerToBool(true),
+		},
+		{
+			name: "no live child",
+			executor: &deterministicSmartRestartExecutor{
+				shellPID:        103,
+				readyConfigured: true,
+			},
+			wantStatus:       SmartRestartLaunchNotReady,
+			wantProcessAlive: pointerToBool(false),
+		},
+		{
+			name: "PID observation failed",
+			executor: &deterministicSmartRestartExecutor{
+				shellPIDErr:     errors.New("PID unavailable"),
+				readyConfigured: true,
+			},
+			wantStatus:      SmartRestartLaunchUnknown,
+			wantObservation: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			seq := &RestartSequence{
+				AgentType:         "cod",
+				AgentLaunchStatus: SmartRestartLaunchUnknown,
+				LaunchAttempted:   true,
+			}
+
+			observeSmartRestartLaunchAfterCancellation(ctx, "proj", 0, 1, "cod", "proj:0.1", tt.executor, seq)
+
+			if seq.AgentLaunchStatus != tt.wantStatus || seq.AgentLaunched != tt.wantLaunched {
+				t.Fatalf("launch sequence=%+v, want status=%s launched=%t", seq, tt.wantStatus, tt.wantLaunched)
+			}
+			if tt.wantProcessAlive == nil {
+				if seq.ProcessAlive != nil {
+					t.Fatalf("process_alive=%v, want unobserved", *seq.ProcessAlive)
+				}
+			} else if seq.ProcessAlive == nil || *seq.ProcessAlive != *tt.wantProcessAlive {
+				t.Fatalf("process_alive=%v, want %t", seq.ProcessAlive, *tt.wantProcessAlive)
+			}
+			if (seq.LaunchObservationError != "") != tt.wantObservation {
+				t.Fatalf("launch_observation_error=%q, want present=%t", seq.LaunchObservationError, tt.wantObservation)
+			}
+			if len(tt.executor.observationContextsActive) != 2 || !tt.executor.observationContextsActive[0] || !tt.executor.observationContextsActive[1] {
+				t.Fatalf("observation contexts=%v, want two live independent calls", tt.executor.observationContextsActive)
+			}
+		})
+	}
+}
+
+func TestMaterializeSmartRestartCancellationActionsUsesSortedRemainingTargets(t *testing.T) {
+	panes := map[string]PaneWorkStatus{
+		"2.1": {AgentType: "cc", Recommendation: "SAFE_TO_RESTART"},
+		"0.2": {AgentType: "cod", Recommendation: "SAFE_TO_RESTART"},
+		"1.0": {AgentType: "gmi", Recommendation: "SAFE_TO_RESTART"},
+	}
+	keys := sortedSmartRestartPaneKeys(panes)
+	wantKeys := []string{"0.2", "1.0", "2.1"}
+	if fmt.Sprint(keys) != fmt.Sprint(wantKeys) {
+		t.Fatalf("sorted keys=%v, want %v", keys, wantKeys)
+	}
+	out := &SmartRestartOutput{
+		RobotResponse: NewRobotResponse(true),
+		Actions: map[string]RestartAction{
+			"0.2": {Action: ActionFailed},
+		},
+		Summary: RestartSummary{
+			Failed:        1,
+			PanesByAction: map[string][]string{"FAILED": {"0.2"}},
+		},
+	}
+
+	materializeSmartRestartCancellationActions(out, panes, keys[1:], context.Canceled)
+	setSmartRestartCancellation(out, context.Canceled)
+	finalizeSmartRestartOutput(out, SmartRestartOptions{Session: "proj"})
+
+	if out.Success || out.ErrorCode != ErrCodeTimeout || out.Summary.Skipped != 2 {
+		t.Fatalf("canceled output=%+v", out)
+	}
+	if fmt.Sprint(out.Summary.PanesByAction["SKIPPED"]) != fmt.Sprint([]string{"1.0", "2.1"}) {
+		t.Fatalf("skipped order=%v", out.Summary.PanesByAction["SKIPPED"])
+	}
+	for _, paneKey := range []string{"1.0", "2.1"} {
+		action := out.Actions[paneKey]
+		if action.Action != ActionSkipped || action.PreCheck == nil || !strings.Contains(action.Reason, "not attempted") {
+			t.Fatalf("pending action %s=%+v", paneKey, action)
+		}
+	}
+}
+
+func pointerToBool(value bool) *bool {
+	return &value
+}
+
+func (e *deterministicSmartRestartExecutor) getShellPID(ctx context.Context, _ string, _, _ int) (int, error) {
+	e.observationContextsActive = append(e.observationContextsActive, ctx != nil && ctx.Err() == nil)
+	return e.shellPID, e.shellPIDErr
+}
+
+func (e *deterministicSmartRestartExecutor) waitForPaneAgentReady(ctx context.Context, _ string, _ int, _ string, _ time.Duration) (bool, error) {
+	e.observationContextsActive = append(e.observationContextsActive, ctx != nil && ctx.Err() == nil)
+	if !e.readyConfigured {
+		return true, e.readyErr
+	}
+	return e.ready, e.readyErr
+}
+
+func (e *deterministicSmartRestartExecutor) capturePaneOutput(context.Context, string, int) (string, error) {
+	if e.captureCancel != nil {
+		e.captureCancel()
+	}
+	return e.captureOutput, e.captureErr
+}
+
+func (e *deterministicSmartRestartExecutor) hasChildAlive(shellPID int) bool {
+	return shellPID > 0 && e.childAlive
 }
 
 // =============================================================================
@@ -937,6 +1166,7 @@ func TestRestartCanonicalAgentType(t *testing.T) {
 		{"google-gemini", "gmi"},
 		{"antigravity", "agy"},
 		{"agy", "agy"},
+		{"grok-build", "grok"},
 		{"opencode", "oc"},
 		{"ws", "windsurf"},
 		{"ollama", "ollama"},
@@ -964,6 +1194,8 @@ func TestRestartLaunchAlias(t *testing.T) {
 		{"openai-codex", "cod"},
 		{"google-gemini", "gmi"},
 		{"antigravity", "agy"},
+		{"grok", ""},
+		{"xai_grok_build", ""},
 		{"opencode", "oc"},
 		{"ws", "windsurf"},
 		{"aider", "aider"},
@@ -1096,7 +1328,7 @@ func TestParseNTMPanesCarriesWindowIndex(t *testing.T) {
 // success:true envelope. This needs no live tmux because SessionExists returns
 // false for a random name.
 func TestGetSmartRestartUnknownSessionFailsLoud(t *testing.T) {
-	out, err := GetSmartRestart(SmartRestartOptions{
+	out, err := GetSmartRestart(t.Context(), SmartRestartOptions{
 		Session:       "ntm-nonexistent-session-for-test-172",
 		LinesCaptured: 10,
 	})
@@ -1493,10 +1725,15 @@ func TestExecuteRestartReportsRequestedPromptOutcome(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			executor := &deterministicSmartRestartExecutor{}
-			dispatcher := smartRestartPromptDispatcherFunc(func(context.Context, dispatchsvc.Request) (dispatchsvc.Result, error) {
+			type contextKey struct{}
+			callerCtx := context.WithValue(t.Context(), contextKey{}, tt.name)
+			dispatcher := smartRestartPromptDispatcherFunc(func(gotCtx context.Context, _ dispatchsvc.Request) (dispatchsvc.Result, error) {
+				if gotCtx != callerCtx {
+					t.Fatalf("prompt dispatch context=%v, want caller context", gotCtx)
+				}
 				return tt.result, tt.dispatchErr
 			})
-			seq, err := executeRestart("proj", 2, 4, "cc", SmartRestartOptions{
+			seq, err := executeRestart(callerCtx, "proj", 2, 4, "cc", SmartRestartOptions{
 				Prompt:         "continue",
 				PostWaitTime:   time.Millisecond,
 				promptDispatch: dispatcher,
@@ -1601,8 +1838,8 @@ func TestApplyRestartExecutionOutcomePreservesRestartStatusOnPromptFailure(t *te
 	promptErr := NewStructuredError(ErrCodePromptSendFailed, "blocked by redaction policy").WithPhase("prompt").WithPane(4)
 	verified := &PostStateInfo{AgentRunning: true, AgentType: "cc", Confidence: 1}
 
-	applyRestartExecutionOutcome(out, &action, "2.4", "idle", seq, promptErr, func() *PostStateInfo {
-		return verified
+	applyRestartExecutionOutcome(out, &action, "2.4", "idle", seq, promptErr, func() (*PostStateInfo, error) {
+		return verified, nil
 	})
 
 	if action.Action != ActionRestarted || action.RestartSequence != seq || action.PostState != verified {
@@ -1635,5 +1872,64 @@ func TestApplyRestartExecutionOutcomeCountsConfirmedPrompt(t *testing.T) {
 	}
 	if out.Summary.Restarted != 1 || out.Summary.PromptDelivered != 1 || out.Summary.PromptFailed != 0 {
 		t.Fatalf("summary = %+v, want one confirmed prompt", out.Summary)
+	}
+}
+
+func TestApplyRestartExecutionOutcomePreservesPartialSequenceOnFailure(t *testing.T) {
+	out := &SmartRestartOutput{Summary: RestartSummary{PanesByAction: map[string][]string{}}}
+	action := RestartAction{}
+	processAlive := true
+	seq := &RestartSequence{
+		ExitMethod:        "exit_command",
+		ShellConfirmed:    true,
+		AgentLaunched:     true,
+		AgentLaunchStatus: SmartRestartLaunchReady,
+		LaunchAttempted:   true,
+		ProcessAlive:      &processAlive,
+		ShellPID:          123,
+		AgentType:         "cod",
+	}
+
+	applyErr := applyRestartExecutionOutcome(out, &action, "0", "forced", seq, context.Canceled, nil)
+
+	if applyErr != nil || action.Action != ActionFailed || action.RestartSequence != seq {
+		t.Fatalf("failed action lost partial sequence: %+v", action)
+	}
+	if action.Error == "" || out.Summary.Failed != 1 || fmt.Sprint(out.Summary.PanesByAction["FAILED"]) != "[0]" {
+		t.Fatalf("failed action summary=%+v action=%+v", out.Summary, action)
+	}
+}
+
+func TestApplyRestartExecutionOutcomePropagatesVerificationCancellation(t *testing.T) {
+	out := &SmartRestartOutput{Summary: RestartSummary{PanesByAction: map[string][]string{}}}
+	action := RestartAction{}
+	seq := &RestartSequence{
+		AgentLaunched:     true,
+		AgentLaunchStatus: SmartRestartLaunchReady,
+		LaunchAttempted:   true,
+	}
+
+	err := applyRestartExecutionOutcome(out, &action, "0", "forced", seq, nil, func() (*PostStateInfo, error) {
+		return nil, context.Canceled
+	})
+
+	if !errors.Is(err, context.Canceled) || action.Action != ActionRestarted || action.RestartSequence != seq ||
+		!strings.Contains(action.Error, "verification canceled") || out.Summary.Restarted != 1 {
+		t.Fatalf("verification cancellation result err=%v action=%+v summary=%+v", err, action, out.Summary)
+	}
+}
+
+func TestVerifyRestartPropagatesCancellationAfterCapture(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	executor := &deterministicSmartRestartExecutor{
+		captureOutput: "Codex>\n100% context left\n",
+		captureCancel: cancel,
+	}
+
+	postState, err := verifyRestart(ctx, "proj", 0, 1, SmartRestartOptions{executor: executor})
+
+	if postState != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("verifyRestart() state=%+v err=%v, want propagated context cancellation", postState, err)
 	}
 }

@@ -335,22 +335,10 @@ func Emit(eventType EventType, session string, data interface{}) {
 	DefaultLogger().LogEvent(eventType, session, data)
 }
 
-// EmitSessionCreate logs a session creation event.
-func EmitSessionCreate(session string, claudeCount, codexCount, geminiCount, antigravityCount, grokCount, cursorCount, windsurfCount, aiderCount, opencodeCount, ollamaCount int, workDir, recipe string) {
-	Emit(EventSessionCreate, session, SessionCreateData{
-		ClaudeCount:      claudeCount,
-		CodexCount:       codexCount,
-		GeminiCount:      geminiCount,
-		AntigravityCount: antigravityCount,
-		GrokCount:        grokCount,
-		CursorCount:      cursorCount,
-		WindsurfCount:    windsurfCount,
-		AiderCount:       aiderCount,
-		OpencodeCount:    opencodeCount,
-		OllamaCount:      ollamaCount,
-		WorkDir:          workDir,
-		Recipe:           recipe,
-	})
+// EmitSessionCreate logs a session creation event. The structured payload keeps
+// provider counts from being miswired when a new agent type is added.
+func EmitSessionCreate(session string, data SessionCreateData) {
+	Emit(EventSessionCreate, session, data)
 }
 
 // EmitPromptSend logs a prompt send event.

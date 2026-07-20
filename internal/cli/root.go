@@ -21,7 +21,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/audit"
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/encryption"
@@ -79,7 +81,18 @@ func recordRobotProcessExit(err error) {
 }
 
 func failRobotCommand(err error, code, hint, command string) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		code = robot.ErrCodeTimeout
+		hint = "Retry the command after cancellation or increase its timeout"
+	}
 	recordRobotProcessExit(robot.EncodeErrorJSON(err, code, hint, command))
+}
+
+func classifyRobotContextInjectError(err error) (code, hint string) {
+	if errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		return robot.ErrCodeNotImplemented, agent.GrokPromptDeliveryCapabilityHint
+	}
+	return robot.ErrCodeInternalError, "Check tmux session health"
 }
 
 func recordLegacyRobotExit(code int) {
@@ -372,9 +385,31 @@ func isRobotGlobalModifier(command string) bool {
 	}
 }
 
+var errCLIInvalidInput = errors.New("invalid CLI input")
+
+type cliInvalidInputError struct {
+	err error
+}
+
+func (e *cliInvalidInputError) Error() string { return e.err.Error() }
+func (e *cliInvalidInputError) Unwrap() error { return e.err }
+func (e *cliInvalidInputError) Is(target error) bool {
+	return target == errCLIInvalidInput || errors.Is(e.err, target)
+}
+
+func markCLIInvalidInput(err error) error {
+	if err == nil || errors.Is(err, errCLIInvalidInput) {
+		return err
+	}
+	return &cliInvalidInputError{err: err}
+}
+
 func classifyRobotExecuteError(err error) (string, string) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return robot.ErrCodeTimeout, "Retry the command after cancellation"
+	}
+	if errors.Is(err, errCLIInvalidInput) {
+		return robot.ErrCodeInvalidFlag, "Fix the invalid command input or selected configuration"
 	}
 	message := strings.ToLower(err.Error())
 	for _, fragment := range []string{
@@ -413,7 +448,7 @@ var rootCmd = &cobra.Command{
 	Use:   "ntm",
 	Short: "Named Tmux Manager - orchestrate AI coding agents in tmux sessions",
 	Long: `NTM (Named Tmux Manager) helps you create and manage tmux sessions
-with multiple AI coding agents (Claude, Codex, Gemini) in separate panes.
+with multiple AI coding agents (Claude, Codex, Antigravity, Grok Build, and legacy Gemini) in separate panes.
 
 Quick Start:
   ntm spawn myproject --cc=2 --cod=2    # Create session with 4 agents
@@ -455,8 +490,10 @@ Shell Integration:
 		startup.BeginPhase2()
 		defer startup.EndPhase2()
 
-		// Set config path for lazy loader
-		startup.SetConfigPath(selectedConfigPath())
+		// Preserve whether the user explicitly selected a config. Runtime safety
+		// checks use NTM_CONFIG as that signal, so propagating an implicit default
+		// path would incorrectly make a missing default config fatal.
+		configureStartupConfigPath()
 
 		// Load config lazily - only commands that need it will trigger loading
 		if needsConfigLoading(cmd.Name()) {
@@ -468,7 +505,7 @@ Shell Integration:
 				if machineInvocation, machineCommand := machineJSONInvocation(cmd); machineInvocation {
 					return robot.EncodeErrorJSON(
 						fmt.Errorf("config load failed: %w", err),
-						robot.ErrCodeInternalError,
+						robot.ErrCodeInvalidFlag,
 						"Fix the selected TOML configuration or pass --config with a valid file",
 						machineCommand,
 					)
@@ -505,6 +542,11 @@ Shell Integration:
 			// Ensure persisted prompt history + event logs never store raw secrets/PII when redaction is enabled.
 			// (bd-3sl0s)
 			if cfg != nil {
+				// Install the merged operator-gate label vocabulary so every
+				// automated assignment surface honors project-specific gating
+				// labels (#223).
+				bv.ConfigureOperatorGatedLabels(cfg.Assign.OperatorGatedLabels)
+
 				privacy.SetDefaultManager(privacy.New(cfg.Privacy))
 
 				redactCfg := cfg.Redaction.ToRedactionLibConfig()
@@ -687,7 +729,7 @@ Shell Integration:
 			return
 		}
 		if robotEvents {
-			session, err := resolveOptionalRobotSessionFilter(robotEventsSession)
+			session, err := resolveOptionalRobotSessionFilter(cmd.Context(), robotEventsSession)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-events")
 				return
@@ -738,7 +780,7 @@ Shell Integration:
 			return
 		}
 		if robotAttention {
-			session, err := resolveOptionalRobotSessionFilter(robotAttentionSession)
+			session, err := resolveOptionalRobotSessionFilter(cmd.Context(), robotAttentionSession)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-attention")
 				return
@@ -772,7 +814,7 @@ Shell Integration:
 			return
 		}
 		if robotDigest {
-			session, err := resolveOptionalRobotSessionFilter(robotAttentionSession)
+			session, err := resolveOptionalRobotSessionFilter(cmd.Context(), robotAttentionSession)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-digest")
 				return
@@ -874,7 +916,7 @@ Shell Integration:
 			return
 		}
 		if robotContext != "" {
-			session, _, err := resolveRobotSessionProjectScope(robotContext)
+			session, _, err := resolveRobotSessionProjectScope(cmd.Context(), robotContext)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-context")
 				return
@@ -935,7 +977,7 @@ Shell Integration:
 			return
 		}
 		if robotEnsemble != "" {
-			session, err := resolveRobotOfflineCapableSession(robotEnsemble)
+			session, err := resolveRobotOfflineCapableSession(cmd.Context(), robotEnsemble)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-ensemble")
 				return
@@ -952,7 +994,7 @@ Shell Integration:
 			return
 		}
 		if robotEnsembleStop != "" {
-			session, err := resolveRobotOfflineCapableSession(robotEnsembleStop)
+			session, err := resolveRobotOfflineCapableSession(cmd.Context(), robotEnsembleStop)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-ensemble-stop")
 				return
@@ -967,7 +1009,7 @@ Shell Integration:
 			return
 		}
 		if robotOverlay {
-			session, err := resolveOptionalRobotLiveSession(robotOverlaySession)
+			session, err := resolveOptionalRobotLiveSession(cmd.Context(), robotOverlaySession)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-overlay")
 				return
@@ -1042,7 +1084,7 @@ Shell Integration:
 			}
 
 			if sessionName != "" {
-				resolvedSession, resolvedProjectKey, err := resolveAgentMailScopeWithPreference(sessionName, sessionExplicit)
+				resolvedSession, resolvedProjectKey, err := resolveAgentMailScopeWithPreference(cmd.Context(), sessionName, sessionExplicit)
 				if err != nil {
 					failRobotCommand(err, robot.ErrCodeSessionNotFound, "Verify the session and Agent Mail project scope", "robot-mail")
 					return
@@ -1208,7 +1250,7 @@ Shell Integration:
 			return
 		}
 		if robotTokens {
-			session, err := resolveOptionalRobotSessionFilter(resolveRobotTokensSession(cmd))
+			session, err := resolveOptionalRobotSessionFilter(cmd.Context(), resolveRobotTokensSession(cmd))
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-tokens")
 				return
@@ -1226,7 +1268,7 @@ Shell Integration:
 			return
 		}
 		if robotHistory != "" {
-			session, err := resolveRobotSessionFilter(robotHistory)
+			session, err := resolveRobotSessionFilter(cmd.Context(), robotHistory)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-history")
 				return
@@ -1252,14 +1294,14 @@ Shell Integration:
 			return
 		}
 		if robotCausality != "" {
-			session, err := resolveRobotOfflineCapableSession(robotCausality)
+			session, err := resolveRobotOfflineCapableSession(cmd.Context(), robotCausality)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-causality")
 				return
 			}
 			projectDir := strings.TrimSpace(robotCausalityProject)
 			if projectDir == "" {
-				if resolvedProject, resolveErr := resolveExplicitProjectDirForSession(session); resolveErr == nil {
+				if resolvedProject, resolveErr := resolveExplicitProjectDirForSessionContext(cmd.Context(), session); resolveErr == nil {
 					projectDir = strings.TrimSpace(resolvedProject)
 				}
 			}
@@ -1286,7 +1328,7 @@ Shell Integration:
 			return
 		}
 		if robotActivity != "" {
-			session, err := resolveRobotLiveSession(robotActivity)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotActivity)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-activity")
 				return
@@ -1312,7 +1354,7 @@ Shell Integration:
 			return
 		}
 		if robotWait != "" {
-			session, err := resolveRobotLiveSession(robotWait)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotWait)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-wait")
 				return
@@ -1359,7 +1401,7 @@ Shell Integration:
 			return
 		}
 		if robotRoute != "" {
-			session, err := resolveRobotLiveSession(robotRoute)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotRoute)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-route")
 				return
@@ -1387,7 +1429,7 @@ Shell Integration:
 				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use KEY=VALUE pipeline variables", "robot-pipeline-run")
 				return
 			}
-			session, projectDir, err := resolveRobotSessionProjectScope(resolveRobotPipelineSession(cmd))
+			session, projectDir, err := resolveRobotSessionProjectScope(cmd.Context(), resolveRobotPipelineSession(cmd))
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Provide a valid pipeline session or project scope", "robot-pipeline-run")
 				return
@@ -1432,7 +1474,7 @@ Shell Integration:
 			return
 		}
 		if robotTail != "" {
-			session, err := resolveRobotLiveSession(robotTail)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotTail)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-tail")
 				return
@@ -1448,7 +1490,7 @@ Shell Integration:
 			return
 		}
 		if robotWatchBead != "" {
-			session, err := resolveRobotLiveSession(robotWatchBead)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotWatchBead)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-watch-bead")
 				return
@@ -1486,7 +1528,7 @@ Shell Integration:
 			return
 		}
 		if robotErrors != "" {
-			session, err := resolveRobotLiveSession(robotErrors)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotErrors)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-errors")
 				return
@@ -1518,7 +1560,7 @@ Shell Integration:
 			return
 		}
 		if robotIsWorking != "" {
-			session, err := resolveRobotLiveSession(robotIsWorking)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotIsWorking)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-is-working")
 				return
@@ -1544,13 +1586,13 @@ Shell Integration:
 				}
 				opts.SemanticWindow = win
 			}
-			if err := robot.PrintIsWorking(opts); err != nil {
+			if err := robot.PrintIsWorking(cmd.Context(), opts); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotAgentHealth != "" {
-			session, err := resolveRobotLiveSession(robotAgentHealth)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotAgentHealth)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-agent-health")
 				return
@@ -1574,7 +1616,7 @@ Shell Integration:
 			return
 		}
 		if robotSmartRestart != "" {
-			session, err := resolveRobotLiveSession(robotSmartRestart)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotSmartRestart)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-smart-restart")
 				return
@@ -1596,13 +1638,13 @@ Shell Integration:
 				HardKill:      robotSmartRestartHardKill,
 				HardKillOnly:  robotSmartRestartHardKillOnly,
 			}
-			if err := robot.PrintSmartRestart(opts); err != nil {
+			if err := robot.PrintSmartRestart(cmd.Context(), opts); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotMonitor != "" {
-			session, err := resolveRobotLiveSession(robotMonitor)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotMonitor)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-monitor")
 				return
@@ -1658,7 +1700,7 @@ Shell Integration:
 			return
 		}
 		if robotSupportBundle != "" || cmd.Flags().Changed("robot-support-bundle") {
-			session, err := resolveOptionalRobotLiveSession(robotSupportBundle)
+			session, err := resolveOptionalRobotLiveSession(cmd.Context(), robotSupportBundle)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-support-bundle")
 				return
@@ -1693,7 +1735,7 @@ Shell Integration:
 				failRobotCommand(errors.New("--pane and --panes are mutually exclusive with --robot-send"), robot.ErrCodeInvalidFlag, "Use --pane for exactly one physical pane or --panes for a set", "robot-send")
 				return
 			}
-			session, err := resolveRobotLiveSession(robotSend)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotSend)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-send")
 				return
@@ -1801,7 +1843,7 @@ Shell Integration:
 			return
 		}
 		if robotHealth != "" {
-			session, err := resolveRobotLiveSession(robotHealth)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotHealth)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-health")
 				return
@@ -1812,7 +1854,7 @@ Shell Integration:
 			return
 		}
 		if robotHealthOAuth != "" {
-			session, err := resolveRobotLiveSession(robotHealthOAuth)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotHealthOAuth)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-health-oauth")
 				return
@@ -1823,7 +1865,7 @@ Shell Integration:
 			return
 		}
 		if robotHealthRestartStuck != "" {
-			session, err := resolveRobotLiveSession(robotHealthRestartStuck)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotHealthRestartStuck)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-health-restart-stuck")
 				return
@@ -1834,13 +1876,13 @@ Shell Integration:
 				return
 			}
 			opts := autoRestartStuckOptions(session, threshold, robotDryRunEffective, cfg)
-			if err := robot.PrintAutoRestartStuck(opts); err != nil {
+			if err := robot.PrintAutoRestartStuck(cmd.Context(), opts); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotLogs != "" {
-			session, err := resolveRobotLiveSession(robotLogs)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotLogs)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-logs")
 				return
@@ -1865,7 +1907,7 @@ Shell Integration:
 			return
 		}
 		if robotDiagnose != "" {
-			session, err := resolveRobotLiveSession(robotDiagnose)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotDiagnose)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-diagnose")
 				return
@@ -1901,7 +1943,7 @@ Shell Integration:
 			return
 		}
 		if robotAck != "" {
-			session, err := resolveRobotLiveSession(robotAck)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotAck)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-ack")
 				return
@@ -1953,7 +1995,7 @@ Shell Integration:
 			return
 		}
 		if robotAssign != "" {
-			session, err := resolveRobotLiveSession(robotAssign)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotAssign)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-assign")
 				return
@@ -1967,6 +2009,10 @@ Shell Integration:
 					hint = "Retry after the cancellation or timeout condition clears"
 				}
 				failRobotCommand(err, code, hint, "robot-assign")
+				return
+			}
+			if err := configureAuthoritativeAssignmentPolicy(projectDir); err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Fix the selected global config and the target project's .ntm/config.toml", "robot-assign")
 				return
 			}
 			var beads []string
@@ -1985,7 +2031,7 @@ Shell Integration:
 			return
 		}
 		if robotBulkAssign != "" {
-			session, err := resolveRobotLiveSession(robotBulkAssign)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotBulkAssign)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-bulk-assign")
 				return
@@ -2003,6 +2049,8 @@ Shell Integration:
 			strategy := resolveRobotBulkAssignStrategy(cmd)
 			opts := robot.BulkAssignOptions{
 				Session:            session,
+				ConfigPath:         selectedConfigPath(),
+				RequireConfig:      selectedConfigIsExplicit(),
 				FromBV:             robotBulkAssignFromBV,
 				Strategy:           strategy,
 				AllocationJSON:     robotBulkAssignAlloc,
@@ -2059,7 +2107,7 @@ Shell Integration:
 				PromptFile: robotControllerPrompt,
 				NoPrompt:   robotControllerNoPrompt,
 			}
-			resp, err := buildControllerResponse(opts)
+			resp, err := buildControllerResponse(cmd.Context(), opts)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-controller-spawn")
 				return
@@ -2070,7 +2118,7 @@ Shell Integration:
 			return
 		}
 		if robotInterrupt != "" {
-			session, err := resolveRobotLiveSession(robotInterrupt)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotInterrupt)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-interrupt")
 				return
@@ -2105,7 +2153,7 @@ Shell Integration:
 			return
 		}
 		if robotRestartPane != "" {
-			session, err := resolveRobotLiveSession(robotRestartPane)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotRestartPane)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-restart-pane")
 				return
@@ -2115,23 +2163,40 @@ Shell Integration:
 			if robotPanes != "" {
 				paneFilter = strings.Split(robotPanes, ",")
 			}
-			opts := robot.RestartPaneOptions{
-				Session: session,
-				Panes:   paneFilter,
-				Type:    robotSendType,
-				All:     robotSendAll,
-				DryRun:  robotDryRunEffective,
-				Bead:    robotRestartPaneBead,
-				Prompt:  robotRestartPanePrompt,
-				Config:  cfg,
+			projectDir := ""
+			if strings.TrimSpace(robotRestartPaneBead) != "" {
+				projectDir, err = resolveExplicitProjectDirForSessionContext(cmd.Context(), session)
+				if err != nil {
+					code := robot.ErrCodeInternalError
+					hint := "Ensure the target session has one authoritative project directory"
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						code = robot.ErrCodeTimeout
+						hint = "Retry after the cancellation or timeout condition clears"
+					}
+					failRobotCommand(err, code, hint, "robot-restart-pane")
+					return
+				}
 			}
-			if err := robot.PrintRestartPane(opts); err != nil {
+			opts := robot.RestartPaneOptions{
+				Session:       session,
+				Panes:         paneFilter,
+				Type:          robotSendType,
+				All:           robotSendAll,
+				DryRun:        robotDryRunEffective,
+				Bead:          robotRestartPaneBead,
+				Prompt:        robotRestartPanePrompt,
+				Config:        cfg,
+				ProjectDir:    projectDir,
+				ConfigPath:    selectedConfigPath(),
+				RequireConfig: selectedConfigIsExplicit(),
+			}
+			if err := robot.PrintRestartPaneContext(cmd.Context(), opts); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotProbe != "" {
-			session, err := resolveRobotLiveSession(robotProbe)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotProbe)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-probe")
 				return
@@ -2162,7 +2227,7 @@ Shell Integration:
 			return
 		}
 		if robotMarkdown {
-			session, err := resolveOptionalRobotSessionFilter(robotMarkdownSession)
+			session, err := resolveOptionalRobotSessionFilter(cmd.Context(), robotMarkdownSession)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-markdown")
 				return
@@ -2195,7 +2260,7 @@ Shell Integration:
 			return
 		}
 		if robotSave != "" {
-			session, err := resolveRobotLiveSession(robotSave)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotSave)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-save")
 				return
@@ -2222,7 +2287,7 @@ Shell Integration:
 
 		// TUI Parity robot handlers - expose TUI functionality to AI agents
 		if robotFiles != "" {
-			session, err := resolveOptionalRobotSessionFilter(robotFiles)
+			session, err := resolveOptionalRobotSessionFilter(cmd.Context(), robotFiles)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-files")
 				return
@@ -2238,7 +2303,7 @@ Shell Integration:
 			return
 		}
 		if robotInspectPane != "" {
-			session, err := resolveRobotLiveSession(robotInspectPane)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotInspectPane)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-inspect-pane")
 				return
@@ -2255,7 +2320,7 @@ Shell Integration:
 			return
 		}
 		if robotInspectSession != "" {
-			session, err := resolveRobotLiveSession(robotInspectSession)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotInspectSession)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-inspect-session")
 				return
@@ -2314,7 +2379,7 @@ Shell Integration:
 			return
 		}
 		if robotContextInject != "" {
-			session, projectDir, err := resolveRobotSessionProjectScope(robotContextInject)
+			session, projectDir, err := resolveRobotSessionProjectScope(cmd.Context(), robotContextInject)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-context-inject")
 				return
@@ -2331,7 +2396,7 @@ Shell Integration:
 				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use readable project-relative context files", "robot-context-inject")
 				return
 			}
-			var injectedPanes []int
+			injectedPanes := []int{}
 			if len(injected) > 0 {
 				panes, pErr := tmux.GetPanes(session)
 				if pErr != nil {
@@ -2343,18 +2408,11 @@ Shell Integration:
 					failRobotCommand(targetErr, robot.ErrCodePaneNotFound, "Inspect canonical pane addresses with --robot-is-working", "robot-context-inject")
 					return
 				}
-				if !robotContextInjectDry {
-					for _, p := range targets {
-						target := p.ID
-						if sErr := tmux.SendKeys(target, content, true); sErr != nil {
-							continue
-						}
-						injectedPanes = append(injectedPanes, p.Index)
-					}
-				} else {
-					for _, p := range targets {
-						injectedPanes = append(injectedPanes, p.Index)
-					}
+				injectedPanes, err = injectContextIntoPanes(session, targets, content, robotContextInjectDry, tmux.SendKeys)
+				if err != nil {
+					code, hint := classifyRobotContextInjectError(err)
+					failRobotCommand(err, code, hint, "robot-context-inject")
+					return
 				}
 			}
 			result := ContextInjectResult{
@@ -2377,7 +2435,7 @@ Shell Integration:
 			return
 		}
 		if robotMetrics != "" {
-			session, err := resolveRobotLiveSession(robotMetrics)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotMetrics)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-metrics")
 				return
@@ -2392,7 +2450,7 @@ Shell Integration:
 			return
 		}
 		if robotReplay != "" {
-			session, err := resolveRobotLiveSession(robotReplay)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotReplay)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-replay")
 				return
@@ -2408,7 +2466,7 @@ Shell Integration:
 			return
 		}
 		if robotPaletteInfo {
-			paletteSession, err := resolveOptionalRobotSessionFilter(resolveRobotPaletteSession(cmd))
+			paletteSession, err := resolveOptionalRobotSessionFilter(cmd.Context(), resolveRobotPaletteSession(cmd))
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-palette")
 				return
@@ -2424,7 +2482,7 @@ Shell Integration:
 			return
 		}
 		if robotDismissAlert != "" {
-			dismissSession, err := resolveOptionalRobotSessionFilter(robotDismissSession)
+			dismissSession, err := resolveOptionalRobotSessionFilter(cmd.Context(), robotDismissSession)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-dismiss-alert")
 				return
@@ -2446,7 +2504,7 @@ Shell Integration:
 
 		// Robot-diff handler for comparing agent activity (synthesis)
 		if robotDiff != "" {
-			session, err := resolveRobotLiveSession(robotDiff)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotDiff)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-diff")
 				return
@@ -2468,7 +2526,7 @@ Shell Integration:
 
 		// Robot-alerts handler for alert listing (TUI parity)
 		if robotAlerts {
-			session, err := resolveOptionalRobotSessionFilter(resolveRobotAlertsSession(cmd))
+			session, err := resolveOptionalRobotSessionFilter(cmd.Context(), resolveRobotAlertsSession(cmd))
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-alerts")
 				return
@@ -2553,7 +2611,7 @@ Shell Integration:
 
 		// Robot-summary handler for session activity summary
 		if robotSummary != "" {
-			session, err := resolveRobotLiveSession(robotSummary)
+			session, err := resolveRobotLiveSession(cmd.Context(), robotSummary)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-summary")
 				return
@@ -2917,6 +2975,13 @@ func initializeRobotPersistence(ctx context.Context) error {
 	robot.SetProjectionStore(store)
 	robotStateStore = store
 
+	// Command-specific safety loaders own the typed error contract for an
+	// explicitly selected config. Do not let this optional projection refresh
+	// invoke bv/br before those loaders reject a missing or non-regular path.
+	if !selectedConfigAllowsProjectionRefresh() {
+		return nil
+	}
+
 	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	_ = robot.RefreshNormalizedProjection(refreshCtx, store, "", "")
@@ -2955,39 +3020,39 @@ func resolveRobotPagination(cmd *cobra.Command) (robot.PaginationOptions, error)
 	return opts, nil
 }
 
-func resolveRobotLiveSession(sessionName string) (string, error) {
+func resolveRobotLiveSession(ctx context.Context, sessionName string) (string, error) {
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" {
 		return "", fmt.Errorf("session is required")
 	}
-	return normalizeExplicitLiveSessionName(sessionName, !IsJSONOutput())
+	return normalizeExplicitLiveSessionName(ctx, sessionName, !IsJSONOutput())
 }
 
-func resolveRobotOfflineCapableSession(sessionName string) (string, error) {
+func resolveRobotOfflineCapableSession(ctx context.Context, sessionName string) (string, error) {
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" {
 		return "", fmt.Errorf("session is required")
 	}
-	return normalizeProjectScopedSessionName(sessionName, !IsJSONOutput())
+	return normalizeProjectScopedSessionName(ctx, sessionName, !IsJSONOutput())
 }
 
-func resolveOptionalRobotLiveSession(sessionName string) (string, error) {
+func resolveOptionalRobotLiveSession(ctx context.Context, sessionName string) (string, error) {
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" {
 		return "", nil
 	}
-	return resolveRobotLiveSession(sessionName)
+	return resolveRobotLiveSession(ctx, sessionName)
 }
 
-func resolveRobotSessionFilter(sessionName string) (string, error) {
+func resolveRobotSessionFilter(ctx context.Context, sessionName string) (string, error) {
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" {
 		return "", fmt.Errorf("session is required")
 	}
-	return resolveOptionalRobotSessionFilter(sessionName)
+	return resolveOptionalRobotSessionFilter(ctx, sessionName)
 }
 
-func resolveOptionalRobotSessionFilter(sessionName string) (string, error) {
+func resolveOptionalRobotSessionFilter(ctx context.Context, sessionName string) (string, error) {
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" {
 		return "", nil
@@ -2996,7 +3061,7 @@ func resolveOptionalRobotSessionFilter(sessionName string) (string, error) {
 		return "", fmt.Errorf("invalid session name: %w", err)
 	}
 
-	resolved, err := normalizeExplicitLiveSessionName(sessionName, !IsJSONOutput())
+	resolved, err := normalizeExplicitLiveSessionName(ctx, sessionName, !IsJSONOutput())
 	if err == nil {
 		return resolved, nil
 	}
@@ -3008,13 +3073,13 @@ func resolveOptionalRobotSessionFilter(sessionName string) (string, error) {
 	return sessionName, nil
 }
 
-func resolveRobotSessionProjectScope(sessionName string) (string, string, error) {
-	resolved, err := resolveRobotLiveSession(sessionName)
+func resolveRobotSessionProjectScope(ctx context.Context, sessionName string) (string, string, error) {
+	resolved, err := resolveRobotLiveSession(ctx, sessionName)
 	if err != nil {
 		return "", "", err
 	}
 
-	projectDir, err := resolveExplicitProjectDirForSession(resolved)
+	projectDir, err := resolveExplicitProjectDirForSessionContext(ctx, resolved)
 	if err != nil {
 		return "", "", err
 	}
@@ -3386,7 +3451,7 @@ var (
 
 	// Robot-activity flags for agent activity detection
 	robotActivity     string // session name for activity query
-	robotActivityType string // filter by agent type (claude, codex, gemini)
+	robotActivityType string // filter by agent type (claude, codex, antigravity, grok, gemini)
 
 	// Robot-wait flags for waiting on agent states
 	robotWait           string // session name for wait
@@ -4000,7 +4065,7 @@ func init() {
 
 	// Robot-activity flags for agent activity detection
 	rootCmd.Flags().StringVar(&robotActivity, "robot-activity", "", "Get agent activity state (idle/busy/error). Required: SESSION. Example: ntm --robot-activity=myproject")
-	rootCmd.Flags().StringVar(&robotActivityType, "activity-type", "", "Filter by agent type: claude, codex, antigravity, gemini. Optional with --robot-activity. Example: --activity-type=claude")
+	rootCmd.Flags().StringVar(&robotActivityType, "activity-type", "", "Filter by agent type: claude, codex, antigravity, grok, gemini. Optional with --robot-activity. Example: --activity-type=grok")
 
 	// Robot-wait flags for waiting on agent states
 	rootCmd.Flags().StringVar(&robotWait, "robot-wait", "", "Wait for agents to reach state. Required: SESSION. Example: ntm --robot-wait=myproject --wait-until=idle")
@@ -4730,6 +4795,8 @@ func robotSpawnOptionsFromFlags(cmd *cobra.Command, readyTimeout time.Duration, 
 	return robot.SpawnOptions{
 		Session:            robotSpawn,
 		Label:              robotSpawnLabel,
+		ConfigPath:         selectedConfigPath(),
+		RequireConfig:      selectedConfigIsExplicit(),
 		CCCount:            robotSpawnCC,
 		CodCount:           robotSpawnCod,
 		GmiCount:           robotSpawnGmi,
@@ -4960,6 +5027,26 @@ func selectedConfigPath() string {
 	return configPathFromArgs(os.Args[1:])
 }
 
+func selectedConfigIsExplicit() bool {
+	return strings.TrimSpace(cfgFile) != "" || strings.TrimSpace(os.Getenv("NTM_CONFIG")) != ""
+}
+
+func configureStartupConfigPath() {
+	if selectedConfigIsExplicit() {
+		startup.SetConfigPath(selectedConfigPath())
+		return
+	}
+	startup.SetConfigPath("")
+}
+
+func selectedConfigAllowsProjectionRefresh() bool {
+	if !selectedConfigIsExplicit() {
+		return true
+	}
+	info, err := os.Stat(selectedConfigPath())
+	return err == nil && info.Mode().IsRegular()
+}
+
 func selectedConfigDir() string {
 	return filepath.Dir(selectedConfigPath())
 }
@@ -5005,8 +5092,13 @@ func loadSelectedConfigOrDefault() *config.Config {
 	cwd, _ := os.Getwd()
 	loaded, err := config.LoadMerged(cwd, selectedConfigPath())
 	if err != nil {
-		return config.Default()
+		loaded = config.Default()
+		bv.ConfigureOperatorGatedLabels(loaded.Assign.OperatorGatedLabels)
+		return loaded
 	}
+	// Callers on this path bypassed the PersistentPreRun config application,
+	// so install config-driven package state here as well (#223).
+	bv.ConfigureOperatorGatedLabels(loaded.Assign.OperatorGatedLabels)
 	return loaded
 }
 
@@ -5209,10 +5301,16 @@ Examples:
 							"enabled": effectiveCfg.Integrations.XF.Enabled,
 						},
 					},
-					"health": map[string]interface{}{
-						"enabled":        effectiveCfg.Health.Enabled,
-						"check_interval": effectiveCfg.Health.CheckInterval,
-						"auto_restart":   effectiveCfg.Health.AutoRestart,
+					"resilience": map[string]interface{}{
+						"auto_restart":         effectiveCfg.Resilience.AutoRestart,
+						"max_restarts":         effectiveCfg.Resilience.MaxRestarts,
+						"health_check_seconds": effectiveCfg.Resilience.HealthCheckSeconds,
+					},
+					"assign": map[string]interface{}{
+						"strategy":              effectiveCfg.Assign.Strategy,
+						"prompt_template":       effectiveCfg.Assign.PromptTemplate,
+						"prompt_template_file":  effectiveCfg.Assign.PromptTemplateFile,
+						"operator_gated_labels": effectiveCfg.Assign.OperatorGatedLabels,
 					},
 					"scanner": map[string]interface{}{
 						"ubs_path": effectiveCfg.Scanner.UBSPath,

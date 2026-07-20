@@ -58,6 +58,7 @@ var supportedAdoptTypes = []adoptTypeSpec{
 	{Flag: "cod", AgentType: agentpkg.AgentTypeCodex, Description: "Codex agents", Example: "3,4"},
 	{Flag: "gmi", AgentType: agentpkg.AgentTypeGemini, Description: "Gemini agents", Example: "5"},
 	{Flag: "agy", AgentType: agentpkg.AgentTypeAntigravity, Description: "Antigravity agents", Example: "5"},
+	{Flag: "grok", AgentType: agentpkg.AgentTypeGrok, Description: "Grok Build agents", Example: "6"},
 	{Flag: "cursor", AgentType: agentpkg.AgentTypeCursor, Description: "Cursor agents", Example: "6"},
 	{Flag: "windsurf", AgentType: agentpkg.AgentTypeWindsurf, Description: "Windsurf agents", Example: "7"},
 	{Flag: "aider", AgentType: agentpkg.AgentTypeAider, Description: "Aider agents", Example: "8"},
@@ -100,7 +101,7 @@ Examples:
   ntm adopt my_session --cc=0,1,2,3,4,5
 
   # Adopt with mixed agent types
-  ntm adopt my_session --cc=0,1,2 --cod=3,4 --gmi=5 --cursor=6
+  ntm adopt my_session --cc=0,1,2 --cod=3,4 --gmi=5 --grok=6 --cursor=7
 
   # Window-per-agent layout: address each window's pane explicitly
   ntm adopt my_session --cc=1.0,2.0 --cod=3.0
@@ -224,6 +225,7 @@ type AdoptedAgentCounts struct {
 	Cod      int `json:"cod"`
 	Gmi      int `json:"gmi"`
 	Agy      int `json:"agy"`
+	Grok     int `json:"grok"`
 	Cursor   int `json:"cursor"`
 	Windsurf int `json:"windsurf"`
 	Aider    int `json:"aider"`
@@ -233,7 +235,7 @@ type AdoptedAgentCounts struct {
 }
 
 func (a AdoptedAgentCounts) Total() int {
-	return a.CC + a.Cod + a.Gmi + a.Agy + a.Cursor + a.Windsurf + a.Aider + a.Opencode + a.Ollama + a.User
+	return a.CC + a.Cod + a.Gmi + a.Agy + a.Grok + a.Cursor + a.Windsurf + a.Aider + a.Opencode + a.Ollama + a.User
 }
 
 func (a AdoptedAgentCounts) Summary() string {
@@ -260,6 +262,8 @@ func (a *AdoptedAgentCounts) increment(agentType agentpkg.AgentType) {
 		a.Gmi++
 	case agentpkg.AgentTypeAntigravity:
 		a.Agy++
+	case agentpkg.AgentTypeGrok:
+		a.Grok++
 	case agentpkg.AgentTypeCursor:
 		a.Cursor++
 	case agentpkg.AgentTypeWindsurf:
@@ -285,6 +289,8 @@ func (a AdoptedAgentCounts) countFor(agentType agentpkg.AgentType) int {
 		return a.Gmi
 	case agentpkg.AgentTypeAntigravity:
 		return a.Agy
+	case agentpkg.AgentTypeGrok:
+		return a.Grok
 	case agentpkg.AgentTypeCursor:
 		return a.Cursor
 	case agentpkg.AgentTypeWindsurf:

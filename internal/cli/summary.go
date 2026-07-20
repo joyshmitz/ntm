@@ -56,12 +56,12 @@ Examples:
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if listAll {
-				return runSummaryList(format)
+				return runSummaryList(cmd.Context(), format)
 			}
 			if recent && regenerate {
 				return fmt.Errorf("--recent and --regenerate cannot be used together")
 			}
-			return runSummary(args, since, format, recent, regenerate)
+			return runSummary(cmd.Context(), args, since, format, recent, regenerate)
 		},
 	}
 
@@ -83,7 +83,7 @@ type summaryFileInfo struct {
 var summaryFilenameRegex = regexp.MustCompile(`^(?P<session>.+)-(?P<ts>\d{8}-\d{6})\.json$`)
 var archiveFilenameRegex = regexp.MustCompile(`^(?P<session>.+)_(?P<date>\d{4}-\d{2}-\d{2})\.jsonl$`)
 
-func runSummary(args []string, sinceStr, format string, recent, regenerate bool) error {
+func runSummary(ctx context.Context, args []string, sinceStr, format string, recent, regenerate bool) error {
 	sessionArg := ""
 	if len(args) > 0 {
 		sessionArg = args[0]
@@ -96,7 +96,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 	machineJSON := forceJSON || IsJSONOutput()
 
 	wd, _ := os.Getwd()
-	projectDir, err := resolveProjectDir(sessionArg, wd, strings.TrimSpace(sessionArg) != "")
+	projectDir, err := resolveProjectDir(ctx, sessionArg, wd, strings.TrimSpace(sessionArg) != "")
 	if err != nil {
 		return err
 	}
@@ -106,7 +106,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 	}
 
 	if regenerate {
-		return regenerateSummaryFromArchive(sessionArg, sumFormat, machineJSON, projectDir, wd)
+		return regenerateSummaryFromArchive(ctx, sessionArg, sumFormat, machineJSON, projectDir, wd)
 	}
 
 	if recent {
@@ -152,7 +152,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 	}
 	res.ExplainIfInferredForOutput(os.Stderr, machineJSON)
 	session := res.Session
-	projectDir, err = resolveProjectDir(session, wd, !res.Inferred)
+	projectDir, err = resolveProjectDir(ctx, session, wd, !res.Inferred)
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 		IncludeGitDiff: true,
 	}
 
-	s, err := summary.SummarizeSession(context.Background(), opts)
+	s, err := summary.SummarizeSession(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -201,14 +201,14 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 	return nil
 }
 
-func runSummaryList(format string) error {
+func runSummaryList(ctx context.Context, format string) error {
 	sumFormat, forceJSON, err := parseSummaryFormat(format)
 	if err != nil {
 		return err
 	}
 
 	wd, _ := os.Getwd()
-	projectDir, err := resolveProjectDir("", wd, false)
+	projectDir, err := resolveProjectDir(ctx, "", wd, false)
 	if err != nil {
 		return err
 	}
@@ -252,7 +252,7 @@ func parseSummaryFormat(format string) (summary.SummaryFormat, bool, error) {
 	}
 }
 
-func resolveProjectDir(session, wd string, explicit bool) (string, error) {
+func resolveProjectDir(ctx context.Context, session, wd string, explicit bool) (string, error) {
 	session = strings.TrimSpace(session)
 	if session != "" {
 		if explicit {
@@ -264,18 +264,18 @@ func resolveProjectDir(session, wd string, explicit bool) (string, error) {
 				return dir, nil
 			}
 		}
-		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+		resolved, err := normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 		if err != nil {
 			return "", err
 		}
 		if explicit {
-			dir, err := resolveExplicitProjectDirForSession(resolved)
+			dir, err := resolveExplicitProjectDirForSessionContext(ctx, resolved)
 			if err != nil {
 				return "", err
 			}
 			return dir, nil
 		}
-		if dir := resolveCommandProjectDirForSession(resolved, true); dir != "" {
+		if dir := resolveCommandProjectDirForSession(ctx, resolved, true); dir != "" {
 			return dir, nil
 		}
 	}
@@ -424,10 +424,10 @@ type archiveFileInfo struct {
 	Path      string
 }
 
-func regenerateSummaryFromArchive(sessionArg string, format summary.SummaryFormat, jsonOut bool, projectDir, wd string) error {
+func regenerateSummaryFromArchive(ctx context.Context, sessionArg string, format summary.SummaryFormat, jsonOut bool, projectDir, wd string) error {
 	searchSession := strings.TrimSpace(sessionArg)
 	if searchSession != "" {
-		resolved, err := normalizeProjectScopedSessionName(searchSession, !IsJSONOutput())
+		resolved, err := normalizeProjectScopedSessionName(ctx, searchSession, !IsJSONOutput())
 		if err != nil {
 			return err
 		}
@@ -448,7 +448,7 @@ func regenerateSummaryFromArchive(sessionArg string, format summary.SummaryForma
 		sessionName = searchSession
 	}
 	if projectDir == "" {
-		projectDir, err = resolveProjectDir(sessionName, wd, strings.TrimSpace(sessionArg) != "")
+		projectDir, err = resolveProjectDir(ctx, sessionName, wd, strings.TrimSpace(sessionArg) != "")
 		if err != nil {
 			return err
 		}

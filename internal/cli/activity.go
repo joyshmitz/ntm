@@ -27,6 +27,7 @@ func newActivityCmd() *cobra.Command {
 		filterCodex       bool
 		filterGemini      bool
 		filterAntigravity bool
+		filterGrok        bool
 		filterPane        string
 		watchMode         bool
 		interval          int
@@ -54,6 +55,7 @@ Examples:
   ntm activity                     # Auto-detect session
   ntm activity myproject           # Specific session
   ntm activity --cc                # Only Claude agents
+  ntm activity --grok              # Only Grok Build agents
   ntm activity --watch             # Auto-refresh every 2s
   ntm activity --watch --interval 1000  # Refresh every 1s
   ntm activity --json              # Output as JSON`,
@@ -69,6 +71,7 @@ Examples:
 				filterCodex:       filterCodex,
 				filterGemini:      filterGemini,
 				filterAntigravity: filterAntigravity,
+				filterGrok:        filterGrok,
 				filterPane:        filterPane,
 				watchMode:         watchMode,
 				interval:          time.Duration(interval) * time.Millisecond,
@@ -82,6 +85,7 @@ Examples:
 	cmd.Flags().BoolVar(&filterCodex, "cod", false, "Only show Codex agents")
 	cmd.Flags().BoolVar(&filterGemini, "gmi", false, "Only show Gemini agents")
 	cmd.Flags().BoolVar(&filterAntigravity, "agy", false, "Only show Antigravity agents")
+	cmd.Flags().BoolVar(&filterGrok, "grok", false, "Only show Grok Build agents")
 	cmd.Flags().StringVar(&filterPane, "pane", "", "Show specific pane (by name or index)")
 	cmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Auto-refresh display")
 	cmd.Flags().IntVar(&interval, "interval", 2000, "Refresh interval in milliseconds (with --watch)")
@@ -96,6 +100,7 @@ type activityOptions struct {
 	filterCodex       bool
 	filterGemini      bool
 	filterAntigravity bool
+	filterGrok        bool
 	filterPane        string
 	watchMode         bool
 	interval          time.Duration
@@ -313,6 +318,8 @@ func detectAgentTypeFromPane(pane tmux.Pane) string {
 		return "gemini"
 	case tmux.AgentAntigravity:
 		return "antigravity"
+	case tmux.AgentGrok:
+		return "grok"
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:
@@ -347,7 +354,7 @@ func passesFilter(agentType string, pane tmux.Pane, opts activityOptions) bool {
 	}
 
 	// If no type filters, allow all
-	if !opts.filterClaude && !opts.filterCodex && !opts.filterGemini && !opts.filterAntigravity {
+	if !opts.filterClaude && !opts.filterCodex && !opts.filterGemini && !opts.filterAntigravity && !opts.filterGrok {
 		return true
 	}
 
@@ -362,6 +369,9 @@ func passesFilter(agentType string, pane tmux.Pane, opts activityOptions) bool {
 		return true
 	}
 	if opts.filterAntigravity && agentType == "antigravity" {
+		return true
+	}
+	if opts.filterGrok && agentType == "grok" {
 		return true
 	}
 
@@ -599,6 +609,8 @@ func activityAgentTypeColor(agentType string, t theme.Theme) lipgloss.Color {
 		return t.Gemini
 	case agent.AgentTypeAntigravity:
 		return t.Lavender
+	case agent.AgentTypeGrok:
+		return t.Pink
 	case agent.AgentTypeCursor:
 		return t.Cursor
 	case agent.AgentTypeWindsurf:

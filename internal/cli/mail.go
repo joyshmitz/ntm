@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -186,7 +187,7 @@ func resetMailSendLocalFlags(cmd *cobra.Command, to *[]string, subject, threadID
 
 // mailInboxClient is the minimal interface we need for inbox operations (mockable in tests).
 type mailInboxClient interface {
-	IsAvailable() bool
+	IsAvailableContext(ctx context.Context) bool
 	ListProjectAgents(ctx context.Context, projectKey string) ([]agentmail.Agent, error)
 	FetchInbox(ctx context.Context, opts agentmail.FetchInboxOptions) ([]agentmail.InboxMessage, error)
 }
@@ -247,54 +248,86 @@ func newAgentMailClient(projectKey string) *agentmail.Client {
 	return client
 }
 
-func resolveAgentMailProjectKey(session string) (string, error) {
-	return resolveAgentMailProjectKeyWithPreference(session, true)
+func resolveAgentMailProjectKey(ctx context.Context, session string) (string, error) {
+	return resolveAgentMailProjectKeyWithPreference(ctx, session, true)
 }
 
-func resolveAgentMailProjectKeyWithPreference(session string, preferSession bool) (string, error) {
-	_, projectKey, err := resolveAgentMailScopeWithPreference(session, preferSession)
+func resolveAgentMailProjectKeyWithPreference(ctx context.Context, session string, preferSession bool) (string, error) {
+	_, projectKey, err := resolveAgentMailScopeWithPreference(ctx, session, preferSession)
 	return projectKey, err
 }
 
-func resolveAgentMailScope(session string) (string, string, error) {
-	return resolveAgentMailScopeWithPreference(session, true)
+func resolveAgentMailScope(ctx context.Context, session string) (string, string, error) {
+	return resolveAgentMailScopeWithPreference(ctx, session, true)
 }
 
-func resolveAgentMailCommandScope(session string) (string, string, error) {
+func resolveAgentMailCommandScope(ctx context.Context, session string) (string, string, error) {
+	if ctx == nil {
+		return "", "", fmt.Errorf("agent mail scope context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
 	session = strings.TrimSpace(session)
 	if session == "" {
-		return resolveAgentMailScope("")
+		return resolveAgentMailScope(ctx, "")
 	}
 
-	resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+	resolved, err := normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", "", ctxErr
+		}
 		return "", "", err
 	}
 
-	if projectKey, err := resolveExplicitProjectDirForSession(resolved); err == nil {
+	if projectKey, err := resolveExplicitProjectDirForSessionContext(ctx, resolved); err == nil {
 		projectKey = refineAgentMailProjectKey(resolved, projectKey)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", "", ctxErr
+		}
 		if projectKey != "" {
 			return resolved, projectKey, nil
 		}
+	} else if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", "", ctxErr
 	}
 
 	projectKey := refineAgentMailProjectKey(resolved, GetProjectRoot())
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", "", ctxErr
+	}
 	if projectKey == "" {
 		return "", "", fmt.Errorf("getting project root failed")
 	}
 	return resolved, projectKey, nil
 }
 
-func resolveAgentMailScopeWithPreference(session string, preferSession bool) (string, string, error) {
+func resolveAgentMailScopeWithPreference(ctx context.Context, session string, preferSession bool) (string, string, error) {
+	if ctx == nil {
+		return "", "", fmt.Errorf("agent mail scope context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
 	session = strings.TrimSpace(session)
 	if session != "" {
-		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+		resolved, err := normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", "", ctxErr
+			}
 			return "", "", err
 		}
 		session = resolved
-		projectKey := resolveCommandProjectDirForSession(session, !preferSession)
+		projectKey := resolveCommandProjectDirForSession(ctx, session, !preferSession)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", "", ctxErr
+		}
 		projectKey = refineAgentMailProjectKey(session, projectKey)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", "", ctxErr
+		}
 		if projectKey == "" {
 			return "", "", fmt.Errorf("getting project root failed")
 		}
@@ -302,6 +335,9 @@ func resolveAgentMailScopeWithPreference(session string, preferSession bool) (st
 	}
 
 	projectKey := GetProjectRoot()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", "", ctxErr
+	}
 	if projectKey == "" {
 		return "", "", fmt.Errorf("getting project root failed")
 	}
@@ -323,16 +359,21 @@ func refineAgentMailProjectKey(sessionName, projectKey string) string {
 
 // runMailInbox aggregates messages across agents and writes to cmd output.
 func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, sessionAgents bool, agentFilter string, urgent bool, limit int, jsonFmt bool) error {
+	parent, err := requireMailCommandContext(cmd, "mail inbox")
+	if err != nil {
+		return err
+	}
+
 	preferSession := strings.TrimSpace(session) != ""
 	var (
 		projectKey string
-		err        error
+		scopeErr   error
 	)
 
 	// Filter to session agents if requested
 	if sessionAgents {
 		if session == "" {
-			res, err := ResolveSessionWithOptions("", cmd.OutOrStdout(), SessionResolveOptions{TreatAsJSON: jsonFmt})
+			res, err := ResolveSessionWithOptionsContext(parent, "", cmd.OutOrStdout(), SessionResolveOptions{TreatAsJSON: jsonFmt})
 			if err != nil {
 				return err
 			}
@@ -347,27 +388,36 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 	}
 
 	if strings.TrimSpace(session) == "" {
-		session, projectKey, err = resolveAgentMailScopeWithPreference(session, preferSession)
+		session, projectKey, scopeErr = resolveAgentMailScopeWithPreference(parent, session, preferSession)
 	} else {
-		session, projectKey, err = resolveAgentMailCommandScope(session)
+		session, projectKey, scopeErr = resolveAgentMailCommandScope(parent, session)
 	}
-	if err != nil {
-		return err
+	if scopeErr != nil {
+		return scopeErr
 	}
 
 	if client == nil {
 		client = newAgentMailClient(projectKey)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 
-	if !client.IsAvailable() {
+	if !client.IsAvailableContext(ctx) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("checking agent mail availability: %w", ctxErr)
+		}
 		return fmt.Errorf("agent mail server not available")
 	}
 
 	agents, err := client.ListProjectAgents(ctx, projectKey)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("listing agents: %w", ctxErr)
+		}
 		return fmt.Errorf("listing agents: %w", err)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("listing agents: %w", ctxErr)
 	}
 
 	targetAgents := make([]string, 0)
@@ -382,11 +432,14 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 	}
 
 	if sessionAgents {
-		panes, err := tmux.GetPanes(session)
+		panes, err := tmux.GetPanesContext(ctx, session)
 		if err != nil {
 			return fmt.Errorf("getting session panes: %w", err)
 		}
 		registry, _ := agentmail.LoadBestSessionAgentRegistry(session, projectKey)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("resolving session agents: %w", ctxErr)
+		}
 		sessionSet := make(map[string]bool)
 		for _, p := range panes {
 			name := resolvePaneAgentName(p, registry)
@@ -410,6 +463,9 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 	agg := make(map[int]*aggregatedMessage)
 
 	for _, name := range targetAgents {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("fetching inbox: %w", ctxErr)
+		}
 		msgs, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
 			ProjectKey: projectKey,
 			AgentName:  name,
@@ -417,7 +473,16 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 			Limit:      limit,
 		})
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("fetching inbox for %s: %w", name, ctxErr)
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("fetching inbox for %s: %w", name, err)
+			}
 			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("fetching inbox for %s: %w", name, ctxErr)
 		}
 		for _, msg := range msgs {
 			entry, ok := agg[msg.ID]
@@ -481,6 +546,17 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 	return nil
 }
 
+func requireMailCommandContext(cmd *cobra.Command, operation string) (context.Context, error) {
+	if cmd == nil || cmd.Context() == nil {
+		return nil, fmt.Errorf("%s requires a command context", operation)
+	}
+	ctx := cmd.Context()
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%s canceled: %w", operation, err)
+	}
+	return ctx, nil
+}
+
 func sanitizeMailDisplayField(value string) string {
 	clean := status.StripANSI(value)
 	clean = strings.Map(func(r rune) rune {
@@ -530,7 +606,7 @@ func newMailMarkCmd(action mailAction) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
 
-			resolvedAgent, err := resolveMailAgentIdentity(session, agent)
+			resolvedAgent, err := resolveMailAgentIdentity(cmd.Context(), session, agent)
 			if err != nil {
 				return err
 			}
@@ -556,21 +632,33 @@ func newMailMarkCmd(action mailAction) *cobra.Command {
 	return cmd
 }
 
-func resolveMailAgentIdentity(session, agent string) (string, error) {
+func resolveMailAgentIdentity(ctx context.Context, session, agent string) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("agent mail identity context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	agent = strings.TrimSpace(agent)
 	if agent != "" {
 		return agent, nil
 	}
 
-	resolvedSession, projectKey, err := resolveAgentMailCommandScope(session)
+	resolvedSession, projectKey, err := resolveAgentMailCommandScope(ctx, session)
 	if err != nil {
 		return "", err
 	}
-	if agentName := resolveSessionPaneAgentName(resolvedSession, projectKey); agentName != "" {
+	if agentName := resolveSessionPaneAgentName(ctx, resolvedSession, projectKey); agentName != "" {
 		return agentName, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	if info, err := loadResolvedSessionAgent(resolvedSession, projectKey); err == nil && info != nil && strings.TrimSpace(info.AgentName) != "" {
 		return info.AgentName, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 
 	if envAgent := strings.TrimSpace(os.Getenv("AGENT_NAME")); envAgent != "" {
@@ -587,7 +675,10 @@ func loadResolvedSessionAgent(session, projectKey string) (*agentmail.SessionAge
 	return agentmail.LoadBestSessionAgent(session, projectKey)
 }
 
-func resolveSessionPaneAgentName(session, projectKey string) string {
+func resolveSessionPaneAgentName(ctx context.Context, session, projectKey string) string {
+	if ctx == nil || ctx.Err() != nil {
+		return ""
+	}
 	if strings.TrimSpace(session) == "" {
 		return ""
 	}
@@ -604,7 +695,7 @@ func resolveSessionPaneAgentName(session, projectKey string) string {
 		return name
 	}
 
-	panes, err := tmux.GetPanes(session)
+	panes, err := tmux.GetPanesContext(ctx, session)
 	if err != nil {
 		return ""
 	}
@@ -652,16 +743,23 @@ type markSummary struct {
 }
 
 func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, ids []int, urgent bool, fromAgent string, all bool, limit int) error {
-	_, projectKey, err := resolveAgentMailCommandScope(session)
+	parent, err := requireMailCommandContext(cmd, "mail mark")
+	if err != nil {
+		return err
+	}
+	_, projectKey, err := resolveAgentMailCommandScope(parent, session)
 	if err != nil {
 		return err
 	}
 
 	client := newAgentMailClient(projectKey)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 
-	if !client.IsAvailable() {
+	if !client.IsAvailableContext(ctx) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("checking agent mail availability: %w", ctxErr)
+		}
 		return fmt.Errorf("agent mail server not available at %s\nstart the server with: am serve-http --host 127.0.0.1 --no-tui --no-auth", client.BaseURL())
 	}
 
@@ -717,6 +815,9 @@ func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, i
 
 	var processed, errs int
 	for _, id := range ids {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("marking messages: %w", ctxErr)
+		}
 		var markErr error
 		switch action {
 		case mailActionRead:
@@ -725,6 +826,12 @@ func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, i
 			_, markErr = client.AcknowledgeMessage(ctx, projectKey, agent, id)
 		}
 		if markErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("marking message %d: %w", id, ctxErr)
+			}
+			if errors.Is(markErr, context.Canceled) || errors.Is(markErr, context.DeadlineExceeded) {
+				return fmt.Errorf("marking message %d: %w", id, markErr)
+			}
 			errs++
 			if !jsonEnabled {
 				fmt.Fprintf(os.Stderr, "⚠ message %d: %v\n", id, markErr)
@@ -769,7 +876,11 @@ func mailMessageMatchesAction(msg agentmail.InboxMessage, action mailAction) boo
 
 // runMailSendOverseer sends a Human Overseer message via the Agent Mail HTTP API.
 func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subject, body, threadID string, all bool) error {
-	resolvedSession, projectKey, err := resolveAgentMailCommandScope(session)
+	parent, err := requireMailCommandContext(cmd, "mail overseer send")
+	if err != nil {
+		return err
+	}
+	resolvedSession, projectKey, err := resolveAgentMailCommandScope(parent, session)
 	if err != nil {
 		return err
 	}
@@ -779,7 +890,7 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 	// But it's useful to verify the user is in the right context
 	if session != "" {
 		if err := tmux.EnsureInstalled(); err == nil {
-			if !tmux.SessionExists(session) {
+			if exists, probeErr := tmux.SessionExistsContext(parent, session); probeErr == nil && !exists {
 				fmt.Fprintf(os.Stderr, "Warning: tmux session '%s' not found (continuing anyway)\n", session)
 			}
 		}
@@ -787,11 +898,14 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 
 	// Create Agent Mail client
 	client := newAgentMailClient(projectKey)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 
 	// Check if Agent Mail is available
-	if !client.IsAvailable() {
+	if !client.IsAvailableContext(ctx) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("checking agent mail availability: %w", ctxErr)
+		}
 		return fmt.Errorf("agent mail server not available at %s\nstart the server with: am serve-http --host 127.0.0.1 --no-tui --no-auth", client.BaseURL())
 	}
 

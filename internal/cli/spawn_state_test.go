@@ -647,7 +647,7 @@ func TestWaitForSpawnPromptWorkersCancelsAndJoinsBeforeReturning(t *testing.T) {
 	}
 }
 
-func TestCancelAndJoinSpawnPromptWorkersBlocksUntilWorkerExit(t *testing.T) {
+func TestSpawnPromptWorkerCleanupBlocksUntilWorkerExit(t *testing.T) {
 	setupCtx, cancelSetup := context.WithCancel(t.Context())
 	defer cancelSetup()
 	workerCanceled := make(chan struct{})
@@ -663,7 +663,8 @@ func TestCancelAndJoinSpawnPromptWorkersBlocksUntilWorkerExit(t *testing.T) {
 
 	joined := make(chan struct{})
 	go func() {
-		cancelAndJoinSpawnPromptWorkers(cancelSetup, &setupWg)
+		cancelSetup()
+		setupWg.Wait()
 		close(joined)
 	}()
 	select {

@@ -54,6 +54,11 @@ type CompactionTrigger struct {
 	compactor *Compactor
 	predictor *ContextPredictor
 
+	// Input hooks keep automated delivery testable without a live tmux server.
+	inputSender      paneInputSender
+	sendKeysForAgent func(string, string, bool, tmux.AgentType) error
+	sleep            func(time.Duration)
+
 	// Tracking state
 	mu                sync.RWMutex
 	lifecycleMu       sync.Mutex
@@ -82,6 +87,9 @@ func NewCompactionTrigger(
 		monitor:           monitor,
 		compactor:         compactor,
 		predictor:         predictor,
+		inputSender:       tmuxPaneInputSender{},
+		sendKeysForAgent:  tmux.SendKeysForAgent,
+		sleep:             time.Sleep,
 		lastCompaction:    make(map[string]time.Time),
 		activeCompactions: make(map[string]bool),
 	}
@@ -227,7 +235,29 @@ func (t *CompactionTrigger) canCompact(agentID string) bool {
 
 // triggerCompaction initiates compaction for an agent.
 func (t *CompactionTrigger) triggerCompaction(agentID string, state *ContextState, prediction *Prediction) {
-	// Mark as compacting
+	// Determine agent type from pane
+	var agentType tmux.AgentType
+	detectedAgentType := false
+	if state.AgentType != "" {
+		agentType = tmux.AgentType(state.AgentType)
+	} else {
+		agentType = t.detectAgentType(state.PaneID)
+		detectedAgentType = true
+	}
+	if err := validateCompactionPromptDelivery(agentType); err != nil {
+		slog.Warn("Skipping proactive compaction for unsupported agent",
+			"agent_id", agentID,
+			"pane_id", state.PaneID,
+			"agent_type", agentType,
+			"error", err,
+		)
+		return
+	}
+	if detectedAgentType && agentType != tmux.AgentUser {
+		t.monitor.SetAgentType(agentID, string(agentType))
+	}
+
+	// Mark as compacting only after the complete operation is known to be supported.
 	t.mu.Lock()
 	t.activeCompactions[agentID] = true
 	t.mu.Unlock()
@@ -238,17 +268,6 @@ func (t *CompactionTrigger) triggerCompaction(agentID string, state *ContextStat
 		t.lastCompaction[agentID] = time.Now()
 		t.mu.Unlock()
 	}()
-
-	// Determine agent type from pane
-	var agentType tmux.AgentType
-	if state.AgentType != "" {
-		agentType = tmux.AgentType(state.AgentType)
-	} else {
-		agentType = t.detectAgentType(state.PaneID)
-		if agentType != tmux.AgentUser {
-			t.monitor.SetAgentType(agentID, string(agentType))
-		}
-	}
 
 	event := CompactionTriggerEvent{
 		AgentID:     agentID,
@@ -324,6 +343,14 @@ func (t *CompactionTrigger) triggerCompaction(agentID string, state *ContextStat
 
 // executeCompaction sends the compaction command to an agent.
 func (t *CompactionTrigger) executeCompaction(agentID, paneID string, agentType tmux.AgentType) *CompactionResult {
+	if err := validateCompactionPromptDelivery(agentType); err != nil {
+		return &CompactionResult{
+			Success: false,
+			Method:  CompactionFailed,
+			Error:   err.Error(),
+		}
+	}
+
 	// Create compaction state
 	compState, err := t.compactor.NewCompactionState(agentID)
 	if err != nil {
@@ -368,7 +395,7 @@ func (t *CompactionTrigger) executeCompaction(agentID, paneID string, agentType 
 		compState.UpdateState(cmd, compactionMethodForCommand(cmd))
 
 		// Wait for compaction to complete
-		time.Sleep(cmd.WaitTime)
+		t.sleepFor(cmd.WaitTime)
 
 		// Check result
 		result, err := t.compactor.FinishCompaction(compState)
@@ -402,11 +429,24 @@ func (t *CompactionTrigger) executeCompaction(agentID, paneID string, agentType 
 
 // sendCompactionCommand sends a compaction command to a pane.
 func (t *CompactionTrigger) sendCompactionCommand(paneID string, cmd CompactionCommand) error {
-	return sendCompactionCommandToPane(tmuxPaneInputSender{}, paneID, cmd)
+	sender := t.inputSender
+	if sender == nil {
+		sender = tmuxPaneInputSender{}
+	}
+	return sendCompactionCommandToPane(sender, paneID, cmd)
 }
 
 // injectRecoveryContext injects recovery context after successful compaction.
 func (t *CompactionTrigger) injectRecoveryContext(paneID string, agentType tmux.AgentType) {
+	if err := validateCompactionPromptDelivery(agentType); err != nil {
+		slog.Warn("Skipping recovery context for unsupported agent",
+			"pane_id", paneID,
+			"agent_type", agentType,
+			"error", err,
+		)
+		return
+	}
+
 	// Generate recovery context message
 	recoveryPrompt := t.generateRecoveryPrompt(agentType)
 	if recoveryPrompt == "" {
@@ -414,7 +454,7 @@ func (t *CompactionTrigger) injectRecoveryContext(paneID string, agentType tmux.
 	}
 
 	// Wait a moment for compaction to settle
-	time.Sleep(2 * time.Second)
+	t.sleepFor(2 * time.Second)
 
 	// Send recovery context via the agent-aware path so Claude (and other
 	// agents) get the atomic buffer (bracketed-paste) treatment. The recovery
@@ -422,7 +462,11 @@ func (t *CompactionTrigger) injectRecoveryContext(paneID string, agentType tmux.
 	// TUI autocomplete picker when delivered char-by-char via send-keys — the
 	// trailing Enter selects a menu entry and the prompt silently never submits
 	// (operators worked around this with --no-recovery). (#198)
-	err := tmux.SendKeysForAgent(paneID, recoveryPrompt, true, agentType)
+	sendKeysForAgent := t.sendKeysForAgent
+	if sendKeysForAgent == nil {
+		sendKeysForAgent = tmux.SendKeysForAgent
+	}
+	err := sendKeysForAgent(paneID, recoveryPrompt, true, agentType)
 	if err != nil {
 		slog.Error("Failed to inject recovery context",
 			"pane_id", paneID,
@@ -432,6 +476,21 @@ func (t *CompactionTrigger) injectRecoveryContext(paneID string, agentType tmux.
 	}
 
 	slog.Info("Recovery context injected", "pane_id", paneID)
+}
+
+func validateCompactionPromptDelivery(agentType tmux.AgentType) error {
+	if err := agentType.ValidateAutomatedPromptDelivery(); err != nil {
+		return fmt.Errorf("agent type %s does not support automated compaction prompts: %w", agentType.Canonical(), err)
+	}
+	return nil
+}
+
+func (t *CompactionTrigger) sleepFor(delay time.Duration) {
+	if t.sleep != nil {
+		t.sleep(delay)
+		return
+	}
+	time.Sleep(delay)
 }
 
 // generateRecoveryPrompt generates the recovery context prompt for post-compaction.
@@ -504,8 +563,15 @@ func (t *CompactionTrigger) TriggerCompactionNow(agentID string) (*CompactionRes
 	// Force the prediction to trigger
 	prediction.ShouldCompact = true
 
-	// Detect agent type
-	agentType := t.detectAgentType(state.PaneID)
+	// Resolve and validate the agent type before creating compaction state or
+	// writing any input to the pane.
+	agentType := tmux.AgentType(state.AgentType)
+	if agentType == "" {
+		agentType = t.detectAgentType(state.PaneID)
+	}
+	if err := validateCompactionPromptDelivery(agentType); err != nil {
+		return nil, err
+	}
 
 	// Execute compaction directly
 	return t.executeCompaction(agentID, state.PaneID, agentType), nil

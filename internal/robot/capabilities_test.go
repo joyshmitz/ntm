@@ -268,6 +268,33 @@ func TestSpawnCapabilitiesAdvertiseGrokPhaseOne(t *testing.T) {
 	t.Fatal("spawn capabilities omit --spawn-grok")
 }
 
+func TestActivityCapabilitiesAdvertiseGrok(t *testing.T) {
+	output, err := GetCapabilitiesWithOptions(CapabilitiesOptions{Command: "activity"})
+	if err != nil || !output.Success || len(output.Commands) != 1 {
+		t.Fatalf("activity capabilities output=%+v err=%v", output, err)
+	}
+	command := output.Commands[0]
+	foundParameter := false
+	for _, parameter := range command.Parameters {
+		if parameter.Flag != "--activity-type" {
+			continue
+		}
+		foundParameter = true
+		if !strings.Contains(strings.ToLower(parameter.Description), "grok") {
+			t.Fatalf("activity-type description omits Grok: %q", parameter.Description)
+		}
+	}
+	if !foundParameter {
+		t.Fatal("activity capabilities omit --activity-type")
+	}
+	for _, example := range command.Examples {
+		if strings.Contains(strings.ToLower(example), "grok") {
+			return
+		}
+	}
+	t.Fatalf("activity capability examples omit Grok: %v", command.Examples)
+}
+
 // =============================================================================
 // categoryIndex tests
 // =============================================================================

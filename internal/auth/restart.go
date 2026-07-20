@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/rotation"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -78,6 +79,10 @@ type RestartContext struct {
 
 // ExecuteRestartStrategy performs the terminate-switch-restart flow
 func (o *Orchestrator) ExecuteRestartStrategy(ctx RestartContext) error {
+	if err := validateAutomatedRestartContext(ctx); err != nil {
+		return err
+	}
+
 	// 1. Terminate existing session gracefully
 	if err := o.TerminateSession(ctx.PaneID, ctx.Provider); err != nil {
 		return fmt.Errorf("terminating session: %w", err)
@@ -181,6 +186,10 @@ func promptBrowserAuth(input io.Reader, output io.Writer, email string) error {
 
 // StartNewAgentSession launches the agent command in the pane
 func (o *Orchestrator) StartNewAgentSession(ctx RestartContext) error {
+	if err := validateAutomatedRestartContext(ctx); err != nil {
+		return err
+	}
+
 	prov := rotation.GetProvider(ctx.Provider)
 	if prov == nil {
 		return fmt.Errorf("unknown provider: %s", ctx.Provider)
@@ -247,4 +256,16 @@ func (o *Orchestrator) StartNewAgentSession(ctx RestartContext) error {
 	// Launch agent command using the specialized robust sender
 	agentTypeEnum := tmux.AgentType(agentType)
 	return o.sendKeysForAgent(ctx.PaneID, cmd, true, agentTypeEnum)
+}
+
+func validateAutomatedRestartContext(ctx RestartContext) error {
+	rawAgentType := strings.TrimSpace(ctx.AgentType)
+	if rawAgentType == "" {
+		rawAgentType = ctx.Provider
+	}
+	agentType := agent.AgentType(rawAgentType)
+	if err := agentType.ValidateAutomatedRelaunch(); err != nil {
+		return fmt.Errorf("agent type %s does not support automated auth restart: %w", agentType.Canonical(), err)
+	}
+	return nil
 }

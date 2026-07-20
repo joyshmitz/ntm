@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
@@ -18,6 +19,61 @@ func TestGetProbeSessionFailureUsesGeneralErrorExit(t *testing.T) {
 	}
 	if output.Success || output.ErrorCode != ErrCodeInvalidFlag {
 		t.Fatalf("GetProbeSession() response = %+v, want INVALID_FLAG failure", output.RobotResponse)
+	}
+}
+
+func TestGetProbe_GrokRejectsBeforePaneInput(t *testing.T) {
+	mock := setupMock(t)
+	mock.Panes = []tmux.Pane{{ID: "%9", Index: 2, WindowIndex: 1, Type: tmux.AgentGrok}}
+
+	output, err := GetProbe(ProbeOptions{
+		Session: "proj",
+		Pane:    2,
+		Flags: ProbeFlags{
+			Method:    ProbeMethodKeystrokeEcho,
+			TimeoutMs: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("GetProbe() error = %v", err)
+	}
+	if output.Success || output.ErrorCode != ErrCodeNotImplemented {
+		t.Fatalf("GetProbe() response = %+v, want NOT_IMPLEMENTED", output.RobotResponse)
+	}
+	if !strings.Contains(output.Error, agent.GrokPromptDeliveryCapabilityHint) {
+		t.Fatalf("GetProbe() error = %q, want Grok capability hint", output.Error)
+	}
+	if mock.CaptureCount != 0 || mock.SendKeysCount != 0 || mock.InterruptCount != 0 {
+		t.Fatalf("probe mutated Grok pane before rejection: capture=%d send=%d interrupt=%d", mock.CaptureCount, mock.SendKeysCount, mock.InterruptCount)
+	}
+}
+
+func TestGetProbeSession_MixedBatchPreflightIsAtomic(t *testing.T) {
+	mock := setupMock(t)
+	mock.Panes = []tmux.Pane{
+		{ID: "%1", Index: 1, WindowIndex: 0, Type: tmux.AgentClaude},
+		{ID: "%2", Index: 2, WindowIndex: 0, Type: tmux.AgentGrok},
+	}
+
+	output, exitCode := GetProbeSession(ProbeSessionOptions{
+		Session: "proj",
+		Panes:   []int{1, 2},
+		Flags: ProbeFlags{
+			Method:    ProbeMethodInterruptTest,
+			TimeoutMs: 1,
+		},
+	})
+	if exitCode != 2 {
+		t.Fatalf("GetProbeSession() exit code = %d, want 2", exitCode)
+	}
+	if output.Success || output.ErrorCode != ErrCodeNotImplemented {
+		t.Fatalf("GetProbeSession() response = %+v, want NOT_IMPLEMENTED", output.RobotResponse)
+	}
+	if len(output.Probes) != 0 || output.Summary.TotalProbed != 0 {
+		t.Fatalf("probe result mutated before batch preflight completed: probes=%v summary=%+v", output.Probes, output.Summary)
+	}
+	if mock.CaptureCount != 0 || mock.SendKeysCount != 0 || mock.InterruptCount != 0 {
+		t.Fatalf("mixed batch mutated a pane before Grok rejection: capture=%d send=%d interrupt=%d", mock.CaptureCount, mock.SendKeysCount, mock.InterruptCount)
 	}
 }
 

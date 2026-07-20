@@ -2,12 +2,41 @@ package swarm
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+type countingPromptInjectionTmuxClient struct {
+	captureCount      int
+	getPanesCount     int
+	sendKeysCount     int
+	sendForAgentCount int
+}
+
+func (c *countingPromptInjectionTmuxClient) CaptureForStatusDetectionContext(context.Context, string) (string, error) {
+	c.captureCount++
+	return "", nil
+}
+
+func (c *countingPromptInjectionTmuxClient) GetPanes(string) ([]tmux.Pane, error) {
+	c.getPanesCount++
+	return nil, nil
+}
+
+func (c *countingPromptInjectionTmuxClient) SendKeys(string, string, bool) error {
+	c.sendKeysCount++
+	return nil
+}
+
+func (c *countingPromptInjectionTmuxClient) SendKeysForAgent(string, string, bool, tmux.AgentType) error {
+	c.sendForAgentCount++
+	return nil
+}
 
 func TestNewPromptInjector(t *testing.T) {
 	injector := NewPromptInjector()
@@ -224,6 +253,57 @@ func TestInjectBatchEmpty(t *testing.T) {
 	}
 	if result.Failed != 0 {
 		t.Errorf("expected Failed of 0, got %d", result.Failed)
+	}
+}
+
+func TestPromptInjector_GrokDirectPathsRejectBeforeTmux(t *testing.T) {
+	client := &countingPromptInjectionTmuxClient{}
+	injector := NewPromptInjector()
+	injector.tmuxClientOverride = client
+
+	for name, inject := range map[string]func() error{
+		"public": func() error {
+			return injector.InjectPrompt("proj:1.2", "grok-build", "continue")
+		},
+		"direct helper": func() error {
+			return injector.sendToPane("proj:1.2", "xai_grok_build", "continue")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := inject()
+			if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+				t.Fatalf("error = %v, want automated prompt delivery sentinel", err)
+			}
+		})
+	}
+
+	if client.captureCount != 0 || client.getPanesCount != 0 || client.sendKeysCount != 0 || client.sendForAgentCount != 0 {
+		t.Fatalf("tmux calls occurred before Grok rejection: %+v", client)
+	}
+}
+
+func TestPromptInjector_MixedBatchPreflightIsAtomic(t *testing.T) {
+	client := &countingPromptInjectionTmuxClient{}
+	injector := NewPromptInjector().WithStaggerDelay(0)
+	injector.tmuxClientOverride = client
+	targets := []InjectionTarget{
+		{SessionPane: "proj:1.1", AgentType: "cc"},
+		{SessionPane: "proj:1.2", AgentType: "grok"},
+		{SessionPane: "proj:1.3", AgentType: "cod"},
+	}
+
+	result, err := injector.InjectBatchWithContext(context.Background(), targets, "continue")
+	if !errors.Is(err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		t.Fatalf("InjectBatchWithContext() error = %v, want automated prompt delivery sentinel", err)
+	}
+	if result == nil {
+		t.Fatal("InjectBatchWithContext() returned nil result")
+	}
+	if result.TotalPanes != len(targets) || result.Successful != 0 || result.Failed != 0 || len(result.Results) != 0 {
+		t.Fatalf("batch result mutated before preflight completed: %+v", result)
+	}
+	if client.captureCount != 0 || client.getPanesCount != 0 || client.sendKeysCount != 0 || client.sendForAgentCount != 0 {
+		t.Fatalf("mixed batch made tmux calls before Grok rejection: %+v", client)
 	}
 }
 

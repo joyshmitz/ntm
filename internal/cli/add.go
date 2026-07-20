@@ -79,16 +79,28 @@ type agentLifecycleFailureResponse struct {
 	PartialMutation bool     `json:"partial_mutation"`
 	SessionMayExist bool     `json:"session_may_exist"`
 	AffectedPaneIDs []string `json:"affected_pane_ids"`
+	// AffectedWorktreePaths is present when spawn provisioned one or more
+	// isolated checkouts before a later lifecycle failure.
+	AffectedWorktreePaths []string `json:"affected_worktree_paths,omitempty"`
 }
 
-func newAgentLifecycleFailureResponse(err error, session string, partialMutation, sessionMayExist bool, affectedPaneIDs []string) agentLifecycleFailureResponse {
+func newAgentLifecycleFailureResponse(
+	err error,
+	session string,
+	partialMutation, sessionMayExist bool,
+	affectedPaneIDs []string,
+	affectedWorktreePaths []string,
+) agentLifecycleFailureResponse {
 	code := robot.ErrCodeInternalError
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		code = robot.ErrCodeTimeout
 	} else {
 		var promptErr *promptSendFailure
-		if errors.As(err, &promptErr) {
+		switch {
+		case errors.As(err, &promptErr):
 			code = robot.ErrCodePromptSendFailed
+		case errors.Is(err, errCLIInvalidInput):
+			code = robot.ErrCodeInvalidFlag
 		}
 	}
 	normalizedPaneIDs := make([]string, 0, len(affectedPaneIDs))
@@ -104,16 +116,30 @@ func newAgentLifecycleFailureResponse(err error, session string, partialMutation
 		seenPaneIDs[paneID] = struct{}{}
 		normalizedPaneIDs = append(normalizedPaneIDs, paneID)
 	}
+	normalizedWorktreePaths := make([]string, 0, len(affectedWorktreePaths))
+	seenWorktreePaths := make(map[string]struct{}, len(affectedWorktreePaths))
+	for _, worktreePath := range affectedWorktreePaths {
+		worktreePath = strings.TrimSpace(worktreePath)
+		if worktreePath == "" {
+			continue
+		}
+		if _, seen := seenWorktreePaths[worktreePath]; seen {
+			continue
+		}
+		seenWorktreePaths[worktreePath] = struct{}{}
+		normalizedWorktreePaths = append(normalizedWorktreePaths, worktreePath)
+	}
 	return agentLifecycleFailureResponse{
-		TimestampedResponse: output.NewTimestamped(),
-		Success:             false,
-		Session:             session,
-		Error:               err.Error(),
-		ErrorCode:           code,
-		Code:                code,
-		PartialMutation:     partialMutation,
-		SessionMayExist:     sessionMayExist,
-		AffectedPaneIDs:     normalizedPaneIDs,
+		TimestampedResponse:   output.NewTimestamped(),
+		Success:               false,
+		Session:               session,
+		Error:                 err.Error(),
+		ErrorCode:             code,
+		Code:                  code,
+		PartialMutation:       partialMutation,
+		SessionMayExist:       sessionMayExist,
+		AffectedPaneIDs:       normalizedPaneIDs,
+		AffectedWorktreePaths: normalizedWorktreePaths,
 	}
 }
 
@@ -187,13 +213,13 @@ func validateGrokPhaseOneAdd(opts AddOptions) error {
 			continue
 		}
 		if opts.Prompt != "" {
-			return errors.New("Grok Build phase-one add does not yet support --prompt; add the pane with --grok and send interactively after authenticating")
+			return errors.New("phase-one Grok Build add does not yet support --prompt; add the pane with --grok and send interactively after authenticating")
 		}
 		if !opts.NoCassContext && opts.CassContextQuery != "" {
-			return errors.New("Grok Build phase-one add does not yet support CASS context injection")
+			return errors.New("phase-one Grok Build add does not yet support CASS context injection")
 		}
 		if profile, ok := opts.PersonaMap[spec.Model]; ok && profile != nil {
-			return errors.New("Grok Build phase-one add does not yet support persona prompt injection")
+			return errors.New("phase-one Grok Build add does not yet support persona prompt injection")
 		}
 	}
 	return nil
@@ -249,7 +275,7 @@ func newAddCmd() *cobra.Command {
 				}
 				sessionName = config.FormatSessionName(sessionName, label)
 			}
-			resolvedSessionName, dir, err := resolveWorkspaceAddSetupScope(sessionName)
+			resolvedSessionName, dir, err := resolveWorkspaceAddSetupScope(cmd.Context(), sessionName)
 			if err != nil {
 				return err
 			}
@@ -393,7 +419,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 	outputError := func(err error) error {
 		if IsJSONOutput() && emitResult {
 			response := newAgentLifecycleFailureResponse(
-				err, session, partialMutation, sessionMayExist, affectedPaneIDs,
+				err, session, partialMutation, sessionMayExist, affectedPaneIDs, nil,
 			)
 			if encodeErr := output.PrintJSON(response); encodeErr != nil {
 				return errors.Join(fmt.Errorf("encode add error response: %w", encodeErr), err)
@@ -437,7 +463,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 		return outputError(fmt.Errorf("no agents specified"))
 	}
 
-	dir, err := resolveWorkspaceProjectDirForExplicitSession(session)
+	dir, err := resolveWorkspaceProjectDirForExplicitSession(ctx, session)
 	if err != nil {
 		return outputError(err)
 	}
@@ -813,6 +839,14 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			}
 			return outputError(launchErr)
 		}
+		if agent.Type == AgentTypeGrok {
+			if _, err := tmux.WaitForPaneProcessStartContext(ctx, session, paneID); err != nil {
+				return outputError(fmt.Errorf(
+					"launching %s agent in pane %s did not start a stable process: %w",
+					agent.Type, paneID, err,
+				))
+			}
+		}
 		if rateLimitTracker != nil && agent.Type == AgentTypeCodex {
 			rateLimitTracker.RecordSuccess("openai")
 			if err := rateLimitTracker.SaveToDir(dir); err != nil && !IsJSONOutput() {
@@ -995,7 +1029,7 @@ func resolveAddSession(ctx context.Context, session string) (string, error) {
 	return res.Session, nil
 }
 
-func resolveAddSetupScope(session string) (string, string, error) {
+func resolveAddSetupScope(ctx context.Context, session string) (string, string, error) {
 	session = strings.TrimSpace(session)
 	if session == "" {
 		return "", "", fmt.Errorf("session is required")
@@ -1004,12 +1038,12 @@ func resolveAddSetupScope(session string) (string, string, error) {
 		return "", "", err
 	}
 
-	resolvedSession, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+	resolvedSession, err := normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 	if err != nil {
 		return "", "", err
 	}
 
-	projectDir, err := resolveExplicitProjectDirForSession(resolvedSession)
+	projectDir, err := resolveExplicitProjectDirForSessionContext(ctx, resolvedSession)
 	if err != nil {
 		return "", "", err
 	}
@@ -1017,8 +1051,8 @@ func resolveAddSetupScope(session string) (string, string, error) {
 	return resolvedSession, projectDir, nil
 }
 
-func resolveWorkspaceAddSetupScope(session string) (string, string, error) {
-	resolvedSession, projectDir, err := resolveAddSetupScope(session)
+func resolveWorkspaceAddSetupScope(ctx context.Context, session string) (string, string, error) {
+	resolvedSession, projectDir, err := resolveAddSetupScope(ctx, session)
 	if err == nil {
 		return resolvedSession, projectDir, nil
 	}
@@ -1034,12 +1068,12 @@ func resolveWorkspaceAddSetupScope(session string) (string, string, error) {
 		return "", "", err
 	}
 
-	resolvedSession, err = normalizeProjectScopedSessionName(session, !IsJSONOutput())
+	resolvedSession, err = normalizeProjectScopedSessionName(ctx, session, !IsJSONOutput())
 	if err != nil {
 		return "", "", err
 	}
 
-	projectDir, err = resolveWorkspaceProjectDirForExplicitSession(resolvedSession)
+	projectDir, err = resolveWorkspaceProjectDirForExplicitSession(ctx, resolvedSession)
 	if err != nil {
 		return "", "", err
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -81,6 +82,10 @@ func TestHealthCheck(t *testing.T) {
 }
 
 func TestIsAvailable(t *testing.T) {
+	if NewClient().IsAvailableContext(nil) {
+		t.Fatal("nil-context availability probe reported success")
+	}
+
 	// Mock MCP JSON-RPC server for health_check
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req JSONRPCRequest
@@ -156,6 +161,48 @@ func TestIsAvailableContextCancelsWhileAnotherHealthCheckOwnsLock(t *testing.T) 
 		}
 	case <-time.After(time.Second):
 		t.Fatal("owning availability probe did not finish")
+	}
+}
+
+func TestIsAvailableContextDoesNotCacheCanceledProbe(t *testing.T) {
+	probeStarted := make(chan struct{}, 1)
+	releaseProbe := make(chan struct{})
+	var probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if probes.Add(1) == 1 {
+			probeStarted <- struct{}{}
+			<-releaseProbe
+			return
+		}
+		statusJSON, _ := json.Marshal(HealthStatus{Status: "ok"})
+		_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: 1, Result: statusJSON})
+	}))
+	defer server.Close()
+	defer close(releaseProbe)
+
+	client := NewClient(WithBaseURL(server.URL + "/"))
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan bool, 1)
+	go func() { result <- client.IsAvailableContext(ctx) }()
+	select {
+	case <-probeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("availability probe did not start")
+	}
+	cancel()
+	select {
+	case available := <-result:
+		if available {
+			t.Fatal("canceled availability probe reported success")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("availability probe did not return after cancellation")
+	}
+	if cacheTime := client.availableCacheTime.Load(); cacheTime != 0 {
+		t.Fatalf("canceled availability probe populated cache timestamp %d", cacheTime)
+	}
+	if !client.IsAvailableContext(t.Context()) {
+		t.Fatal("live probe after cancellation was poisoned by canceled availability result")
 	}
 }
 

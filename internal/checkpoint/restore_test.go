@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -129,6 +130,48 @@ func TestRestorer_RestoreFromCheckpoint_NoPanes(t *testing.T) {
 	_, err = r.RestoreFromCheckpoint(cp, RestoreOptions{})
 	if err != ErrNoAgentsToRestore {
 		t.Errorf("Expected ErrNoAgentsToRestore, got: %v", err)
+	}
+}
+
+func TestRestorer_RestoreFromCheckpointRejectsGrokBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name  string
+		panes []PaneState
+	}{
+		{
+			name:  "grok only",
+			panes: []PaneState{{Index: 0, AgentType: "grok", Command: "grok"}},
+		},
+		{
+			name: "mixed batch",
+			panes: []PaneState{
+				{Index: 0, AgentType: "cc", Command: "claude"},
+				{Index: 1, AgentType: "grok-build", Command: "grok"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cp := &Checkpoint{
+				SessionName: "definitely-not-an-existing-ntm-checkpoint-session",
+				WorkingDir:  "/definitely/not/a/real/checkpoint/directory",
+				Session:     SessionState{Panes: tt.panes},
+			}
+			result, err := NewRestorerWithStorage(NewStorageWithDir(t.TempDir())).RestoreFromCheckpoint(cp, RestoreOptions{Force: true})
+			if !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+				t.Fatalf("RestoreFromCheckpoint() error = %v, want Grok relaunch sentinel", err)
+			}
+			if result != nil {
+				t.Fatalf("RestoreFromCheckpoint() result = %+v, want nil before restore planning", result)
+			}
+		})
+	}
+}
+
+func TestRestorableAgentCommandRejectsGrokEvenWithCapturedCommand(t *testing.T) {
+	if got := restorableAgentCommand(PaneState{AgentType: "grok", Command: "claude"}); got != "" {
+		t.Fatalf("restorableAgentCommand(grok) = %q, want empty unsupported command", got)
 	}
 }
 

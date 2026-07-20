@@ -3,6 +3,7 @@
 package robot
 
 import (
+	"context"
 	"os/exec"
 	"strconv"
 	"time"
@@ -24,34 +25,36 @@ import (
 // exitAgent exits the current agent using the appropriate method. win is the
 // pane's tmux window index (#172) so the exit keys target the correct window on
 // multi-window / window-per-agent layouts rather than always window 1.
-func exitAgent(session string, win, pane int, agentType string, seq *RestartSequence) error {
+func exitAgent(ctx context.Context, session string, win, pane int, agentType string, seq *RestartSequence) error {
 	switch restartCanonicalAgentType(agentType) {
 	case "cc":
-		return exitClaudeCode(session, win, pane, seq)
+		return exitClaudeCode(ctx, session, win, pane, seq)
 	case "cod":
-		return exitCodex(session, win, pane, seq)
+		return exitCodex(ctx, session, win, pane, seq)
 	case "gmi":
-		return exitGemini(session, win, pane, seq)
+		return exitGemini(ctx, session, win, pane, seq)
 	default:
-		return exitUnknown(session, win, pane, seq)
+		return exitUnknown(ctx, session, win, pane, seq)
 	}
 }
 
 // exitClaudeCode exits Claude Code with double Ctrl+C.
 // CRITICAL: The 0.1s timing between Ctrl+Cs is essential!
-func exitClaudeCode(session string, win, pane int, seq *RestartSequence) error {
+func exitClaudeCode(ctx context.Context, session string, win, pane int, seq *RestartSequence) error {
 	seq.ExitMethod = "double_ctrl_c"
 
 	// First Ctrl+C
-	if err := sendCtrlC(session, win, pane); err != nil {
+	if err := sendCtrlC(ctx, session, win, pane); err != nil {
 		return wrapError("first ctrl-c failed", err)
 	}
 
 	// CRITICAL: 100ms pause between Ctrl+Cs
-	time.Sleep(100 * time.Millisecond)
+	if err := waitForExitSequenceDelay(ctx, 100*time.Millisecond); err != nil {
+		return err
+	}
 
 	// Second Ctrl+C
-	if err := sendCtrlC(session, win, pane); err != nil {
+	if err := sendCtrlC(ctx, session, win, pane); err != nil {
 		return wrapError("second ctrl-c failed", err)
 	}
 
@@ -59,10 +62,10 @@ func exitClaudeCode(session string, win, pane int, seq *RestartSequence) error {
 }
 
 // exitCodex exits Codex CLI with /exit command.
-func exitCodex(session string, win, pane int, seq *RestartSequence) error {
+func exitCodex(ctx context.Context, session string, win, pane int, seq *RestartSequence) error {
 	seq.ExitMethod = "exit_command"
 
-	if err := sendKeys(session, win, pane, "/exit\n"); err != nil {
+	if err := sendKeys(ctx, session, win, pane, "/exit\n"); err != nil {
 		return wrapError("exit command failed", err)
 	}
 
@@ -70,19 +73,21 @@ func exitCodex(session string, win, pane int, seq *RestartSequence) error {
 }
 
 // exitGemini exits Gemini CLI with Escape (to exit shell mode) then /exit.
-func exitGemini(session string, win, pane int, seq *RestartSequence) error {
+func exitGemini(ctx context.Context, session string, win, pane int, seq *RestartSequence) error {
 	seq.ExitMethod = "escape_then_exit"
 
 	// Send Escape to exit shell mode if active
-	if err := sendEscape(session, win, pane); err != nil {
+	if err := sendEscape(ctx, session, win, pane); err != nil {
 		return wrapError("escape failed", err)
 	}
 
 	// Brief pause
-	time.Sleep(100 * time.Millisecond)
+	if err := waitForExitSequenceDelay(ctx, 100*time.Millisecond); err != nil {
+		return err
+	}
 
 	// Send /exit command
-	if err := sendKeys(session, win, pane, "/exit\n"); err != nil {
+	if err := sendKeys(ctx, session, win, pane, "/exit\n"); err != nil {
 		return wrapError("exit failed", err)
 	}
 
@@ -90,10 +95,10 @@ func exitGemini(session string, win, pane int, seq *RestartSequence) error {
 }
 
 // exitUnknown tries Ctrl+C as a fallback for unknown agent types.
-func exitUnknown(session string, win, pane int, seq *RestartSequence) error {
+func exitUnknown(ctx context.Context, session string, win, pane int, seq *RestartSequence) error {
 	seq.ExitMethod = "ctrl_c_fallback"
 
-	if err := sendCtrlC(session, win, pane); err != nil {
+	if err := sendCtrlC(ctx, session, win, pane); err != nil {
 		return wrapError("ctrl-c failed", err)
 	}
 
@@ -101,18 +106,18 @@ func exitUnknown(session string, win, pane int, seq *RestartSequence) error {
 }
 
 // sendCtrlC sends Ctrl+C to a tmux pane.
-func sendCtrlC(session string, win, pane int) error {
-	return runTmuxCommand("send-keys", "-t", formatTargetWin(session, win, pane), "C-c")
+func sendCtrlC(ctx context.Context, session string, win, pane int) error {
+	return runTmuxCommand(ctx, "send-keys", "-t", formatTargetWin(session, win, pane), "C-c")
 }
 
 // sendEscape sends Escape key to a tmux pane.
-func sendEscape(session string, win, pane int) error {
-	return runTmuxCommand("send-keys", "-t", formatTargetWin(session, win, pane), "Escape")
+func sendEscape(ctx context.Context, session string, win, pane int) error {
+	return runTmuxCommand(ctx, "send-keys", "-t", formatTargetWin(session, win, pane), "Escape")
 }
 
 // sendKeys sends literal keys to a tmux pane.
-func sendKeys(session string, win, pane int, keys string) error {
-	return runTmuxCommand("send-keys", "-t", formatTargetWin(session, win, pane), "-l", keys)
+func sendKeys(ctx context.Context, session string, win, pane int, keys string) error {
+	return runTmuxCommand(ctx, "send-keys", "-t", formatTargetWin(session, win, pane), "-l", keys)
 }
 
 // formatTarget creates a tmux target string for a session and pane, assuming
@@ -130,16 +135,36 @@ func formatTargetWin(session string, win, pane int) string {
 }
 
 // runTmuxCommand executes a tmux command.
-func runTmuxCommand(args ...string) error {
-	cmd := exec.Command(tmux.BinaryPath(), args...)
+func runTmuxCommand(ctx context.Context, args ...string) error {
+	if ctx == nil {
+		return context.Canceled
+	}
+	cmd := exec.CommandContext(ctx, tmux.BinaryPath(), args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if len(output) > 0 {
 			return wrapError(string(output), err)
 		}
 		return err
 	}
 	return nil
+}
+
+func waitForExitSequenceDelay(ctx context.Context, delay time.Duration) error {
+	if ctx == nil {
+		return context.Canceled
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // =============================================================================
@@ -158,13 +183,13 @@ type HardKillResult struct {
 
 // hardKillAgent performs a forceful kill -9 on the agent process.
 // It should be called when soft exit methods fail.
-func hardKillAgent(session string, win, pane int, seq *RestartSequence) (*HardKillResult, error) {
+func hardKillAgent(ctx context.Context, session string, win, pane int, seq *RestartSequence) (*HardKillResult, error) {
 	result := &HardKillResult{
 		KillMethod: "kill_9",
 	}
 
 	// Step 1: Get shell PID from tmux
-	shellPID, err := getShellPID(session, win, pane)
+	shellPID, err := getShellPID(ctx, session, win, pane)
 	if err != nil {
 		return result, wrapError("failed to get shell PID", err)
 	}
@@ -172,6 +197,9 @@ func hardKillAgent(session string, win, pane int, seq *RestartSequence) (*HardKi
 
 	// Step 2: Get child PID via pgrep
 	childPID := process.GetChildPID(shellPID)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if childPID <= 0 {
 		// No child process might mean agent already exited
 		result.KillMethod = "no_child_process"
@@ -181,7 +209,7 @@ func hardKillAgent(session string, win, pane int, seq *RestartSequence) (*HardKi
 	result.ChildPID = childPID
 
 	// Step 3: kill -9 the child process
-	if err := killProcess(childPID); err != nil {
+	if err := killProcess(ctx, childPID); err != nil {
 		return result, wrapError("kill -9 failed", err)
 	}
 
@@ -194,11 +222,14 @@ func hardKillAgent(session string, win, pane int, seq *RestartSequence) (*HardKi
 // getShellPID retrieves the PID of the shell process in a tmux pane.
 // Uses: tmux list-panes -t session:window -F '#{pane_index} #{pane_pid}'
 // win is the pane's exact tmux window index (#172).
-func getShellPID(session string, win, pane int) (int, error) {
+func getShellPID(ctx context.Context, session string, win, pane int) (int, error) {
 	target := session + ":" + strconv.Itoa(win)
-	cmd := exec.Command(tmux.BinaryPath(), "list-panes", "-t", target, "-F", "#{pane_index} #{pane_pid}")
+	cmd := exec.CommandContext(ctx, tmux.BinaryPath(), "list-panes", "-t", target, "-F", "#{pane_index} #{pane_pid}")
 	output, err := cmd.Output()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, ctxErr
+		}
 		return 0, wrapError("tmux list-panes failed", err)
 	}
 
@@ -227,10 +258,13 @@ func getShellPID(session string, win, pane int) (int, error) {
 // Note: getChildPID is now in the shared process package (internal/process)
 
 // killProcess sends SIGKILL (kill -9) to a process.
-func killProcess(pid int) error {
-	cmd := exec.Command("kill", "-9", strconv.Itoa(pid))
+func killProcess(ctx context.Context, pid int) error {
+	cmd := exec.CommandContext(ctx, "kill", "-9", strconv.Itoa(pid))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if len(output) > 0 {
 			return wrapError(trimSpace(string(output)), err)
 		}

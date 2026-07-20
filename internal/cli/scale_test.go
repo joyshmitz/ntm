@@ -363,6 +363,7 @@ exit 64
 	)
 	cmd.Env = envWithOverrides(os.Environ(),
 		"NTM_RESOLVE_ADD_BLOCKED_HELPER=1",
+		"NTM_TEST_TMUX_ENV_OWNED=1",
 		"NTM_TMUX_BINARY="+tmuxPath,
 	)
 	output, err := cmd.CombinedOutput()
@@ -421,6 +422,7 @@ esac
 	)
 	cmd.Env = envWithOverrides(os.Environ(),
 		"NTM_RESOLVE_STALE_TMUX_HELPER=1",
+		"NTM_TEST_TMUX_ENV_OWNED=1",
 		"NTM_TMUX_BINARY="+tmuxPath,
 		"TMUX=stale",
 		"TMUX_PANE=",

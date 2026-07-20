@@ -2,12 +2,14 @@ package resilience
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/health"
 )
@@ -95,6 +97,81 @@ func TestRestartAgentUsesBuiltPaneCommandAndSendKeys(t *testing.T) {
 	}
 	if capturedCmd != "cd \"/tmp/project with space\" && claude --model 'safe-model'" {
 		t.Fatalf("unexpected command sent: %s", capturedCmd)
+	}
+}
+
+func TestRestartAgentRejectsGrokBeforeLifecycleMutation(t *testing.T) {
+	restore := saveHooks()
+	defer restore()
+
+	buildCalls := 0
+	sendCalls := 0
+	setHooksLocked(func() {
+		buildPaneCmdFn = func(string, string) (string, error) {
+			buildCalls++
+			return "grok --always-approve", nil
+		}
+		sendKeysFn = func(string, string, bool) error {
+			sendCalls++
+			return nil
+		}
+	})
+
+	cfg := config.Default()
+	cfg.Resilience.RestartDelaySeconds = 0
+	m := NewMonitor("test-session", "/tmp/project", cfg, true)
+	m.RegisterAgent("pane-1", 1, 0, "grok-build", "grok-3", "grok --always-approve")
+	m.mu.Lock()
+	m.agents["pane-1"].Healthy = false
+	m.mu.Unlock()
+
+	if err := validateAutomatedMonitorRestart("xai_grok_build"); !errors.Is(err, agent.ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("validateAutomatedMonitorRestart() error = %v, want relaunch sentinel", err)
+	}
+	m.restartAgent(context.Background(), m.agents["pane-1"])
+
+	if buildCalls != 0 || sendCalls != 0 {
+		t.Fatalf("restart hooks called before Grok rejection: build=%d send=%d", buildCalls, sendCalls)
+	}
+	m.mu.RLock()
+	state := *m.agents["pane-1"]
+	m.mu.RUnlock()
+	if state.RestartCount != 0 || state.Healthy {
+		t.Fatalf("Grok restart mutated state: count=%d healthy=%v", state.RestartCount, state.Healthy)
+	}
+}
+
+func TestHandleCrashDoesNotScheduleGrokRestart(t *testing.T) {
+	restore := saveHooks()
+	defer restore()
+
+	buildCalls := 0
+	sendCalls := 0
+	setHooksLocked(func() {
+		buildPaneCmdFn = func(string, string) (string, error) {
+			buildCalls++
+			return "grok --always-approve", nil
+		}
+		sendKeysFn = func(string, string, bool) error {
+			sendCalls++
+			return nil
+		}
+	})
+
+	cfg := config.Default()
+	cfg.Resilience.MaxRestarts = 3
+	cfg.Resilience.RestartDelaySeconds = 0
+	m := NewMonitor("test-session", "/tmp/project", cfg, true)
+	m.RegisterAgent("pane-1", 1, 0, "grok", "grok-3", "grok --always-approve")
+
+	m.handleCrash(context.Background(), m.agents["pane-1"], "test crash")
+	m.wg.Wait()
+
+	if buildCalls != 0 || sendCalls != 0 {
+		t.Fatalf("Grok crash scheduled restart hooks: build=%d send=%d", buildCalls, sendCalls)
+	}
+	if count := m.GetRestartCount("pane-1"); count != 0 {
+		t.Fatalf("Grok crash restart count = %d, want zero", count)
 	}
 }
 

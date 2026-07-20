@@ -1428,6 +1428,13 @@ func (m *Model) buildVisualOrder() {
 }
 
 func (m *Model) send() (tea.Model, tea.Cmd) {
+	return m.sendWith(tmux.GetPanes, tmux.SendKeysForAgentDoubleEnter)
+}
+
+func (m *Model) sendWith(
+	getPanes func(string) ([]tmux.Pane, error),
+	sendPrompt func(string, string, tmux.AgentType) error,
+) (tea.Model, tea.Cmd) {
 	start := time.Now()
 	if m.selected == nil {
 		return *m, nil
@@ -1449,17 +1456,14 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 		return *m, editCmd
 	}
 
-	panes, err := tmux.GetPanes(m.session)
+	panes, err := getPanes(m.session)
 	if err != nil {
 		m.err = err
 		m.recordHistory(nil, nil, start, err)
 		return *m, tea.Quit
 	}
 
-	count := 0
-	var targetPanes []int
-	var targetAgentTypes []string
-
+	selectedPanes := make([]tmux.Pane, 0, len(panes))
 	for _, p := range panes {
 		var shouldSend bool
 
@@ -1481,17 +1485,39 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 		}
 
 		if shouldSend {
-			// Use double-Enter submission protocol (same as `ntm send`) which handles
-			// Codex/Gemini multi-line quirks and reliably submits to all agent types
-			if err := tmux.SendKeysForAgentDoubleEnter(p.ID, prompt, p.Type); err != nil {
-				m.err = err
-				m.recordHistory(targetPanes, targetAgentTypes, start, err)
-				return *m, tea.Quit
-			}
-			count++
-			targetPanes = append(targetPanes, p.Index)
-			targetAgentTypes = append(targetAgentTypes, p.Type.String())
+			selectedPanes = append(selectedPanes, p)
 		}
+	}
+
+	intendedPanes := make([]int, 0, len(selectedPanes))
+	intendedAgentTypes := make([]string, 0, len(selectedPanes))
+	for _, p := range selectedPanes {
+		intendedPanes = append(intendedPanes, p.Index)
+		intendedAgentTypes = append(intendedAgentTypes, p.Type.String())
+	}
+	for _, p := range selectedPanes {
+		if err := agent.AgentType(p.Type).ValidateAutomatedPromptDelivery(); err != nil {
+			preflightErr := fmt.Errorf("palette target %s is %s: %w", p.ID, p.Type.ProfileName(), err)
+			m.err = preflightErr
+			m.recordHistory(intendedPanes, intendedAgentTypes, start, preflightErr)
+			return *m, tea.Quit
+		}
+	}
+
+	count := 0
+	targetPanes := make([]int, 0, len(selectedPanes))
+	targetAgentTypes := make([]string, 0, len(selectedPanes))
+	for _, p := range selectedPanes {
+		// Use double-Enter submission protocol (same as `ntm send`) which handles
+		// Codex/Gemini multi-line quirks and reliably submits to all agent types.
+		if err := sendPrompt(p.ID, prompt, p.Type); err != nil {
+			m.err = err
+			m.recordHistory(targetPanes, targetAgentTypes, start, err)
+			return *m, tea.Quit
+		}
+		count++
+		targetPanes = append(targetPanes, p.Index)
+		targetAgentTypes = append(targetAgentTypes, p.Type.String())
 	}
 
 	m.recordHistory(targetPanes, targetAgentTypes, start, nil)

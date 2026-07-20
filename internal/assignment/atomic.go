@@ -366,6 +366,33 @@ func (f WorkItemStatusFunc) WorkItemStatus(ctx context.Context, beadID string) (
 	return f(ctx, beadID)
 }
 
+// AssignmentEligibilityAuthorizationRequest describes the exact tracker state
+// an atomic generation may accept at its pre-mutation authorization boundary.
+// Production adapters must still perform an atomic claim compare-and-set after
+// this read-only proof because tracker state can change between the two calls.
+type AssignmentEligibilityAuthorizationRequest struct {
+	BeadID               string
+	ClaimActor           string
+	AllowUnassignedOpen  bool
+	AllowOwnedOpen       bool
+	AllowOwnedInProgress bool
+}
+
+// AssignmentEligibilityAuthorizationPort proves that every live automation
+// gate still permits an unsent or replacement assignment generation. The port
+// must not mutate tracker, lease, transport, or ledger state.
+type AssignmentEligibilityAuthorizationPort interface {
+	AuthorizeAssignment(context.Context, AssignmentEligibilityAuthorizationRequest) error
+}
+
+// AssignmentEligibilityAuthorizationFunc adapts a function to the eligibility
+// authorization port.
+type AssignmentEligibilityAuthorizationFunc func(context.Context, AssignmentEligibilityAuthorizationRequest) error
+
+func (f AssignmentEligibilityAuthorizationFunc) AuthorizeAssignment(ctx context.Context, req AssignmentEligibilityAuthorizationRequest) error {
+	return f(ctx, req)
+}
+
 // WorkingReplacementAuthorization is the live tracker ownership proof required
 // immediately before a working generation's external leases are released.
 type WorkingReplacementAuthorization struct {
@@ -493,6 +520,7 @@ type AtomicCoordinator struct {
 	dispatcher  DispatchPort
 	preflight   PromptPreflightPort
 	workStatus  WorkItemStatusPort
+	eligibility AssignmentEligibilityAuthorizationPort
 	replaceAuth WorkingReplacementAuthorizationPort
 	releaser    WorkingReplacementReleasePort
 	now         func() time.Time
@@ -518,6 +546,14 @@ func NewAtomicCoordinator(store *AssignmentStore, claimer ClaimPort, reserver Re
 // assignment generations. Production adapters should always configure it.
 func (c *AtomicCoordinator) WithWorkItemStatusPort(port WorkItemStatusPort) *AtomicCoordinator {
 	c.workStatus = port
+	return c
+}
+
+// WithAssignmentEligibilityAuthorizationPort installs the final read-only
+// policy proof used before an unsent generation can mutate durable or external
+// state. Exact sent-receipt replay exits before this port is consulted.
+func (c *AtomicCoordinator) WithAssignmentEligibilityAuthorizationPort(port AssignmentEligibilityAuthorizationPort) *AtomicCoordinator {
+	c.eligibility = port
 	return c
 }
 
@@ -861,6 +897,13 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			return result, ErrReservationRequired
 		}
 	}
+	if c.eligibility != nil {
+		authorization := assignmentEligibilityAuthorizationRequest(prior, req, actor, replacementStart)
+		if authorizationErr := c.eligibility.AuthorizeAssignment(ctx, authorization); authorizationErr != nil {
+			result.Assignment = prior
+			return result, fmt.Errorf("authorize assignment %s before mutation: %w", req.BeadID, authorizationErr)
+		}
+	}
 	if replacementStart {
 		releaseReceipt, releasedAssignment, releaseErr := c.releaseWorkingReplacementWithOperationLocks(ctx, prior, req)
 		result.ReleasedPaths = append([]string(nil), releaseReceipt.ReleasedPaths...)
@@ -928,6 +971,31 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 	result.Assignment = c.store.Get(req.BeadID)
 	result.Sent = true
 	return result, nil
+}
+
+func assignmentEligibilityAuthorizationRequest(prior *Assignment, req AtomicRequest, actor string, replacementStart bool) AssignmentEligibilityAuthorizationRequest {
+	authorization := AssignmentEligibilityAuthorizationRequest{
+		BeadID:     req.BeadID,
+		ClaimActor: actor,
+	}
+	switch {
+	case replacementStart:
+		authorization.AllowOwnedInProgress = true
+	case prior == nil:
+		authorization.AllowUnassignedOpen = true
+	case isTerminalAssignmentStatus(prior.Status) && prior.IdempotencyKey != req.IdempotencyKey:
+		authorization.AllowUnassignedOpen = true
+		authorization.AllowOwnedOpen = true
+		authorization.AllowOwnedInProgress = true
+	case prior.IdempotencyKey == req.IdempotencyKey:
+		authorization.AllowOwnedInProgress = true
+		switch effectiveClaimState(prior) {
+		case ClaimPending, ClaimClaiming, ClaimUnknown:
+			// A crash may have happened on either side of the tracker claim.
+			authorization.AllowUnassignedOpen = true
+		}
+	}
+	return authorization
 }
 
 func workItemStatusAllowsNewGeneration(status string) bool {

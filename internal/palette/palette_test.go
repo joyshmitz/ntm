@@ -1,6 +1,7 @@
 package palette
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -1275,6 +1277,42 @@ func TestSendRefusesEmptyMessage(t *testing.T) {
 	m = model.(Model)
 	if m.sent || m.phase != PhaseEdit {
 		t.Fatalf("whitespace-only message must be refused too (sent=%v phase=%v)", m.sent, m.phase)
+	}
+}
+
+func TestSendRejectsMixedGrokBatchBeforeAnyPaneMutation(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	m := New("mixed-grok", testCommands)
+	m.selected = &testCommands[0]
+	m.target = TargetAll
+
+	sentTargets := []string{}
+	model, _ := m.sendWith(
+		func(session string) ([]tmux.Pane, error) {
+			if session != "mixed-grok" {
+				t.Fatalf("getPanes session = %q, want mixed-grok", session)
+			}
+			return []tmux.Pane{
+				{ID: "%1", Index: 1, Type: tmux.AgentClaude},
+				{ID: "%2", Index: 2, Type: tmux.AgentGrok},
+			}, nil
+		},
+		func(target, _ string, _ tmux.AgentType) error {
+			sentTargets = append(sentTargets, target)
+			return nil
+		},
+	)
+
+	got := model.(Model)
+	if !errors.Is(got.err, agent.ErrAutomatedPromptDeliveryNotImplemented) {
+		t.Fatalf("send() error = %v, want Grok prompt-delivery sentinel", got.err)
+	}
+	if len(sentTargets) != 0 {
+		t.Fatalf("send() mutated targets %v before mixed-batch rejection", sentTargets)
+	}
+	if got.sent || got.sentCount != 0 {
+		t.Fatalf("send() state = sent:%v count:%d, want unsent", got.sent, got.sentCount)
 	}
 }
 

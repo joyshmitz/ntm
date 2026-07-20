@@ -122,6 +122,9 @@ func (r *SessionsSaveResult) Text(w io.Writer) error {
 	if r.State != nil {
 		fmt.Fprintf(w, "  Agents: %d Claude, %d Codex, %d Gemini\n",
 			r.State.Agents.Claude, r.State.Agents.Codex, r.State.Agents.Gemini)
+		if r.State.Agents.Grok > 0 {
+			fmt.Fprintf(w, "  Grok: %d\n", r.State.Agents.Grok)
+		}
 		if r.State.GitBranch != "" {
 			fmt.Fprintf(w, "  Git: %s\n", r.State.GitBranch)
 		}
@@ -348,6 +351,9 @@ func (r *SessionsShowResult) Text(w io.Writer) error {
 	fmt.Fprintf(w, "  Claude: %d\n", s.Agents.Claude)
 	fmt.Fprintf(w, "  Codex:  %d\n", s.Agents.Codex)
 	fmt.Fprintf(w, "  Gemini: %d\n", s.Agents.Gemini)
+	if s.Agents.Grok > 0 {
+		fmt.Fprintf(w, "  Grok:   %d\n", s.Agents.Grok)
+	}
 	if s.Agents.User > 0 {
 		fmt.Fprintf(w, "  User:   %d\n", s.Agents.User)
 	}
@@ -532,6 +538,9 @@ func (r *SessionsRestoreResult) Text(w io.Writer) error {
 		fmt.Fprintf(w, "  Panes: %d\n", len(r.State.Panes))
 		fmt.Fprintf(w, "  Agents: %d Claude, %d Codex, %d Gemini\n",
 			r.State.Agents.Claude, r.State.Agents.Codex, r.State.Agents.Gemini)
+		if r.State.Agents.Grok > 0 {
+			fmt.Fprintf(w, "  Grok: %d\n", r.State.Agents.Grok)
+		}
 	}
 	if r.PromptSent > 0 || r.PromptFailed > 0 {
 		fmt.Fprintf(w, "  Prompt injected into %d pane(s)", r.PromptSent)
@@ -587,6 +596,13 @@ func runSessionsRestore(ctx context.Context, savedName string, opts session.Rest
 			Error:     err.Error(),
 		})
 	}
+	if err := validateSessionsAutomatedRelaunch(state, launchAgents); err != nil {
+		return emitRestoreFailure(&SessionsRestoreResult{
+			Success:   false,
+			SavedName: savedName,
+			Error:     err.Error(),
+		})
+	}
 
 	// Restore session
 	if err := session.Restore(state, opts); err != nil {
@@ -635,9 +651,10 @@ func runSessionsRestore(ctx context.Context, savedName string, opts session.Rest
 		}
 		agentCount = state.Agents.Total()
 	}
+	operationErr := sessionsRestoreOperationError(launchErr, promptErr)
 
 	result := &SessionsRestoreResult{
-		Success:      promptErr == nil,
+		Success:      operationErr == nil,
 		SavedName:    savedName,
 		RestoredAs:   restoredName,
 		State:        state,
@@ -657,11 +674,11 @@ func runSessionsRestore(ctx context.Context, savedName string, opts session.Rest
 	if err := output.New(output.WithJSON(jsonOutput)).Output(result); err != nil {
 		return err
 	}
-	if promptErr != nil {
+	if operationErr != nil {
 		if jsonOutput {
 			return jsonFailureExit()
 		}
-		return promptErr
+		return operationErr
 	}
 
 	// Attach if requested
@@ -670,6 +687,20 @@ func runSessionsRestore(ctx context.Context, savedName string, opts session.Rest
 	}
 
 	return nil
+}
+
+func sessionsRestoreOperationError(launchErr, promptErr error) error {
+	if promptErr != nil {
+		return promptErr
+	}
+	return launchErr
+}
+
+func validateSessionsAutomatedRelaunch(state *session.SessionState, launchAgents bool) error {
+	if !launchAgents {
+		return nil
+	}
+	return session.ValidateAutomatedRelaunch(state)
 }
 
 func newSessionsResumeCmd() *cobra.Command {
@@ -968,6 +999,9 @@ func runSessionsResume(ctx context.Context, savedName, name string, force, attac
 
 	state, err := session.Load(savedName)
 	if err != nil {
+		return emitFailure(&SessionsResumeResult{Success: false, SavedName: savedName, Error: err.Error()})
+	}
+	if err := validateSessionsAutomatedRelaunch(state, true); err != nil {
 		return emitFailure(&SessionsResumeResult{Success: false, SavedName: savedName, Error: err.Error()})
 	}
 

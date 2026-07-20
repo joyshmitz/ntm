@@ -752,7 +752,7 @@ func TestCompletionOutboxSingleConsumerLeaseAndExpiryRecoveryAcrossDetectors(t *
 	}
 
 	cfg := DefaultConfig()
-	cfg.CompletionLeaseDuration = 500 * time.Millisecond
+	cfg.CompletionLeaseDuration = time.Hour
 	storeA, err := assignment.LoadStoreStrict(session)
 	if err != nil {
 		t.Fatalf("load detector A store: %v", err)
@@ -820,9 +820,14 @@ func TestCompletionOutboxSingleConsumerLeaseAndExpiryRecoveryAcrossDetectors(t *
 	default:
 	}
 
-	// Model a process crash: no acknowledgement and no heartbeat renewal. Once
-	// the durable lease expires, a fresh detector may claim and replay it.
-	time.Sleep(750 * time.Millisecond)
+	// Model a process crash: no acknowledgement and no heartbeat renewal. Make
+	// the durable expiry explicit so race instrumentation cannot change the
+	// live-lease and expired-lease phases of this test.
+	expiredAt := time.Now().UTC().Add(-time.Second)
+	durable.Assignments[beadID].CompletionLeaseExpiresAt = &expiredAt
+	if err := durable.Save(); err != nil {
+		t.Fatalf("expire completion lease: %v", err)
+	}
 	recoveryStore, err := assignment.LoadStoreStrict(session)
 	if err != nil {
 		t.Fatalf("load expired-lease recovery store: %v", err)

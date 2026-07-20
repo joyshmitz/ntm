@@ -2,10 +2,10 @@
 
 All notable changes to **NTM** (Named Tmux Manager) are documented here.
 
-NTM is a tmux session management tool for orchestrating multiple AI coding agents (Claude Code, OpenAI Codex, Google Gemini CLI, Cursor, Windsurf, Aider, Ollama) in parallel with a stunning TUI dashboard, robot mode APIs, and deep ecosystem integrations.
+NTM is a tmux session management tool for orchestrating multiple AI coding agents (Claude Code, OpenAI Codex, Google Gemini CLI, Antigravity, Grok Build, Cursor, Windsurf, Aider, Opencode, Ollama) in parallel with a stunning TUI dashboard, robot mode APIs, and deep ecosystem integrations.
 
 - Repository: <https://github.com/Dicklesworthstone/ntm>
-- Releases marked **[GitHub Release]** have published binaries and container images on GitHub.
+- Releases marked **[GitHub Release]** have published release assets on GitHub.
 - Releases marked **[Tag Only]** are git tags without a published GitHub Release.
 - Links point to individual commits for traceability.
 
@@ -13,10 +13,81 @@ NTM is a tmux session management tool for orchestrating multiple AI coding agent
 
 ## [Unreleased]
 
+No unreleased changes.
+
+---
+
+## [v1.20.0] -- 2026-07-19 [GitHub Release]
+
+**71 commits since v1.19.1** -- atomic agent assignment, canonical pane identity, unified robot contracts, first-class Grok Build launch support, and substantially broader real-tmux verification.
+
+### Features
+
+- **Atomic assignment and reassignment.** Every assignment surface now uses one claim -> reserve -> dispatch coordinator with cross-process locking, generation-scoped delivery identities, durable ledger replicas, fail-closed rollback, and tracker-proven reopen behavior ([85bda87b](https://github.com/Dicklesworthstone/ntm/commit/85bda87b), [2a5bbf90](https://github.com/Dicklesworthstone/ntm/commit/2a5bbf90), [fb16d569](https://github.com/Dicklesworthstone/ntm/commit/fb16d569)).
+- **Canonical pane targeting and unified dispatch.** Stable pane IDs, strict `N` / `window.pane` / `%id` selectors, topology-aware send behavior, and one shared dispatch application service now cover CLI, robot, scheduler, coordinator, and TUI paths ([0ea6c5c5](https://github.com/Dicklesworthstone/ntm/commit/0ea6c5c5), [3344430d](https://github.com/Dicklesworthstone/ntm/commit/3344430d), [6087eca3](https://github.com/Dicklesworthstone/ntm/commit/6087eca3)).
+- **Fresh, confidence-scored observation.** Session state estimates carry capture time, confidence, and evidence; actuation revalidates freshness before dispatch, and coordinator auto-assignment only targets freshly observed idle agents ([65a20b55](https://github.com/Dicklesworthstone/ntm/commit/65a20b55), [1ce5e680](https://github.com/Dicklesworthstone/ntm/commit/1ce5e680), [ec20c417](https://github.com/Dicklesworthstone/ntm/commit/ec20c417)).
+- **Robot-mode contract hardening.** Commands emit one stable JSON envelope, typed failures determine process exit status, selectors are canonical, sensitive interrupt follow-ups are redacted, and discovery/capability output is more concise and truthful ([222b57da](https://github.com/Dicklesworthstone/ntm/commit/222b57da), [0bee4911](https://github.com/Dicklesworthstone/ntm/commit/0bee4911), [1a39a4da](https://github.com/Dicklesworthstone/ntm/commit/1a39a4da)).
+- **Grok Build phase one.** Added first-class `grok` configuration, CLI add plus CLI/robot/REST spawn surfaces, configured default-model and exact `--effort` forwarding, stable-process and idle-pane launch admission, process/model discovery, counts, schemas, plain Ctrl+C interrupt support, optional doctor/dependency reporting, and topology-only saved-session restore. Authenticated-TUI prompt delivery, assignment, interrupt retasking, restart, and restore-time relaunch fail closed before pane mutation ([4bcb6fef](https://github.com/Dicklesworthstone/ntm/commit/4bcb6fef)).
+- **Configurable operator approval gates.** Global and project `[assign] operator_gated_labels` extend the built-in, case-insensitive gate vocabulary without allowing a repository to remove operator protections (#223).
+- **Persistent coordinator toggles.** `coordinator enable|disable` now updates the selected config atomically, preserves unrelated content and symlink targets, serializes concurrent writers, validates digest intervals and the strict NTM schema, and reports the exact persisted values in JSON (#223).
+
+### Reliability
+
+- Reconcile assignment ledgers and reservations without stealing live work; propagate the resolved project directory to every `br` subprocess; bind saved sessions to authoritative agent sessions ([fc6cba92](https://github.com/Dicklesworthstone/ntm/commit/fc6cba92), [6dc42ece](https://github.com/Dicklesworthstone/ntm/commit/6dc42ece), [268489d7](https://github.com/Dicklesworthstone/ntm/commit/268489d7)).
+- Bound assignment observation by the dispatch freshness window, preserve explicit shorter deadlines, and guarantee timeout failures leave Beads, ledgers, Agent Mail, and panes unchanged ([045c4a37](https://github.com/Dicklesworthstone/ntm/commit/045c4a37), [f05c0ad8](https://github.com/Dicklesworthstone/ntm/commit/f05c0ad8)).
+- Honor disabled scheduler configuration, tighten pipeline cancellation, isolate serve-side host integrations, and make support-bundle probes hermetic ([79017882](https://github.com/Dicklesworthstone/ntm/commit/79017882), [09c618f0](https://github.com/Dicklesworthstone/ntm/commit/09c618f0), [5840f61a](https://github.com/Dicklesworthstone/ntm/commit/5840f61a)).
+- Make the dependency-aware `bv --robot-plan` a mandatory automated-assignment boundary; reject command, parse, structure, blank-ID, and live-label coverage failures, replace stale triage labels with authoritative `br` state, and retain plan-only epic operator gates (#224).
+- Strictly load assignment policy from the project that owns the Beads workspace before retry, reassign, rebalance, coordinator, robot assign, robot bulk, robot spawn, watch, or distribute work. Cross-project robot and distribute commands now honor custom gates, and live distribute dispatch revalidates every eligibility field immediately before delivery.
+- Removed the unused `[health]` TOML section and made `[resilience]` the single restart/monitoring configuration. Existing `[health]` files now fail strict unknown-field validation and must be migrated; the `ntm health` command is unchanged.
+
+### Verification And Release
+
+- Added real-tmux dashboard, assignment, reassignment, timeout, recovery, coordinator, robot bulk/spawn, watch, and distribute coverage, including process-boundary assertions for durable side effects, authoritative cross-project policy, malformed planning data, and zero-side-effect failures ([71f66f64](https://github.com/Dicklesworthstone/ntm/commit/71f66f64), [43048fa3](https://github.com/Dicklesworthstone/ntm/commit/43048fa3), [90010945](https://github.com/Dicklesworthstone/ntm/commit/90010945)).
+- Hardened DSR quality gates across macOS paths, race scheduling, terminal capability detection, tmux isolation, primary E2E, and legacy bulk E2E ([bc4f7a68](https://github.com/Dicklesworthstone/ntm/commit/bc4f7a68), [08acf37b](https://github.com/Dicklesworthstone/ntm/commit/08acf37b), [b43dff17](https://github.com/Dicklesworthstone/ntm/commit/b43dff17)).
+- Kept real-tmux verification portable under long or capacity-constrained temp roots, and replaced scheduler-sensitive cancellation and worktree checks with bounded, deterministic synchronization.
+- Strict upgrade verification now accepts DSR's native macOS architecture artifacts while retaining exact legacy `darwin_all` support.
+
+---
+
+## [v1.19.1] -- 2026-07-06 [GitHub Release]
+
+**1 commit since v1.19.0** -- make orphan-process reaping portable to Windows ([04877bc6](https://github.com/Dicklesworthstone/ntm/commit/04877bc6)).
+
+---
+
+## [v1.19.0] -- 2026-07-06 [GitHub Release]
+
+**34 commits since v1.18.3** -- first-class Antigravity agents, safer autonomous swarms, and dashboard/robot improvements.
+
+### Features
+
+- Added Antigravity (`agy`) as a first-class provider across spawning, session discovery, resume, models, docs, and aliases ([abbd51a9](https://github.com/Dicklesworthstone/ntm/commit/abbd51a9), [ea023fd7](https://github.com/Dicklesworthstone/ntm/commit/ea023fd7), [e488e980](https://github.com/Dicklesworthstone/ntm/commit/e488e980)).
+- Added per-pane `CODEX_HOME` isolation and safe account rotation, semantic progress tokens, plugin model resolution, and faithful window/session restoration ([12fd6c41](https://github.com/Dicklesworthstone/ntm/commit/12fd6c41), [ecdcfcd5](https://github.com/Dicklesworthstone/ntm/commit/ecdcfcd5), [4f75a99b](https://github.com/Dicklesworthstone/ntm/commit/4f75a99b), [a3b9d840](https://github.com/Dicklesworthstone/ntm/commit/a3b9d840)).
+
 ### Bug Fixes
 
-- **`ntm codex preflight` no longer captures deep scrollback (#173).** Preflight inlined its own `capture-pane -S -<lines>` (default `LinesFullContext`=500), so a stale `esc to interrupt` footer buried in scrollback on an otherwise-idle pane could resurrect a false-positive `goal-in-progress` verdict. Preflight now routes through the shared `resolveCodexPane` helper, which captures the **visible screen only** (`capture-pane -S 0`) — matching the goal-action codex subcommands and reflecting the pane's real on-screen state. This changes `provenance_hash`/`captured_lines` in the JSON output (intended).
-- **Robot interrupt / smart-restart now fail loud instead of reporting silent success (#172, safe subset).** On multi-window / window-per-agent layouts, a `--panes` filter could resolve to an empty target set yet the top-level robot response still reported `success: true` (interrupting/restarting nothing). Both `--robot-interrupt` and smart-restart now set `success: false` with a remediation hint (and the panes actually found) when the resolved target set is empty or when one or more individual restart/interrupt actions fail. Emitted pane addresses (`robot.go` send-target / smart-restart action) now carry the pane's real window index instead of a hardcoded `0`, so the `W.P` address round-trips. (The full topology-aware pane-matcher/parser refactor remains as follow-up.)
+- Hardened autonomous dispatch, agent idle detection, robot restart/send behavior, dashboard overlays, palette messaging, health probes, and typed robot failures ([bef7ffcb](https://github.com/Dicklesworthstone/ntm/commit/bef7ffcb), [e250fd5a](https://github.com/Dicklesworthstone/ntm/commit/e250fd5a), [d291ffe3](https://github.com/Dicklesworthstone/ntm/commit/d291ffe3), [d84ee534](https://github.com/Dicklesworthstone/ntm/commit/d84ee534)).
+
+---
+
+## [v1.18.3] -- 2026-06-11 [GitHub Release]
+
+**38 commits since v1.18.2** -- saved-session lifecycle, Codex goal controls, topology-aware robot operations, and macOS/test hardening.
+
+### Features
+
+- Added save/list/resume/archive with agent-session state, Codex goal lifecycle and palette-state commands, and structured Agent Mail lock failure codes ([507e6138](https://github.com/Dicklesworthstone/ntm/commit/507e6138), [f8259311](https://github.com/Dicklesworthstone/ntm/commit/f8259311), [c8a5018e](https://github.com/Dicklesworthstone/ntm/commit/c8a5018e), [069fe4be](https://github.com/Dicklesworthstone/ntm/commit/069fe4be)).
+
+### Bug Fixes
+
+- Made pane addressing window-aware, failed loudly on untargetable robot actions, captured only visible Codex preflight state, and resumed the correct Claude session ([0e5fbcd5](https://github.com/Dicklesworthstone/ntm/commit/0e5fbcd5), [d5ca3b95](https://github.com/Dicklesworthstone/ntm/commit/d5ca3b95), [4ec77ee4](https://github.com/Dicklesworthstone/ntm/commit/4ec77ee4), [e68d9d72](https://github.com/Dicklesworthstone/ntm/commit/e68d9d72)).
+- Corrected invalid project overlays, actionable assignment filtering, terminal resize repainting, symlink checks, and macOS path/test behavior ([122d517d](https://github.com/Dicklesworthstone/ntm/commit/122d517d), [74f9b601](https://github.com/Dicklesworthstone/ntm/commit/74f9b601), [6615dd7d](https://github.com/Dicklesworthstone/ntm/commit/6615dd7d), [89811b9a](https://github.com/Dicklesworthstone/ntm/commit/89811b9a)).
+
+---
+
+## [v1.18.2] -- 2026-05-21 [GitHub Release]
+
+**2 commits since v1.18.1** -- widen the idle-prompt scan window while preserving spinner ordering, and refresh release history ([e28763ea](https://github.com/Dicklesworthstone/ntm/commit/e28763ea), [1635316b](https://github.com/Dicklesworthstone/ntm/commit/1635316b)).
 
 ---
 

@@ -83,7 +83,9 @@ make build-all
 
 ### Release Checklist
 
-After creating a new release (via `dsr fallback` or manual cross-compile + `gh release create`):
+Create releases exclusively with DSR. Do not use or dispatch GitHub Actions for releases, and do not fall back to manual `gh release create` publication.
+
+After creating a new release with DSR:
 
 1. **Verify install script works**: `curl -fsSL ".../install.sh" | bash -s -- --version=vX.Y.Z --dir=/tmp/test --no-shell`
 2. **Check flywheel setup checksums**: If `install.sh` content changed, update the SHA256 in `/dp/agentic_coding_flywheel_setup/checksums.yaml` under the `ntm:` entry. If `install.sh` was not modified, no update is needed (the checksum pins the installer script, not the release binaries).
@@ -506,7 +508,7 @@ bv is a graph-aware triage engine for Beads projects (`.beads/beads.jsonl`). It 
 
 **`bv --robot-triage` is your single entry point.** It returns:
 - `quick_ref`: at-a-glance counts + top 3 picks
-- `recommendations`: ranked actionable items with scores, reasons, unblock info
+- `recommendations`: ranked candidates with scores, reasons, unblock info
 - `quick_wins`: low-effort high-impact items
 - `blockers_to_clear`: items that unblock the most downstream work
 - `project_health`: status/type/priority distributions, graph metrics
@@ -516,6 +518,14 @@ bv is a graph-aware triage engine for Beads projects (`.beads/beads.jsonl`). It 
 bv --robot-triage        # THE MEGA-COMMAND: start here
 bv --robot-next          # Minimal: just the single top pick + claim command
 ```
+
+**Assignment authorization invariant:** triage ranks candidates; it does not
+authorize dispatch. `bv --robot-plan` omits labels, while `br ready` omits epic
+rows, so automated assignment must restore label evidence from both `br ready`
+and `br list --status open`. Any lookup, parse, or coverage gap stops automated
+assignment. `[assign] operator_gated_labels` may extend the built-in,
+case-insensitive gate vocabulary globally or per project, but it never removes
+built-in gates.
 
 ### Command Reference
 

@@ -2,14 +2,58 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/git"
 )
+
+func TestWorktreeCommandHandlersRequireLiveCallerContext(t *testing.T) {
+	handlers := []struct {
+		name string
+		run  func(*cobra.Command, []string) error
+	}{
+		{name: "list", run: runWorktreeList},
+		{name: "provision", run: runWorktreeProvision},
+		{name: "remove", run: runWorktreeRemove},
+		{name: "cleanup", run: runWorktreeCleanup},
+		{name: "sync", run: runWorktreeSync},
+		{name: "auto provision", run: runWorktreeAutoProvision},
+		{name: "status", run: runWorktreeStatus},
+		{name: "clean session", run: runWorktreeCleanSession},
+	}
+
+	for _, handler := range handlers {
+		t.Run(handler.name+" nil command", func(t *testing.T) {
+			err := handler.run(nil, nil)
+			if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+				t.Fatalf("nil command error = %v", err)
+			}
+		})
+		t.Run(handler.name+" nil context", func(t *testing.T) {
+			err := handler.run(&cobra.Command{}, nil)
+			if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+				t.Fatalf("nil context error = %v", err)
+			}
+		})
+		t.Run(handler.name+" canceled context", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			cmd := &cobra.Command{}
+			cmd.SetContext(ctx)
+			if err := handler.run(cmd, nil); !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled command error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
 
 func TestLoadWorktreeConfig_UsesLoadedCLIConfig(t *testing.T) {
 	oldCfg, oldCfgFile := cfg, cfgFile
@@ -94,7 +138,7 @@ func TestLoadWorktreeConfig_InvalidCfgFile(t *testing.T) {
 
 func TestResolveWorktreeSyncRootAcceptsProvisionedSiblingWorktree(t *testing.T) {
 	repo := setupCLIWorktreeGitRepo(t)
-	wm, err := git.NewWorktreeManager(repo)
+	wm, err := git.NewWorktreeManager(t.Context(), repo)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager() error = %v", err)
 	}

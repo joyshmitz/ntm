@@ -3,6 +3,7 @@
 package context
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -180,6 +181,10 @@ func NewDefaultPaneSpawner(cfg *config.Config) *DefaultPaneSpawner {
 
 // SpawnAgent creates a new agent pane.
 func (s *DefaultPaneSpawner) SpawnAgent(session, agentType string, index int, variant string, workDir string) (string, error) {
+	if err := validateAutomatedRotation(agent.AgentType(agentType)); err != nil {
+		return "", fmt.Errorf("spawning replacement %s agent: %w", agent.AgentType(agentType).Canonical(), err)
+	}
+
 	// Create a new pane
 	paneID, err := tmux.SplitWindow(session, workDir)
 	if err != nil {
@@ -287,6 +292,10 @@ func (s *DefaultPaneSpawner) getAgentCommand(agentType string) string {
 	case agent.AgentTypeAntigravity:
 		// The Antigravity launch binary is `agy`, not its long display name.
 		return "agy"
+	case agent.AgentTypeGrok:
+		// SpawnAgent rejects Grok before creating a pane. Keep this helper
+		// fail-closed as a second defense against a bare `grok` fallback.
+		return ""
 	case agent.AgentTypeCursor:
 		return "cursor"
 	case agent.AgentTypeWindsurf:
@@ -318,6 +327,57 @@ func sendCompactionCommandToPane(sender paneInputSender, paneID string, cmd Comp
 
 func sendRotationPrompt(spawner PaneSpawner, paneID, prompt string) error {
 	return spawner.SendBuffer(paneID, prompt, true)
+}
+
+func validateAutomatedRotation(agentType agent.AgentType) error {
+	if err := agentType.ValidateAutomatedRelaunch(); err != nil {
+		return err
+	}
+	return agentType.ValidateAutomatedPromptDelivery()
+}
+
+func findLiveAgentPane(panes []tmux.Pane, agentID, paneID string) (tmux.Pane, error) {
+	if paneID != "" {
+		for _, pane := range panes {
+			if pane.ID == paneID {
+				return pane, nil
+			}
+		}
+	}
+	for _, pane := range panes {
+		if pane.Title == agentID {
+			return pane, nil
+		}
+	}
+	return tmux.Pane{}, fmt.Errorf("pane not found for agent %s", agentID)
+}
+
+func validateAutomatedRotationBatch(panes []tmux.Pane, agentInfos []AgentContextInfo) error {
+	for _, info := range agentInfos {
+		pane, err := findLiveAgentPane(panes, info.AgentID, info.PaneID)
+		if err != nil {
+			return err
+		}
+		if err := validateAutomatedRotation(pane.Type); err != nil {
+			return fmt.Errorf("agent %s (%s): %w", info.AgentID, pane.Type.Canonical(), err)
+		}
+	}
+	return nil
+}
+
+func (r *Rotator) resolveLiveAgentType(session, agentID, paneID string) (agent.AgentType, error) {
+	if r.spawner == nil {
+		return agent.AgentTypeUnknown, errors.New("no spawner available")
+	}
+	panes, err := r.spawner.GetPanes(session)
+	if err != nil {
+		return agent.AgentTypeUnknown, fmt.Errorf("get panes for session %s: %w", session, err)
+	}
+	pane, err := findLiveAgentPane(panes, agentID, paneID)
+	if err != nil {
+		return agent.AgentTypeUnknown, err
+	}
+	return pane.Type.Canonical(), nil
 }
 
 // agentTypeShort returns the short form for pane naming.
@@ -444,6 +504,13 @@ func (r *Rotator) CheckAndRotate(sessionName, workDir string) ([]RotationResult,
 	if len(agentsToRotate) == 0 {
 		return nil, nil // No agents need rotation
 	}
+	panes, err := r.spawner.GetPanes(sessionName)
+	if err != nil {
+		return nil, fmt.Errorf("rotation preflight failed: get panes: %w", err)
+	}
+	if err := validateAutomatedRotationBatch(panes, agentsToRotate); err != nil {
+		return nil, fmt.Errorf("rotation preflight failed: %w", err)
+	}
 
 	var results []RotationResult
 
@@ -460,7 +527,7 @@ func (r *Rotator) CheckAndRotate(sessionName, workDir string) ([]RotationResult,
 			if agentInfo.Estimate != nil {
 				usagePercent = agentInfo.Estimate.UsagePercent
 			}
-			pending := r.createPendingRotation(sessionName, agentInfo.AgentID, usagePercent, workDir)
+			pending := r.createPendingRotation(sessionName, agentInfo.AgentID, agentInfo.PaneID, usagePercent, workDir)
 			results = append(results, RotationResult{
 				OldAgentID: agentInfo.AgentID,
 				Method:     RotationThresholdExceeded,
@@ -480,7 +547,7 @@ func (r *Rotator) CheckAndRotate(sessionName, workDir string) ([]RotationResult,
 }
 
 // createPendingRotation creates a pending rotation entry for an agent.
-func (r *Rotator) createPendingRotation(session, agentID string, contextPercent float64, workDir string) *PendingRotation {
+func (r *Rotator) createPendingRotation(session, agentID, paneID string, contextPercent float64, workDir string) *PendingRotation {
 	now := time.Now()
 	timeoutSec := r.config.ConfirmTimeoutSec
 	if timeoutSec <= 0 {
@@ -490,17 +557,6 @@ func (r *Rotator) createPendingRotation(session, agentID string, contextPercent 
 	defaultAction := ConfirmAction(r.config.DefaultConfirmAction)
 	if defaultAction == "" {
 		defaultAction = ConfirmRotate
-	}
-
-	// Find the pane ID for this agent
-	paneID := ""
-	if panes, err := r.spawner.GetPanes(session); err == nil {
-		for _, p := range panes {
-			if p.Title == agentID {
-				paneID = p.ID
-				break
-			}
-		}
 	}
 
 	pending := &PendingRotation{
@@ -529,30 +585,83 @@ func (r *Rotator) createPendingRotation(session, agentID string, contextPercent 
 // processExpiredPending handles pending rotations that have timed out.
 func (r *Rotator) processExpiredPending(_, _ string) {
 	type expiredPendingAction struct {
-		pending *PendingRotation
-		action  ConfirmAction
+		source    *PendingRotation
+		snapshot  *PendingRotation
+		action    ConfirmAction
+		agentType agent.AgentType
 	}
 
 	now := time.Now()
 	postponed := make([]*PendingRotation, 0)
 	actions := make([]expiredPendingAction, 0)
 
-	r.mu.Lock()
-	for agentID, pending := range r.pending {
-		if !pending.IsExpired() {
+	r.mu.RLock()
+	for _, pending := range r.pending {
+		if !now.After(pending.TimeoutAt) {
 			continue
 		}
+		actions = append(actions, expiredPendingAction{
+			source:   pending,
+			snapshot: clonePendingRotation(pending),
+			action:   pending.DefaultAction,
+		})
+	}
+	r.mu.RUnlock()
 
-		switch pending.DefaultAction {
+	// Validate every expired lifecycle action before changing pending state.
+	// A supported action must not run merely because map iteration encountered it
+	// before a later unsupported Grok action in the same batch.
+	for i := range actions {
+		pendingAction := &actions[i]
+		var err error
+		switch pendingAction.action {
+		case ConfirmRotate:
+			pendingAction.agentType, err = r.resolveLiveAgentType(
+				pendingAction.snapshot.SessionName,
+				pendingAction.snapshot.AgentID,
+				pendingAction.snapshot.PaneID,
+			)
+			if err == nil {
+				err = validateAutomatedRotation(pendingAction.agentType)
+			}
+		case ConfirmCompact:
+			pendingAction.agentType, err = r.resolveLiveAgentType(
+				pendingAction.snapshot.SessionName,
+				pendingAction.snapshot.AgentID,
+				pendingAction.snapshot.PaneID,
+			)
+			if err == nil {
+				err = pendingAction.agentType.ValidateAutomatedPromptDelivery()
+			}
+		}
+		if err != nil {
+			slog.Warn("expired pending rotation batch rejected",
+				"agent", pendingAction.snapshot.AgentID,
+				"action", pendingAction.action,
+				"error", err,
+			)
+			return
+		}
+	}
+
+	committedActions := make([]expiredPendingAction, 0, len(actions))
+	r.mu.Lock()
+	for _, pendingAction := range actions {
+		pending := r.pending[pendingAction.snapshot.AgentID]
+		if pending == nil ||
+			pending != pendingAction.source ||
+			!pending.TimeoutAt.Equal(pendingAction.snapshot.TimeoutAt) ||
+			pending.DefaultAction != pendingAction.action ||
+			!now.After(pending.TimeoutAt) {
+			continue
+		}
+		switch pendingAction.action {
 		case ConfirmPostpone:
 			pending.TimeoutAt = now.Add(30 * time.Minute)
 			postponed = append(postponed, clonePendingRotation(pending))
 		default:
-			actions = append(actions, expiredPendingAction{
-				pending: clonePendingRotation(pending),
-				action:  pending.DefaultAction,
-			})
-			delete(r.pending, agentID)
+			delete(r.pending, pendingAction.snapshot.AgentID)
+			committedActions = append(committedActions, pendingAction)
 		}
 	}
 	r.mu.Unlock()
@@ -563,8 +672,8 @@ func (r *Rotator) processExpiredPending(_, _ string) {
 		}
 	}
 
-	for _, action := range actions {
-		pending := action.pending
+	for _, action := range committedActions {
+		pending := action.snapshot
 		switch action.action {
 		case ConfirmRotate:
 			result := r.rotateAgent(pending.SessionName, pending.AgentID, pending.WorkDir)
@@ -573,10 +682,12 @@ func (r *Rotator) processExpiredPending(_, _ string) {
 			}
 		case ConfirmCompact:
 			if paneID := pending.PaneID; paneID != "" {
-				r.tryCompaction(pending.AgentID, paneID)
+				r.tryCompaction(pending.AgentID, paneID, action.agentType)
 			}
 		case ConfirmIgnore:
 			// Do nothing, just remove from pending
+		case ConfirmPostpone:
+			continue
 		}
 
 		if err := RemovePendingRotation(pending.AgentID); err != nil {
@@ -648,10 +759,22 @@ func (r *Rotator) rotateAgent(session, agentID, workDir string, method ...Rotati
 		return result
 	}
 	result.OldPaneID = oldPane.ID
+	if err := validateAutomatedRotation(oldPane.Type); err != nil {
+		result.Success = false
+		result.State = RotationStateFailed
+		result.Error = fmt.Sprintf("rotation is unavailable for %s: %v", oldPane.Type.Canonical(), err)
+		result.Duration = time.Since(startTime)
+		contextBefore := float64(0)
+		if state.Estimate != nil {
+			contextBefore = state.Estimate.UsagePercent
+		}
+		recordRotationToHistory(result, session, agentTypeLong(string(oldPane.Type)), contextBefore)
+		return result
+	}
 
 	// Try compaction first if configured
 	if r.config.TryCompactFirst && r.compactor != nil {
-		compactResult := r.tryCompaction(agentID, oldPane.ID)
+		compactResult := r.tryCompaction(agentID, oldPane.ID, oldPane.Type)
 		if compactResult != nil && compactResult.Success {
 			// Check if we're now below threshold
 			estimate := r.monitor.GetEstimate(agentID)
@@ -809,7 +932,7 @@ func recordRotationToHistory(result RotationResult, session, agentType string, c
 }
 
 // tryCompaction attempts to compact the agent's context.
-func (r *Rotator) tryCompaction(agentID, paneID string) *CompactionResult {
+func (r *Rotator) tryCompaction(agentID, paneID string, agentType agent.AgentType) *CompactionResult {
 	if r.compactor == nil {
 		return nil
 	}
@@ -823,10 +946,7 @@ func (r *Rotator) tryCompaction(agentID, paneID string) *CompactionResult {
 		return &CompactionResult{Success: false, Method: CompactionFailed, Error: err.Error()}
 	}
 
-	// Derive agent type from the agent ID (format: session__type_index)
-	agentType := deriveAgentTypeFromID(agentID)
-
-	cmds := r.compactor.GetCompactionCommands(agentType)
+	cmds := r.compactor.GetCompactionCommands(agentTypeLong(string(agentType.Canonical())))
 	if len(cmds) == 0 {
 		return &CompactionResult{Success: false, Method: CompactionFailed, Error: "no compaction commands available"}
 	}
@@ -1061,6 +1181,16 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 
 	switch action {
 	case ConfirmRotate:
+		agentType, err := r.resolveLiveAgentType(pendingCopy.SessionName, agentID, pendingCopy.PaneID)
+		if err == nil {
+			err = validateAutomatedRotation(agentType)
+		}
+		if err != nil {
+			r.mu.Unlock()
+			result.State = RotationStateFailed
+			result.Error = err.Error()
+			return result
+		}
 		// Remove from pending and perform the rotation
 		delete(r.pending, agentID)
 		r.mu.Unlock()
@@ -1077,12 +1207,22 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 			result.Error = "cannot compact: pane ID unknown"
 			return result
 		}
+		agentType, err := r.resolveLiveAgentType(pendingCopy.SessionName, agentID, pendingCopy.PaneID)
+		if err == nil {
+			err = agentType.ValidateAutomatedPromptDelivery()
+		}
+		if err != nil {
+			r.mu.Unlock()
+			result.State = RotationStateFailed
+			result.Error = err.Error()
+			return result
+		}
 		delete(r.pending, agentID)
 		r.mu.Unlock()
 		if err := RemovePendingRotation(agentID); err != nil {
 			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
 		}
-		compactResult := r.tryCompaction(agentID, pendingCopy.PaneID)
+		compactResult := r.tryCompaction(agentID, pendingCopy.PaneID, agentType)
 		if compactResult != nil && compactResult.Success {
 			result.Success = true
 			result.State = RotationStateAborted

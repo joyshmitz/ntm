@@ -153,7 +153,7 @@ func TestParseSummaryFormat(t *testing.T) {
 
 func TestResolveProjectDir_EmptySession(t *testing.T) {
 	wd := t.TempDir()
-	got, err := resolveProjectDir("", wd, false)
+	got, err := resolveProjectDir(t.Context(), "", wd, false)
 	if err != nil {
 		t.Fatalf("resolveProjectDir empty session error: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestResolveProjectDir_EmptySession(t *testing.T) {
 
 func TestResolveProjectDir_InvalidSession(t *testing.T) {
 	wd := t.TempDir()
-	_, err := resolveProjectDir("../escape", wd, true)
+	_, err := resolveProjectDir(t.Context(), "../escape", wd, true)
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -194,7 +194,7 @@ func TestResolveProjectDir_UsesConfiguredProjectPrefix(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	got, err := resolveProjectDir("mypro", wd, true)
+	got, err := resolveProjectDir(t.Context(), "mypro", wd, true)
 	if err != nil {
 		t.Fatalf("resolveProjectDir() error = %v", err)
 	}
@@ -224,7 +224,7 @@ func TestResolveProjectDir_ExplicitRejectsWorkspaceFallback(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	_, err := resolveProjectDir(session, wd, true)
+	_, err := resolveProjectDir(t.Context(), session, wd, true)
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -268,7 +268,7 @@ func TestResolveProjectDir_ExplicitUsesSavedSessionAgentProject(t *testing.T) {
 		t.Fatalf("saved session agent lookup = %+v, err=%v", saved, err)
 	}
 
-	got, err := resolveProjectDir(session, wd, true)
+	got, err := resolveProjectDir(t.Context(), session, wd, true)
 	if err != nil {
 		t.Fatalf("resolveProjectDir() error = %v", err)
 	}
@@ -457,7 +457,7 @@ func TestRegenerateSummaryFromArchive_NormalizesProjectScopedPrefix(t *testing.T
 	}
 
 	if _, err := captureStdout(t, func() error {
-		return regenerateSummaryFromArchive("mypro", summary.FormatBrief, false, projectDir, otherWD)
+		return regenerateSummaryFromArchive(t.Context(), "mypro", summary.FormatBrief, false, projectDir, otherWD)
 	}); err != nil {
 		t.Fatalf("regenerateSummaryFromArchive() error = %v", err)
 	}

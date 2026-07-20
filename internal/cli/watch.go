@@ -183,7 +183,7 @@ func runWatch(parent context.Context, session string, opts watchOptions) error {
 	}
 	watchProjectDir := ""
 	if opts.watchPattern != "" || opts.watchBead != "" {
-		watchProjectDir, err = resolveWatchProjectDir(session, res.Inferred)
+		watchProjectDir, err = resolveWatchProjectDir(ctx, session, res.Inferred)
 		if err != nil {
 			return err
 		}
@@ -296,8 +296,8 @@ func watchLoop(ctx context.Context, session string, opts watchOptions, t theme.T
 	}
 }
 
-func resolveWatchProjectDir(session string, inferred bool) (string, error) {
-	if dir := strings.TrimSpace(resolveCommandProjectDirForSession(session, inferred)); dir != "" {
+func resolveWatchProjectDir(ctx context.Context, session string, inferred bool) (string, error) {
+	if dir := strings.TrimSpace(resolveCommandProjectDirForSession(ctx, session, inferred)); dir != "" {
 		return dir, nil
 	}
 	if inferred {

@@ -401,7 +401,7 @@ func TestNewEnsembleCheckpointStoreForSessionUsesSessionProjectDir(t *testing.T)
 	}
 	defer os.Chdir(oldWd)
 
-	store, err := newEnsembleCheckpointStoreForSession("mysession")
+	store, err := newEnsembleCheckpointStoreForSession(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("newEnsembleCheckpointStoreForSession() error = %v", err)
 	}
@@ -450,7 +450,7 @@ func TestLoadExportFindingsContextRunIDUsesProvidedSessionProjectDir(t *testing.
 	cfg = &config.Config{ProjectsBase: projectsBase}
 	t.Cleanup(func() { cfg = oldCfg })
 
-	store, err := newEnsembleCheckpointStoreForSession("mysession")
+	store, err := newEnsembleCheckpointStoreForSession(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("newEnsembleCheckpointStoreForSession() error = %v", err)
 	}
@@ -493,7 +493,7 @@ func TestLoadExportFindingsContextRunIDUsesProvidedSessionProjectDir(t *testing.
 	}
 	defer os.Chdir(oldWd)
 
-	ctx, err := loadExportFindingsContext(io.Discard, "mysession", exportFindingsOptions{RunID: meta.RunID})
+	ctx, err := loadExportFindingsContext(t.Context(), io.Discard, "mysession", exportFindingsOptions{RunID: meta.RunID})
 	if err != nil {
 		t.Fatalf("loadExportFindingsContext() error = %v", err)
 	}
@@ -534,7 +534,7 @@ func TestLoadCompareInputRunIDUsesConfiguredProjectsBaseWhenCWDDiffers(t *testin
 	cfg = &config.Config{ProjectsBase: projectsBase}
 	t.Cleanup(func() { cfg = oldCfg })
 
-	store, err := newEnsembleCheckpointStoreForSession("mysession")
+	store, err := newEnsembleCheckpointStoreForSession(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("newEnsembleCheckpointStoreForSession() error = %v", err)
 	}
@@ -616,7 +616,7 @@ func TestLoadExportFindingsContextRunIDUsesConfiguredProjectsBaseWithoutSession(
 	cfg = &config.Config{ProjectsBase: projectsBase}
 	t.Cleanup(func() { cfg = oldCfg })
 
-	store, err := newEnsembleCheckpointStoreForSession("mysession")
+	store, err := newEnsembleCheckpointStoreForSession(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("newEnsembleCheckpointStoreForSession() error = %v", err)
 	}
@@ -659,7 +659,7 @@ func TestLoadExportFindingsContextRunIDUsesConfiguredProjectsBaseWithoutSession(
 	}
 	defer os.Chdir(oldWd)
 
-	ctx, err := loadExportFindingsContext(io.Discard, "", exportFindingsOptions{RunID: meta.RunID})
+	ctx, err := loadExportFindingsContext(t.Context(), io.Discard, "", exportFindingsOptions{RunID: meta.RunID})
 	if err != nil {
 		t.Fatalf("loadExportFindingsContext() error = %v", err)
 	}
@@ -740,7 +740,7 @@ func TestLoadExportFindingsContextRunIDPreservesResolvedProjectForNonProjectScop
 	}
 	defer os.Chdir(oldWd)
 
-	ctx, err := loadExportFindingsContext(io.Discard, "", exportFindingsOptions{RunID: meta.RunID})
+	ctx, err := loadExportFindingsContext(t.Context(), io.Discard, "", exportFindingsOptions{RunID: meta.RunID})
 	if err != nil {
 		t.Fatalf("loadExportFindingsContext() error = %v", err)
 	}
@@ -784,7 +784,7 @@ func TestRunEnsembleResumeUsesConfiguredRunProjectWhenCWDDiffers(t *testing.T) {
 	cfg = &config.Config{ProjectsBase: projectsBase}
 	t.Cleanup(func() { cfg = oldCfg })
 
-	store, err := newEnsembleCheckpointStoreForSession("mysession")
+	store, err := newEnsembleCheckpointStoreForSession(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("newEnsembleCheckpointStoreForSession() error = %v", err)
 	}
@@ -969,7 +969,7 @@ func TestRunEnsembleRerunModeUsesConfiguredRunProjectWhenCWDDiffers(t *testing.T
 	cfg = &config.Config{ProjectsBase: projectsBase}
 	t.Cleanup(func() { cfg = oldCfg })
 
-	store, err := newEnsembleCheckpointStoreForSession("mysession")
+	store, err := newEnsembleCheckpointStoreForSession(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("newEnsembleCheckpointStoreForSession() error = %v", err)
 	}
@@ -1126,7 +1126,7 @@ code = "L9"
 	cfg = &config.Config{ProjectsBase: projectsBase}
 	t.Cleanup(func() { cfg = oldCfg })
 
-	store, err := newEnsembleCheckpointStoreForSession("mysession")
+	store, err := newEnsembleCheckpointStoreForSession(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("newEnsembleCheckpointStoreForSession() error = %v", err)
 	}
@@ -1770,7 +1770,7 @@ func TestRunEnsembleSynthesizeResumeUsesRunProjectForGenericSession(t *testing.T
 	defer os.Chdir(oldWd)
 
 	var buf bytes.Buffer
-	if err := runEnsembleSynthesize(&buf, state.SessionName, synthesizeOptions{
+	if err := runEnsembleSynthesize(t.Context(), &buf, state.SessionName, synthesizeOptions{
 		Format: "json",
 		Stream: true,
 		Resume: true,
@@ -1875,7 +1875,7 @@ func TestRunEnsembleSynthesizeResumeRejectsCheckpointSessionMismatch(t *testing.
 	defer os.Chdir(oldWd)
 
 	var buf bytes.Buffer
-	err = runEnsembleSynthesize(&buf, state.SessionName, synthesizeOptions{
+	err = runEnsembleSynthesize(t.Context(), &buf, state.SessionName, synthesizeOptions{
 		Format: "json",
 		Stream: true,
 		Resume: true,

@@ -2,8 +2,10 @@
 package session
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentsession"
 )
 
@@ -53,6 +55,7 @@ type AgentConfig struct {
 	Codex       int `json:"cod"`
 	Gemini      int `json:"gmi"`
 	Antigravity int `json:"agy,omitempty"`
+	Grok        int `json:"grok,omitempty"`
 	Cursor      int `json:"cursor"`
 	Windsurf    int `json:"windsurf"`
 	Aider       int `json:"aider"`
@@ -63,7 +66,25 @@ type AgentConfig struct {
 
 // Total returns the total number of agents.
 func (a AgentConfig) Total() int {
-	return a.Claude + a.Codex + a.Gemini + a.Antigravity + a.Cursor + a.Windsurf + a.Aider + a.Opencode + a.Ollama + a.User
+	return a.Claude + a.Codex + a.Gemini + a.Antigravity + a.Grok + a.Cursor + a.Windsurf + a.Aider + a.Opencode + a.Ollama + a.User
+}
+
+// ErrAutomatedRelaunchNotImplemented is the sentinel returned when a saved
+// session contains an agent whose automated lifecycle is not supported.
+var ErrAutomatedRelaunchNotImplemented = agent.ErrAutomatedRelaunchNotImplemented
+
+// ValidateAutomatedRelaunch checks the entire saved pane batch before any
+// restore/resume caller mutates tmux state.
+func ValidateAutomatedRelaunch(state *SessionState) error {
+	if state == nil {
+		return nil
+	}
+	for _, pane := range state.Panes {
+		if err := agent.AgentType(pane.AgentType).ValidateAutomatedRelaunch(); err != nil {
+			return fmt.Errorf("saved pane %d (%s): %w", pane.Index, pane.AgentType, err)
+		}
+	}
+	return nil
 }
 
 // PaneState represents the state of a single pane.
@@ -71,7 +92,7 @@ type PaneState struct {
 	Title       string `json:"title"`             // e.g., "myproject__cc_1"
 	Index       int    `json:"index"`             // Pane index
 	WindowIndex int    `json:"window_index"`      // Window index
-	AgentType   string `json:"agent_type"`        // "cc", "cod", "gmi", "user"
+	AgentType   string `json:"agent_type"`        // "cc", "cod", "gmi", "grok", "user"
 	Model       string `json:"model,omitempty"`   // Model variant if any
 	Command     string `json:"command,omitempty"` // The agent launch command
 	Active      bool   `json:"active"`            // Was this the active pane?

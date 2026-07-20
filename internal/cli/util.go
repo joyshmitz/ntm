@@ -315,7 +315,13 @@ func ResolveSessionWithOptionsContext(ctx context.Context, session string, w io.
 // to the canonical live tmux session when possible. If no live match exists, the
 // validated raw session name is returned so callers can preserve existing "not found"
 // behavior after normalization.
-func normalizeExplicitLiveSessionName(session string, allowPrefix bool) (string, error) {
+func normalizeExplicitLiveSessionName(ctx context.Context, session string, allowPrefix bool) (string, error) {
+	if ctx == nil {
+		return "", errors.New("session resolution context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	session = strings.TrimSpace(session)
 	if session == "" {
 		return "", fmt.Errorf("session is required")
@@ -323,7 +329,7 @@ func normalizeExplicitLiveSessionName(session string, allowPrefix bool) (string,
 	if err := tmux.ValidateSessionName(session); err != nil {
 		return "", fmt.Errorf("invalid session name: %w", err)
 	}
-	sessionList, err := tmux.ListSessions()
+	sessionList, err := tmux.ListSessionsContext(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -341,7 +347,13 @@ func normalizeExplicitLiveSessionName(session string, allowPrefix bool) (string,
 // normalizeProjectScopedSessionName normalizes an explicit session name for
 // commands that operate on a project's working directory even when the session
 // itself might be offline.
-func normalizeProjectScopedSessionName(session string, allowPrefix bool) (string, error) {
+func normalizeProjectScopedSessionName(ctx context.Context, session string, allowPrefix bool) (string, error) {
+	if ctx == nil {
+		return "", errors.New("session resolution context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	session = strings.TrimSpace(session)
 	if session == "" {
 		return "", nil
@@ -350,7 +362,7 @@ func normalizeProjectScopedSessionName(session string, allowPrefix bool) (string
 		return "", fmt.Errorf("invalid session name: %w", err)
 	}
 
-	resolved, err := normalizeExplicitLiveSessionName(session, allowPrefix)
+	resolved, err := normalizeExplicitLiveSessionName(ctx, session, allowPrefix)
 	if err != nil {
 		var resolveErr *sessionPkg.ResolveExplicitSessionNameError
 		if !errors.As(err, &resolveErr) || resolveErr.Kind != sessionPkg.ResolveExplicitSessionNameErrorAmbiguous {
@@ -750,15 +762,9 @@ func resolveProjectDirForSession(session string, preferSession bool) string {
 	return ""
 }
 
-// resolveExplicitProjectDirForSession resolves the project directory for commands that
-// were given an explicit session argument. Unlike resolveProjectDirForSession, this must
-// not fall back to the caller's current workspace: explicit-session commands should
-// operate on the live session's unanimous project, its saved/configured project, or fail
-// closed.
-func resolveExplicitProjectDirForSession(session string) (string, error) {
-	return resolveExplicitProjectDirForSessionContext(context.Background(), session)
-}
-
+// resolveExplicitProjectDirForSessionContext resolves the project directory for commands
+// given an explicit session argument. Unlike resolveProjectDirForSession, it must not
+// fall back to the caller's workspace and always honors caller cancellation.
 func resolveExplicitProjectDirForSessionContext(parent context.Context, session string) (string, error) {
 	if parent == nil {
 		return "", errors.New("session project resolution context is required")
@@ -842,8 +848,8 @@ func resolveExplicitProjectDirForSessionWithLookup(
 // handoff files under .ntm/). This preserves explicit-session safety for most
 // commands while still allowing project-local commands to work in offline or
 // ad-hoc workspaces.
-func resolveWorkspaceProjectDirForExplicitSession(session string) (string, error) {
-	projectDir, err := resolveExplicitProjectDirForSession(session)
+func resolveWorkspaceProjectDirForExplicitSession(ctx context.Context, session string) (string, error) {
+	projectDir, err := resolveExplicitProjectDirForSessionContext(ctx, session)
 	if err == nil {
 		return projectDir, nil
 	}
@@ -866,12 +872,12 @@ func resolveWorkspaceProjectDirForExplicitSession(session string) (string, error
 // Explicit session arguments must fail closed rather than inheriting the
 // caller's current workspace; inferred sessions keep the existing workspace
 // fallback behavior.
-func resolveCommandProjectDirForSession(session string, inferred bool) string {
+func resolveCommandProjectDirForSession(ctx context.Context, session string, inferred bool) string {
 	if inferred {
 		return resolveProjectDirForSession(session, true)
 	}
 
-	projectDir, err := resolveExplicitProjectDirForSession(session)
+	projectDir, err := resolveExplicitProjectDirForSessionContext(ctx, session)
 	if err != nil {
 		return ""
 	}

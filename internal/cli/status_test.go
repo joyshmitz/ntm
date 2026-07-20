@@ -72,7 +72,7 @@ func TestStatusRealSession(t *testing.T) {
 
 	// Run status and capture output
 	var buf bytes.Buffer
-	err = runStatus(&buf, sessionName, statusOptions{})
+	err = runStatus(t.Context(), &buf, sessionName, statusOptions{})
 	if err != nil {
 		t.Fatalf("runStatus failed: %v", err)
 	}

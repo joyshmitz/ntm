@@ -190,6 +190,7 @@ func readTokenEvents(path string, cutoff time.Time, sessionFilter, agentFilter s
 	}
 
 	var result []events.Event
+	normalizedAgentFilter := ResolveAgentType(agentFilter)
 	lines := splitJSONLines(data)
 
 	for _, line := range lines {
@@ -215,7 +216,14 @@ func readTokenEvents(path string, cutoff time.Time, sessionFilter, agentFilter s
 		// Filter by agent type (for prompt events)
 		if agentFilter != "" && event.Type == events.EventPromptSend {
 			if targetTypes, ok := event.Data["target_types"].(string); ok {
-				if !strings.Contains(strings.ToLower(targetTypes), strings.ToLower(agentFilter)) {
+				matched := false
+				for _, targetType := range parseAgentTypes(targetTypes) {
+					if targetType == normalizedAgentFilter {
+						matched = true
+						break
+					}
+				}
+				if !matched {
 					continue
 				}
 			}
@@ -281,6 +289,9 @@ func aggregateTokenStats(eventList []events.Event, days int, since, groupBy stri
 			}
 			if gmi, ok := event.Data["gemini_count"].(float64); ok && gmi > 0 {
 				agentSpawns["gemini"] += int(gmi)
+			}
+			if grok, ok := event.Data["grok_count"].(float64); ok && grok > 0 {
+				agentSpawns["grok"] += int(grok)
 			}
 			if cursor, ok := event.Data["cursor_count"].(float64); ok && cursor > 0 {
 				agentSpawns["cursor"] += int(cursor)
@@ -457,7 +468,7 @@ func aggregateTokenStats(eventList []events.Event, days int, since, groupBy stri
 
 func isTrackedAgentType(agentType string) bool {
 	switch agentType {
-	case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "oc", "ollama":
+	case "claude", "codex", "gemini", "grok", "cursor", "windsurf", "aider", "oc", "ollama":
 		return true
 	default:
 		return false
@@ -496,7 +507,7 @@ func parseAgentTypes(targets string) []string {
 	}
 
 	if legacyAll && len(result) == 0 {
-		return []string{"claude", "codex", "gemini"}
+		return []string{"claude", "codex", "gemini", "grok"}
 	}
 	return result
 }

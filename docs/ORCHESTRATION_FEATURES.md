@@ -4,12 +4,13 @@
 > NTM's next-generation orchestration capabilities. It serves as the authoritative
 > reference for the feature set and should be updated as implementation proceeds.
 
-**Document Version**: 2.0 (2025-12-30)
+**Document Version**: 2.1 (2026-07-18)
 
 ## Revision History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.1 | 2026-07-18 | Documented atomic assignment, fail-closed operator-label enrichment, persistent coordinator toggles, and the canonical resilience configuration |
 | 2.0 | 2025-12-30 | Major revision: Added state transition hysteresis, enhanced wait command with error handling, Agent Mail integration for alerts, configurable scoring weights, sticky routing, parallel step execution, conditional logic, loop constructs, output parsing, pipeline notifications |
 | 1.0 | 2025-12-30 | Initial design document |
 
@@ -337,21 +338,23 @@ ON rate_limit_detected:
 
 ### Configuration
 
+Health monitoring and auto-restart are configured through `[resilience]`
+(there is no separate `[health]` section — the restart engine reads
+`[resilience]` plus the spawn-time `--auto-restart` flag). Configuration is
+strict, so an old `[health]` table now fails loading and must be migrated. This
+does not remove the separate `ntm health` command:
+
 ```toml
-[health]
-enabled = true
-check_interval = "30s"      # How often to check health (watch mode)
-stall_threshold = "60s"     # No output for this long = stalled
+[resilience]
+auto_restart = true          # Enable automatic agent restart on crash
+max_restarts = 3             # Max restarts per agent before giving up
+restart_delay_seconds = 30   # Seconds to wait before restarting
+health_check_seconds = 10    # Seconds between health checks
+crash_threshold = 3          # Consecutive failures before restart
 
-# Auto-restart settings
-auto_restart = true
-max_restarts = 3            # Per hour
-restart_backoff_base = "30s"
-restart_backoff_max = "5m"
-
-# Rate limit handling
-rate_limit_backoff_base = "30s"
-rate_limit_backoff_max = "5m"
+[resilience.rate_limit]
+detect = true                # Detect rate limits
+notify = true                # Send notification on rate limit
 
 [alerts]
 enabled = true
@@ -1036,7 +1039,7 @@ ntm --robot-pipeline-cancel=run-abc123
 
 ### Problem Statement
 
-When multiple agents spawn simultaneously and self-select work via `bv --robot-triage` or `bd ready`, they race to claim the same beads:
+When multiple agents spawn simultaneously and self-select work via `bv --robot-triage` or `br ready`, they race to claim the same beads:
 
 ```
 T=0:    Agent1, Agent2, Agent3 all spawn
@@ -1047,7 +1050,7 @@ T=37s:  All start working on ntm-g2lq
 Result: Duplicate work, file conflicts, wasted tokens
 ```
 
-The race window between `bd ready` (read) and `bd update --status in_progress` (write) has no atomicity.
+The race window between `br ready` (read) and a separate status update has no atomicity.
 
 ### Solution: Staggered Spawn
 
@@ -1081,7 +1084,7 @@ By the time Agent 2 starts selecting, Agent 1 has already claimed its work.
 Typical agent startup sequence:
 - 10-20s: Read AGENTS.md, understand project
 - 20-40s: Run initial codebase exploration
-- 10-20s: Query bv/bd for work recommendations
+- 10-20s: Query `bv`/`br` for work recommendations
 - 5-10s: Claim bead and begin work
 
 Total: ~60-90s. The 90s default provides margin for variance.
@@ -1112,23 +1115,50 @@ ntm spawn myproject --cc 3 --assign-work
 ```
 
 Flow:
-1. ntm runs `bv --robot-triage`
-2. ntm selects top 3 beads
-3. ntm claims each bead (marks in_progress)
-4. ntm sends customized prompt to each agent with assigned work
+1. NTM requires a structurally valid full actionable `bv --robot-plan` and uses scored `bv --robot-triage` only to rank IDs authorized by that plan.
+2. Because the plan omits labels and `br ready` omits epics, NTM replaces every candidate's labels with live evidence from both `br ready` and `br list --status open`.
+3. NTM rejects dependency-blocked, active, terminal, and operator-gated work. Any plan command, parse, structure, blank-ID, label lookup, or coverage gap stops automated assignment.
+4. NTM atomically claims the bead, reserves its file scope, records durable intent, and dispatches to the exact physical pane.
+5. A failed step records or rolls back the generation without reporting a successful assignment.
 
-No race possible - work claimed before prompt sent.
+The durable claim precedes prompt delivery, so another process cannot authorize a duplicate assignment from the same stale planning snapshot.
 
-### Optional: Soft-Claim Protocol
+Configured approval vocabularies extend the built-ins and are case-insensitive:
 
-For high-contention scenarios (many agents, short stagger), agents can "soft-claim" beads:
+```toml
+[assign]
+operator_gated_labels = ["security-review", "legal-approval"]
+```
 
-1. Write claim file: `.ntm/claims/ntm-g2lq.json`
-2. Wait 5-10 seconds
-3. Check for conflicts (another agent claimed first)
-4. Confirm or abandon
+Project `.ntm/config.toml` values add to global values and cannot remove a gate.
 
-This is optional and for edge cases only.
+### Historical Proposal: Soft-Claim Files
+
+Earlier designs proposed a `.ntm/claims/` delay-and-check protocol. NTM does not
+implement that protocol; the atomic Beads claim plus durable assignment ledger
+is the supported coordination boundary.
+
+### Coordinator Toggle Persistence
+
+Coordinator feature toggles update the selected config file instead of merely
+printing suggested TOML:
+
+```bash
+ntm coordinator enable auto-assign
+ntm coordinator enable digest --interval=30m
+ntm coordinator disable conflict-negotiate
+```
+
+The writer preserves unrelated keys, comments, file modes, and symlink targets;
+serializes concurrent writers; and validates the complete strict NTM schema
+before atomic replacement. A running coordinator daemon reads configuration at
+startup and must be restarted to apply a toggle.
+
+Persistence supports both a `[coordinator]` table and root dotted assignments
+such as `coordinator.auto_assign = false`. It deliberately refuses a
+whole-section inline assignment such as
+`coordinator = { auto_assign = false }` without mutating the file, because that
+form cannot be updated surgically while preserving the operator's source.
 
 ### API Design
 

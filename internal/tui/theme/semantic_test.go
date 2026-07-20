@@ -31,6 +31,12 @@ func TestSemanticPalette(t *testing.T) {
 		if p.AgentGemini == "" {
 			t.Error("AgentGemini should not be empty")
 		}
+		if p.AgentGrok == "" {
+			t.Error("AgentGrok should not be empty")
+		}
+		if p.AgentGrok != CatppuccinMocha.Pink {
+			t.Errorf("AgentGrok = %q, want theme pink %q", p.AgentGrok, CatppuccinMocha.Pink)
+		}
 		if p.AgentUser == "" {
 			t.Error("AgentUser should not be empty")
 		}
@@ -77,6 +83,8 @@ func TestAgentColor(t *testing.T) {
 		{"gemini", string(p.AgentGemini)},
 		{"gmi", string(p.AgentGemini)},
 		{"google-gemini", string(p.AgentGemini)},
+		{"grok", string(p.AgentGrok)},
+		{"grok-build", string(p.AgentGrok)},
 		{"ws", string(p.AgentWindsurf)},
 		{"oc", string(p.AgentOpencode)},
 		{"opencode", string(p.AgentOpencode)},
@@ -202,6 +210,12 @@ func TestNewSemanticStyles(t *testing.T) {
 		}
 		if s.BadgeGemini.Render(text) == "" {
 			t.Error("BadgeGemini.Render should not return empty")
+		}
+		if s.BadgeGrok.Render(text) == "" {
+			t.Error("BadgeGrok.Render should not return empty")
+		}
+		if got := s.BadgeGrok.GetBackground(); got != CatppuccinMocha.Pink {
+			t.Errorf("BadgeGrok background = %q, want theme pink %q", got, CatppuccinMocha.Pink)
 		}
 		if s.BadgeUser.Render(text) == "" {
 			t.Error("BadgeUser.Render should not return empty")

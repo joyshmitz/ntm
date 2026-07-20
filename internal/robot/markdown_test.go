@@ -290,7 +290,7 @@ func TestCountAgentsByType(t *testing.T) {
 			name:  "empty",
 			panes: nil,
 			expect: map[string]int{
-				"claude": 0, "codex": 0, "gemini": 0, "user": 0, "other": 0,
+				"claude": 0, "codex": 0, "gemini": 0, "grok": 0, "user": 0, "other": 0,
 			},
 		},
 		{
@@ -300,11 +300,12 @@ func TestCountAgentsByType(t *testing.T) {
 				{Type: tmux.AgentClaude},
 				{Type: tmux.AgentCodex},
 				{Type: tmux.AgentGemini},
+				{Type: tmux.AgentGrok},
 				{Type: tmux.AgentUser},
 				{Type: tmux.AgentUnknown},
 			},
 			expect: map[string]int{
-				"claude": 2, "codex": 1, "gemini": 1, "user": 1, "other": 1,
+				"claude": 2, "codex": 1, "gemini": 1, "grok": 1, "user": 1, "other": 1,
 			},
 		},
 		{
@@ -315,7 +316,17 @@ func TestCountAgentsByType(t *testing.T) {
 				{Type: tmux.AgentClaude},
 			},
 			expect: map[string]int{
-				"claude": 3, "codex": 0, "gemini": 0, "user": 0, "other": 0,
+				"claude": 3, "codex": 0, "gemini": 0, "grok": 0, "user": 0, "other": 0,
+			},
+		},
+		{
+			name: "all grok aliases",
+			panes: []tmux.Pane{
+				{Type: tmux.AgentGrok},
+				{Type: tmux.AgentType("grok-build")},
+			},
+			expect: map[string]int{
+				"grok": 2, "user": 0, "other": 0,
 			},
 		},
 		{
@@ -349,6 +360,7 @@ func TestSnapshotSessionCountsCanonicalizesAndKeepsNewerTypes(t *testing.T) {
 	counts, states := snapshotSessionCounts([]SnapshotAgent{
 		{Type: "openai-codex", State: "idle"},
 		{Type: "google-gemini", State: "error"},
+		{Type: "grok-build", State: "working"},
 		{Type: "cursor", State: "working"},
 		{Type: "ws", State: "busy"},
 		{Type: "aider", State: "active"},
@@ -357,14 +369,14 @@ func TestSnapshotSessionCountsCanonicalizesAndKeepsNewerTypes(t *testing.T) {
 		{Type: "mystery", State: "error"},
 	})
 
-	if counts["codex"] != 1 || counts["gemini"] != 1 || counts["cursor"] != 1 || counts["windsurf"] != 1 || counts["aider"] != 1 || counts["ollama"] != 1 {
+	if counts["codex"] != 1 || counts["gemini"] != 1 || counts["grok"] != 1 || counts["cursor"] != 1 || counts["windsurf"] != 1 || counts["aider"] != 1 || counts["ollama"] != 1 {
 		t.Fatalf("counts = %+v", counts)
 	}
 	if counts["user"] != 1 || counts["other"] != 1 {
 		t.Fatalf("counts = %+v, want user=1 other=1", counts)
 	}
-	if states["idle"] != 2 || states["error"] != 2 || states["active"] != 3 {
-		t.Fatalf("states = %+v, want idle=2 error=2 active=3", states)
+	if states["idle"] != 2 || states["error"] != 2 || states["active"] != 4 {
+		t.Fatalf("states = %+v, want idle=2 error=2 active=4", states)
 	}
 }
 
@@ -373,6 +385,7 @@ func TestFormatMarkdownAgentTypeCounts(t *testing.T) {
 	got := formatMarkdownAgentTypeCounts(map[string]int{
 		"claude":   1,
 		"codex":    2,
+		"grok":     1,
 		"cursor":   1,
 		"ollama":   1,
 		"user":     1,
@@ -381,7 +394,7 @@ func TestFormatMarkdownAgentTypeCounts(t *testing.T) {
 		"windsurf": 0,
 		"aider":    0,
 	})
-	want := "cc:1 cod:2 cur:1 oll:1 usr:1 oth:1"
+	want := "cc:1 cod:2 grok:1 cur:1 oll:1 usr:1 oth:1"
 	if got != want {
 		t.Fatalf("formatMarkdownAgentTypeCounts() = %q, want %q", got, want)
 	}
@@ -634,6 +647,7 @@ func TestRenderMarkdownFromProjection_SessionsKeepModernAgentTypes(t *testing.T)
 				Agents: []SnapshotAgent{
 					{Type: "openai-codex", State: "idle"},
 					{Type: "google-gemini", State: "error"},
+					{Type: "grok-build", State: "working"},
 					{Type: "cursor", State: "working"},
 					{Type: "ws", State: "busy"},
 					{Type: "ollama", State: "idle"},
@@ -647,7 +661,7 @@ func TestRenderMarkdownFromProjection_SessionsKeepModernAgentTypes(t *testing.T)
 	proj := ProjectSections(snapshot, SectionProjectionOptions{})
 	full := RenderMarkdownFromProjection(proj, false)
 	compact := RenderMarkdownFromProjection(proj, true)
-	wantTypes := "cod:1 gmi:1 cur:1 ws:1 oll:1 usr:1 oth:1"
+	wantTypes := "cod:1 gmi:1 grok:1 cur:1 ws:1 oll:1 usr:1 oth:1"
 
 	if !strings.Contains(full, wantTypes) {
 		t.Fatalf("full projection markdown missing modern type summary %q:\n%s", wantTypes, full)

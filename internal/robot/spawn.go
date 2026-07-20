@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/audit"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
@@ -19,6 +21,11 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/recovery"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+)
+
+var (
+	errGrokSpawnWaitUnavailable   = errors.New("--spawn-wait is not yet supported for Grok Build because its authenticated TUI readiness protocol has not been verified")
+	errGrokSpawnAssignUnavailable = errors.New("--spawn-assign-work is not yet supported for Grok Build because prompt delivery has not been verified")
 )
 
 // Pre-compiled prompt patterns for isAgentReady (anchored to end of lines or output).
@@ -36,6 +43,8 @@ var promptPatterns = []*regexp.Regexp{
 type SpawnOptions struct {
 	Session            string
 	Label              string        // Session label — constructs "{Session}--{Label}" if set
+	ConfigPath         string        // Selected global config used for authoritative assignment policy
+	RequireConfig      bool          // ConfigPath was explicitly selected and must exist
 	CCCount            int           // Claude agents
 	CodCount           int           // Codex agents
 	GmiCount           int           // Gemini agents
@@ -74,17 +83,22 @@ type SpawnLifecycleDependencies struct {
 // SpawnAssignmentDependencies exposes assignment side-effect ports for focused
 // tests while production uses the durable Beads, ledger, and dispatch services.
 type SpawnAssignmentDependencies struct {
-	FetchTriage       func(context.Context, string) (*bv.TriageResponse, error)
-	ListPanes         func(context.Context, string) ([]tmux.Pane, error)
-	LoadStore         func(session string) (*assignment.AssignmentStore, error)
-	ClaimBead         func(context.Context, string, string, string) (bv.BeadClaimResult, error)
-	GetBeadStatus     func(context.Context, string, string) (string, error)
-	NewIdempotencyKey func() (string, error)
-	ReservationPort   assignment.ReservationPort
-	ResolveAgentName  func(context.Context, string, string, string, string) (string, error)
-	ObserveSession    func(context.Context, string) (statuspkg.SessionObservation, error)
-	DispatchDeliverer dispatchsvc.Deliverer
-	DispatchPacer     dispatchsvc.Pacer
+	LoadAssignmentPolicy             func(string, string, bool) (*config.Config, error)
+	FetchActionable                  func(context.Context, string, int) ([]bv.TriageRecommendation, error)
+	FetchTriage                      func(context.Context, string) (*bv.TriageResponse, error)
+	AssignmentLedgerExists           func(session string) (bool, error)
+	ListPanes                        func(context.Context, string) ([]tmux.Pane, error)
+	LoadStore                        func(session string) (*assignment.AssignmentStore, error)
+	ClaimBead                        func(context.Context, string, string, string) (bv.BeadClaimResult, error)
+	ClaimBeadWithOperatorGatedLabels func(context.Context, string, string, string, []string) (bv.BeadClaimResult, error)
+	GetBeadStatus                    func(context.Context, string, string) (string, error)
+	GetBeadDetails                   func(context.Context, string, string) (*bv.BeadAssignmentDetails, error)
+	NewIdempotencyKey                func() (string, error)
+	ReservationPort                  assignment.ReservationPort
+	ResolveAgentName                 func(context.Context, string, string, string, string) (string, error)
+	ObserveSession                   func(context.Context, string) (statuspkg.SessionObservation, error)
+	DispatchDeliverer                dispatchsvc.Deliverer
+	DispatchPacer                    dispatchsvc.Pacer
 }
 
 // SpawnOutput is the structured output for --robot-spawn.
@@ -113,6 +127,14 @@ func setSpawnCancellation(output *SpawnOutput, err error) {
 	}
 	output.Error = err.Error()
 	output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry the command after cancellation")
+}
+
+func setSpawnSafetyConflict(output *SpawnOutput, session string) {
+	if output == nil {
+		return
+	}
+	output.Error = fmt.Sprintf("session '%s' already exists (--spawn-safety mode prevents reuse; use 'ntm kill %s' first)", session, session)
+	output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeInvalidFlag, "Choose a new session name or disable --spawn-safety")
 }
 
 func spawnCancellationError(ctx context.Context, err error) error {
@@ -156,10 +178,10 @@ func validateSpawnRequest(opts SpawnOptions) (string, error) {
 		return "", errors.New("no agents specified (use cc, cod, gmi, agy, or grok counts)")
 	}
 	if opts.GrokCount > 0 && opts.WaitReady {
-		return "", errors.New("--spawn-wait is not yet supported for Grok Build because its authenticated TUI readiness protocol has not been verified")
+		return "", errGrokSpawnWaitUnavailable
 	}
 	if opts.GrokCount > 0 && opts.AssignWork {
-		return "", errors.New("--spawn-assign-work is not yet supported for Grok Build because prompt delivery has not been verified")
+		return "", errGrokSpawnAssignUnavailable
 	}
 	if !opts.AssignWork {
 		return "", nil
@@ -169,6 +191,46 @@ func validateSpawnRequest(opts SpawnOptions) (string, error) {
 		return "", err
 	}
 	return strategy, nil
+}
+
+func validateGrokSpawnPaneBaselines(panes []tmux.Pane, opts SpawnOptions) error {
+	if opts.GrokCount <= 0 {
+		return nil
+	}
+	start := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount
+	if !opts.NoUserPane {
+		start++
+	}
+	for i := 0; i < opts.GrokCount; i++ {
+		paneIndex := start + i
+		if paneIndex >= len(panes) {
+			return fmt.Errorf("requested Grok Build pane %d is unavailable", i+1)
+		}
+		if err := tmux.ValidatePaneLaunchBaseline(panes[paneIndex]); err != nil {
+			return fmt.Errorf("validate Grok Build agent %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+func validateExistingGrokSpawnPaneBaselines(panes []tmux.Pane, opts SpawnOptions) error {
+	if opts.GrokCount <= 0 {
+		return nil
+	}
+	start := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount
+	if !opts.NoUserPane {
+		start++
+	}
+	for i := 0; i < opts.GrokCount; i++ {
+		paneIndex := start + i
+		if paneIndex >= len(panes) {
+			break
+		}
+		if err := tmux.ValidatePaneLaunchBaseline(panes[paneIndex]); err != nil {
+			return fmt.Errorf("validate Grok Build agent %d: %w", i+1, err)
+		}
+	}
+	return nil
 }
 
 func spawnLifecycleDeps(custom *SpawnLifecycleDependencies) SpawnLifecycleDependencies {
@@ -368,7 +430,13 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	assignStrategy, validationErr := validateSpawnRequest(opts)
 	if validationErr != nil {
 		output.Error = validationErr.Error()
-		output.RobotResponse = NewErrorResponse(validationErr, ErrCodeInvalidFlag, "Use non-negative agent counts and a supported assignment strategy")
+		errorCode := ErrCodeInvalidFlag
+		hint := "Use non-negative agent counts and a supported assignment strategy"
+		if errors.Is(validationErr, errGrokSpawnWaitUnavailable) || errors.Is(validationErr, errGrokSpawnAssignUnavailable) {
+			errorCode = ErrCodeNotImplemented
+			hint = agentpkg.GrokPhaseOneCapabilityHint
+		}
+		output.RobotResponse = NewErrorResponse(validationErr, errorCode, hint)
 		return output, nil
 	}
 	deps := spawnLifecycleDeps(opts.LifecycleDeps)
@@ -445,8 +513,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			return output, nil
 		}
 		if exists {
-			output.Error = fmt.Sprintf("session '%s' already exists (--spawn-safety mode prevents reuse; use 'ntm kill %s' first)", opts.Session, opts.Session)
-			output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeInvalidFlag, "Choose a new session name or disable --spawn-safety")
+			setSpawnSafetyConflict(output, opts.Session)
 			return output, nil
 		}
 	}
@@ -467,6 +534,52 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	}
 	output.WorkingDir = dir
 	auditWorkingDir = dir
+
+	var verifiedAssignmentPlan *bv.TriageResponse
+	if opts.AssignWork {
+		assignmentDeps := spawnAssignmentDeps(opts.AssignmentDeps)
+		effectiveConfig, policyErr := assignmentDeps.LoadAssignmentPolicy(dir, opts.ConfigPath, opts.RequireConfig)
+		if policyErr != nil {
+			output.Error = fmt.Sprintf("load spawn assignment safety policy: %v", policyErr)
+			output.RobotResponse = NewErrorResponse(
+				fmt.Errorf("%s", output.Error),
+				ErrCodeInvalidFlag,
+				"Fix the selected global config and the spawn project's .ntm/config.toml",
+			)
+			return output, nil
+		}
+		cfg = effectiveConfig
+		operatorGatedLabels := []string(nil)
+		if effectiveConfig != nil {
+			operatorGatedLabels = effectiveConfig.Assign.OperatorGatedLabels
+		}
+		if policyErr := bv.ConfigureProjectOperatorGatedLabels(dir, operatorGatedLabels); policyErr != nil {
+			output.Error = fmt.Sprintf("register spawn assignment safety policy: %v", policyErr)
+			output.RobotResponse = NewErrorResponse(
+				fmt.Errorf("%s", output.Error),
+				ErrCodeInvalidFlag,
+				"Use an authoritative project directory for spawn assignment",
+			)
+			return output, nil
+		}
+
+		actionable, actionableErr := assignmentDeps.FetchActionable(ctx, dir, 0)
+		if actionableErr != nil {
+			if cancelErr := spawnCancellationError(ctx, actionableErr); cancelErr != nil {
+				setSpawnCancellation(output, cancelErr)
+			} else {
+				output.Error = fmt.Sprintf("verify actionable spawn work: %v", actionableErr)
+				output.RobotResponse = NewErrorResponse(
+					fmt.Errorf("%s", output.Error),
+					ErrCodeInternalError,
+					"Ensure bv plan output and live br labels are complete and valid",
+				)
+			}
+			return output, nil
+		}
+		actionable = filterAssignableActionableRecommendationsForProject(dir, actionable, 0)
+		verifiedAssignmentPlan = restrictTriageToAssignable(nil, actionable)
+	}
 
 	// Load handoff context for session recovery (non-fatal if not found)
 	spawnRecovery, handoffCtx := loadLatestHandoff(dir, opts.Session)
@@ -603,14 +716,8 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		return output, nil
 	}
 
-	// Ensure directory exists (only for real spawns, not dry-run)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		output.Error = fmt.Sprintf("creating directory: %v", err)
-		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check directory permissions")
-		return output, nil
-	}
-
-	// Create session if it doesn't exist
+	// Recheck immediately before lifecycle mutation. In safety mode a session
+	// may have appeared while assignment and admission preflights were running.
 	sessionCreated := false
 	sessionExists, sessionErr := deps.SessionExists(ctx, opts.Session)
 	if sessionErr != nil {
@@ -622,6 +729,19 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		}
 		return output, nil
 	}
+	if opts.Safety && sessionExists {
+		setSpawnSafetyConflict(output, opts.Session)
+		return output, nil
+	}
+
+	// Ensure directory exists (only for real spawns, not dry-run).
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		output.Error = fmt.Sprintf("creating directory: %v", err)
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check directory permissions")
+		return output, nil
+	}
+
+	// Create session if it doesn't exist.
 	if !sessionExists {
 		if err := ctx.Err(); err != nil {
 			setSpawnCancellation(output, err)
@@ -653,6 +773,15 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			output.Error = fmt.Sprintf("getting panes: %v", err)
 			output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check tmux session state")
 		}
+		return output, nil
+	}
+	if err := validateExistingGrokSpawnPaneBaselines(panes, opts); err != nil {
+		output.Error = fmt.Sprintf("validating existing Grok Build launch panes: %v", err)
+		output.RobotResponse = NewErrorResponse(
+			err,
+			ErrCodeInternalError,
+			"Use an idle shell pane before launching Grok Build",
+		)
 		return output, nil
 	}
 
@@ -698,6 +827,15 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			fmt.Errorf("%s", output.Error),
 			ErrCodePaneNotFound,
 			"Inspect tmux pane creation and retry the spawn",
+		)
+		return output, nil
+	}
+	if err := validateGrokSpawnPaneBaselines(panes, opts); err != nil {
+		output.Error = fmt.Sprintf("validating Grok Build launch panes: %v", err)
+		output.RobotResponse = NewErrorResponse(
+			err,
+			ErrCodeInternalError,
+			"Use an idle shell pane before launching Grok Build",
 		)
 		return output, nil
 	}
@@ -827,7 +965,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		output.AssignStrategy = assignStrategy
 		assignments, assignmentErr := assignWorkToAgentsWithError(
 			ctx, output, dir, opts.Session, output.AssignStrategy, cfg,
-			opts.RequireReservation, opts.ReservationPaths, opts.AssignmentDeps,
+			opts.RequireReservation, opts.ReservationPaths, opts.AssignmentDeps, verifiedAssignmentPlan,
 		)
 		output.Assignments = assignments
 		ensureSpawnAssignmentCoverage(output)
@@ -881,6 +1019,13 @@ func launchAgent(ctx context.Context, pane tmux.Pane, session, agentType string,
 		agent.Error = fmt.Sprintf("launch canceled: %v", err)
 		return agent, fmt.Errorf("launch canceled: %w", err)
 	}
+	if agentTypeShort(agentType) == "grok" {
+		if err := tmux.ValidatePaneLaunchBaseline(pane); err != nil {
+			agent.Error = fmt.Sprintf("launching: %v", err)
+			agent.StartupMs = time.Since(startTime).Milliseconds()
+			return agent, fmt.Errorf("launching Grok Build: %w", err)
+		}
+	}
 
 	// Set pane title
 	if err := tmux.SetPaneTitleContext(ctx, pane.ID, title); err != nil {
@@ -914,6 +1059,13 @@ func launchAgent(ctx context.Context, pane tmux.Pane, session, agentType string,
 		agent.Error = fmt.Sprintf("launching: %v", err)
 		agent.StartupMs = time.Since(startTime).Milliseconds()
 		return agent, fmt.Errorf("launching: %w", err)
+	}
+	if agentTypeShort(agentType) == "grok" {
+		if _, err := tmux.WaitForPaneProcessStartContext(ctx, session, pane.ID); err != nil {
+			agent.Error = fmt.Sprintf("launching: stable process did not start: %v", err)
+			agent.StartupMs = time.Since(startTime).Milliseconds()
+			return agent, fmt.Errorf("launching Grok Build: stable process did not start: %w", err)
+		}
 	}
 
 	agent.StartupMs = time.Since(startTime).Milliseconds()
@@ -1083,7 +1235,6 @@ func agentTypeShort(agentType string) string {
 }
 
 // getAgentCommands returns the commands to launch each agent type.
-// Templates are rendered with empty vars (optional fields only).
 func getAgentCommands(cfg *config.Config) map[string]string {
 	defaults := map[string]string{
 		"claude":      "claude",
@@ -1109,9 +1260,13 @@ func getAgentCommands(cfg *config.Config) map[string]string {
 		defaults["grok"] = cfg.Agents.Grok
 	}
 
-	// Render templates with empty vars (all template fields are optional)
-	vars := config.AgentTemplateVars{}
 	for agentType, cmdTemplate := range defaults {
+		vars := config.AgentTemplateVars{}
+		if cfg != nil && agentType == "grok" {
+			// Grok owns its default when this remains empty, but an explicit
+			// configured default must be honored by robot spawns.
+			vars.Model = cfg.Models.GetModelName(agentType, "")
+		}
 		if rendered, err := config.GenerateAgentCommand(cmdTemplate, vars); err == nil {
 			defaults[agentType] = rendered
 		}
@@ -1174,12 +1329,12 @@ func normalizeAssignStrategyStrict(strategy string) (string, error) {
 // assignWorkToAgents gets triage recommendations, claims beads, and sends work prompts.
 func assignWorkToAgents(ctx context.Context, output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies) []SpawnAssignment {
 	assignments, _ := assignWorkToAgentsWithError(
-		ctx, output, workDir, session, strategy, cfg, requireReservation, reservationPaths, customDeps,
+		ctx, output, workDir, session, strategy, cfg, requireReservation, reservationPaths, customDeps, nil,
 	)
 	return assignments
 }
 
-func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies) ([]SpawnAssignment, error) {
+func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies, verifiedPlan *bv.TriageResponse) ([]SpawnAssignment, error) {
 	var assignments []SpawnAssignment
 	if ctx == nil {
 		return []SpawnAssignment{{ClaimError: "spawn assignment context is required"}}, nil
@@ -1203,11 +1358,16 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 		return assignments, nil
 	}
 
-	// Get triage recommendations from bv
-	triage, err := deps.FetchTriage(ctx, workDir)
-	if err != nil {
-		wrapped := fmt.Errorf("load bv triage: %w", err)
-		return spawnAgentPlanErrors(readyAgents, wrapped), spawnCancellationError(ctx, wrapped)
+	// Production preflights the verified actionable plan before creating the
+	// session. Focused helper tests may still inject a complete triage fixture.
+	triage := verifiedPlan
+	if triage == nil {
+		var err error
+		triage, err = deps.FetchTriage(ctx, workDir)
+		if err != nil {
+			wrapped := fmt.Errorf("load bv triage: %w", err)
+			return spawnAgentPlanErrors(readyAgents, wrapped), spawnCancellationError(ctx, wrapped)
+		}
 	}
 	if triage == nil {
 		return spawnAgentPlanErrors(readyAgents, errors.New("load bv triage: empty response")), nil
@@ -1219,7 +1379,33 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 	// Get work items based on strategy
 	workItems := getWorkItemsForStrategy(triage, strategy, len(readyAgents))
 	if len(workItems) == 0 {
-		return assignments, nil
+		ledgerExists, err := deps.AssignmentLedgerExists(session)
+		if err != nil {
+			wrapped := fmt.Errorf("inspect assignment ledger: %w", err)
+			return spawnAgentPlanErrors(readyAgents, wrapped), spawnCancellationError(ctx, wrapped)
+		}
+		if !ledgerExists {
+			return assignments, nil
+		}
+		store, err := deps.LoadStore(session)
+		if err != nil {
+			wrapped := fmt.Errorf("load assignment ledger for replay: %w", err)
+			return spawnAgentPlanErrors(readyAgents, wrapped), spawnCancellationError(ctx, wrapped)
+		}
+		if err := ctx.Err(); err != nil {
+			return spawnAgentPlanErrors(readyAgents, fmt.Errorf("spawn assignment canceled after replay ledger load: %w", err)), err
+		}
+		panes, err := deps.ListPanes(ctx, session)
+		if err != nil {
+			wrapped := fmt.Errorf("load pane topology for assignment replay: %w", err)
+			return spawnAgentPlanErrors(readyAgents, wrapped), spawnCancellationError(ctx, wrapped)
+		}
+		if err := ctx.Err(); err != nil {
+			return spawnAgentPlanErrors(readyAgents, fmt.Errorf("spawn assignment canceled after replay topology load: %w", err)), err
+		}
+		return spawnDurableAssignmentReplays(
+			ctx, workDir, readyAgents, panes, store, requireReservation, reservationPaths, deps,
+		)
 	}
 
 	store, err := deps.LoadStore(session)
@@ -1235,7 +1421,16 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 		redactionConfig = cfg.Redaction.ToRedactionLibConfig()
 	}
 	dispatchPort := newRobotAtomicPaneDispatchPort(session, deps.ListPanes, deps.ObserveSession, redactionConfig, deps.DispatchDeliverer, deps.DispatchPacer)
-	claimPort := newRobotAtomicClaimPort(workDir, deps.ClaimBead)
+	if deps.ClaimBeadWithOperatorGatedLabels == nil {
+		return spawnAssignmentPlanErrors(readyAgents, workItems, errors.New("spawn assignment guarded claim policy is unavailable")), nil
+	}
+	operatorGatedLabels := []string(nil)
+	if cfg != nil {
+		operatorGatedLabels = append(operatorGatedLabels, cfg.Assign.OperatorGatedLabels...)
+	}
+	claimPort := newRobotAtomicClaimPort(workDir, func(ctx context.Context, dir, beadID, actor string) (bv.BeadClaimResult, error) {
+		return deps.ClaimBeadWithOperatorGatedLabels(ctx, dir, beadID, actor, operatorGatedLabels)
+	})
 	panes, err := deps.ListPanes(ctx, session)
 	if err != nil {
 		wrapped := fmt.Errorf("load pane topology: %w", err)
@@ -1388,6 +1583,11 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 			terminalErr = err
 			break
 		}
+		if deps.GetBeadDetails == nil {
+			spawnAssignment.ClaimError = "spawn assignment exact eligibility reader is unavailable"
+			assignments = append(assignments, spawnAssignment)
+			continue
+		}
 		coordinator := assignment.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, dispatchPort).
 			WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(statusCtx context.Context, beadID string) (string, error) {
 				if err := statusCtx.Err(); err != nil {
@@ -1395,6 +1595,9 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 				}
 				return deps.GetBeadStatus(statusCtx, workDir, beadID)
 			}))
+		coordinator = coordinator.WithAssignmentEligibilityAuthorizationPort(
+			newRobotAtomicEligibilityAuthorizationPort(workDir, operatorGatedLabels, deps.GetBeadDetails),
+		)
 		result, executeErr := coordinator.Execute(ctx, spawnAtomicRequest(
 			item, target, pane.Index, agent.Type, agentName, prompt, idempotencyKey, requireReservation, reservationPaths,
 		))
@@ -1555,23 +1758,216 @@ func spawnAssignmentPlanErrors(agents []SpawnedAgent, items []workItem, err erro
 	return result
 }
 
+func spawnAssignmentLedgerExists(session string) (bool, error) {
+	path := filepath.Join(assignment.StorageDir(), session, "assignments.json")
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("assignment ledger %s is not a regular file", path)
+	}
+	return true, nil
+}
+
+// spawnDurableAssignmentReplays reports exact completed dispatch receipts when
+// the freshly verified actionable plan is empty. It never claims, reserves, or
+// dispatches; the active Beads owner and durable intent must still agree.
+func spawnDurableAssignmentReplays(
+	ctx context.Context,
+	workDir string,
+	agents []SpawnedAgent,
+	panes []tmux.Pane,
+	store *assignment.AssignmentStore,
+	requireReservation bool,
+	reservationPaths []string,
+	deps SpawnAssignmentDependencies,
+) ([]SpawnAssignment, error) {
+	if store == nil {
+		return spawnAgentPlanErrors(agents, errors.New("assignment replay ledger is unavailable")), nil
+	}
+
+	durable := store.GetAll()
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	result := make([]SpawnAssignment, 0, len(agents))
+	for i, agent := range agents {
+		if err := ctx.Err(); err != nil {
+			wrapped := fmt.Errorf("spawn assignment replay canceled: %w", err)
+			result = append(result, spawnAgentPlanErrors(agents[i:], wrapped)...)
+			return result, err
+		}
+
+		resolved, err := tmux.ResolvePaneSelectors(panes, []string{agent.Pane}, true)
+		if err != nil {
+			result = append(result, SpawnAssignment{
+				Pane: agent.Pane, AgentType: agent.Type,
+				ClaimError: fmt.Sprintf("resolve pane %s for assignment replay: %v", agent.Pane, err),
+			})
+			continue
+		}
+		pane := resolved[0]
+		target := strings.TrimSpace(pane.ID)
+		if target == "" {
+			target = pane.Ref().Physical()
+		}
+
+		candidates := make([]assignment.Assignment, 0, 1)
+		for _, existing := range durable {
+			if robotAtomicAssignmentTerminal(existing.Status) {
+				continue
+			}
+			occupancy := strings.TrimSpace(existing.OccupancyKey)
+			if occupancy == "" {
+				occupancy = strings.TrimSpace(existing.DispatchTarget)
+			}
+			if strings.TrimSpace(existing.DispatchTarget) == target || occupancy == target {
+				candidates = append(candidates, existing)
+			}
+		}
+		paneRef := pane.Ref().Canonical(multiWindow)
+		if len(candidates) == 0 {
+			continue
+		}
+		if len(candidates) != 1 {
+			result = append(result, SpawnAssignment{
+				Pane: paneRef, AgentType: agent.Type,
+				ClaimError: fmt.Sprintf("assignment replay target %s has %d active durable records", target, len(candidates)),
+			})
+			continue
+		}
+
+		replay, err := spawnDurableAssignmentReplay(
+			ctx, workDir, agent, pane, paneRef, target, candidates[0],
+			requireReservation, reservationPaths, deps.GetBeadDetails,
+		)
+		if err != nil {
+			result = append(result, SpawnAssignment{
+				Pane: paneRef, AgentType: agent.Type, BeadID: candidates[0].BeadID,
+				BeadTitle: candidates[0].BeadTitle, ClaimError: err.Error(),
+			})
+			if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+				result = append(result, spawnAgentPlanErrors(agents[i+1:], err)...)
+				return result, cancelErr
+			}
+			continue
+		}
+		result = append(result, replay)
+	}
+	return result, nil
+}
+
+func spawnDurableAssignmentReplay(
+	ctx context.Context,
+	workDir string,
+	agent SpawnedAgent,
+	pane tmux.Pane,
+	paneRef, target string,
+	existing assignment.Assignment,
+	requireReservation bool,
+	reservationPaths []string,
+	getBeadDetails func(context.Context, string, string) (*bv.BeadAssignmentDetails, error),
+) (SpawnAssignment, error) {
+	occupancy := strings.TrimSpace(existing.OccupancyKey)
+	if occupancy == "" {
+		occupancy = strings.TrimSpace(existing.DispatchTarget)
+	}
+	promptChecksum := assignment.PromptSHA256(existing.PromptSent)
+	if existing.Pane != pane.Index || strings.TrimSpace(existing.DispatchTarget) != target || occupancy != target ||
+		normalizeAgentType(existing.AgentType) != normalizeAgentType(agent.Type) {
+		return SpawnAssignment{}, fmt.Errorf("durable assignment %s does not match pane %s identity", existing.BeadID, target)
+	}
+	if strings.TrimSpace(existing.IdempotencyKey) == "" || strings.TrimSpace(existing.ClaimActor) == "" ||
+		existing.ClaimState != assignment.ClaimClaimed || existing.DispatchState != assignment.DispatchSent ||
+		strings.TrimSpace(existing.DispatchReceiptID) == "" {
+		return SpawnAssignment{}, fmt.Errorf("durable assignment %s has no complete claim and dispatch receipt", existing.BeadID)
+	}
+	if existing.ReservationRequired != requireReservation ||
+		!stringSlicesEqualRobot(existing.ReservationInputPaths, reservationPaths) {
+		return SpawnAssignment{}, fmt.Errorf("durable assignment %s does not match the requested reservation contract", existing.BeadID)
+	}
+	if requireReservation && (existing.ReservationState != assignment.ReservationReserved || !existing.ReservationCompleted) {
+		return SpawnAssignment{}, fmt.Errorf("durable assignment %s has no complete reservation receipt", existing.BeadID)
+	}
+	if existing.PromptSent == "" || strings.TrimSpace(existing.IntentSHA256) == "" ||
+		strings.TrimSpace(existing.PromptSHA256) == "" || existing.PromptSHA256 != promptChecksum {
+		return SpawnAssignment{}, fmt.Errorf("durable assignment %s has no verifiable sent prompt checksum", existing.BeadID)
+	}
+	if getBeadDetails == nil {
+		return SpawnAssignment{}, errors.New("assignment replay requires an exact Beads state reader")
+	}
+	details, err := getBeadDetails(ctx, workDir, existing.BeadID)
+	if err != nil {
+		return SpawnAssignment{}, fmt.Errorf("verify durable assignment %s owner: %w", existing.BeadID, err)
+	}
+	if details == nil || details.ID != existing.BeadID ||
+		!strings.EqualFold(strings.TrimSpace(details.Status), "in_progress") ||
+		strings.TrimSpace(details.Assignee) != strings.TrimSpace(existing.ClaimActor) {
+		return SpawnAssignment{}, fmt.Errorf("durable assignment %s is not owned in_progress by %s", existing.BeadID, existing.ClaimActor)
+	}
+
+	return SpawnAssignment{
+		Pane:              paneRef,
+		AgentType:         agent.Type,
+		BeadID:            existing.BeadID,
+		BeadTitle:         existing.BeadTitle,
+		Priority:          fmt.Sprintf("P%d", details.Priority),
+		Claimed:           true,
+		PromptSent:        true,
+		ClaimActor:        existing.ClaimActor,
+		IdempotencyKey:    existing.IdempotencyKey,
+		DispatchReceiptID: existing.DispatchReceiptID,
+		ReservationIDs:    append([]int(nil), existing.ReservationIDs...),
+	}, nil
+}
+
 func spawnAssignmentDeps(custom *SpawnAssignmentDependencies) SpawnAssignmentDependencies {
 	observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
 	deps := SpawnAssignmentDependencies{
-		FetchTriage:       bv.GetTriageContext,
-		ListPanes:         tmux.GetPanesContext,
-		LoadStore:         assignment.LoadStoreStrict,
-		ClaimBead:         bv.ClaimBeadForAssignment,
-		GetBeadStatus:     bv.GetBeadStatusContext,
-		NewIdempotencyKey: assignment.NewAssignmentIdempotencyKey,
-		ObserveSession:    observer.Observe,
-		DispatchDeliverer: dispatchsvc.TMUXDeliverer{},
+		LoadAssignmentPolicy:             loadAuthoritativeAssignmentPolicy,
+		FetchActionable:                  getAssignableActionableRecommendations,
+		FetchTriage:                      bv.GetTriageContext,
+		AssignmentLedgerExists:           spawnAssignmentLedgerExists,
+		ListPanes:                        tmux.GetPanesContext,
+		LoadStore:                        assignment.LoadStoreStrict,
+		ClaimBead:                        bv.ClaimBeadForAssignment,
+		ClaimBeadWithOperatorGatedLabels: bv.ClaimBeadForAssignmentWithOperatorGatedLabels,
+		GetBeadStatus:                    bv.GetBeadStatusContext,
+		GetBeadDetails:                   bv.GetBeadAssignmentDetailsContext,
+		NewIdempotencyKey:                assignment.NewAssignmentIdempotencyKey,
+		ObserveSession:                   observer.Observe,
+		DispatchDeliverer:                dispatchsvc.TMUXDeliverer{},
 	}
 	if custom == nil {
 		return deps
 	}
+	if custom.LoadAssignmentPolicy != nil {
+		deps.LoadAssignmentPolicy = custom.LoadAssignmentPolicy
+	}
+	if custom.FetchActionable != nil {
+		deps.FetchActionable = custom.FetchActionable
+	}
 	if custom.FetchTriage != nil {
 		deps.FetchTriage = custom.FetchTriage
+		if custom.FetchActionable == nil {
+			// Focused helper tests inject complete triage fixtures. Production
+			// always uses the verified actionable loader before session creation.
+			deps.FetchActionable = func(ctx context.Context, dir string, limit int) ([]bv.TriageRecommendation, error) {
+				triage, err := custom.FetchTriage(ctx, dir)
+				if err != nil {
+					return nil, err
+				}
+				if triage == nil {
+					return []bv.TriageRecommendation{}, nil
+				}
+				return filterAssignableActionableRecommendationsForProject(dir, triage.Triage.Recommendations, limit), nil
+			}
+		}
+	}
+	if custom.AssignmentLedgerExists != nil {
+		deps.AssignmentLedgerExists = custom.AssignmentLedgerExists
 	}
 	if custom.ListPanes != nil {
 		deps.ListPanes = custom.ListPanes
@@ -1581,9 +1977,22 @@ func spawnAssignmentDeps(custom *SpawnAssignmentDependencies) SpawnAssignmentDep
 	}
 	if custom.ClaimBead != nil {
 		deps.ClaimBead = custom.ClaimBead
+		deps.ClaimBeadWithOperatorGatedLabels = func(ctx context.Context, dir, beadID, actor string, _ []string) (bv.BeadClaimResult, error) {
+			return custom.ClaimBead(ctx, dir, beadID, actor)
+		}
+	}
+	if custom.ClaimBeadWithOperatorGatedLabels != nil {
+		deps.ClaimBeadWithOperatorGatedLabels = custom.ClaimBeadWithOperatorGatedLabels
 	}
 	if custom.GetBeadStatus != nil {
 		deps.GetBeadStatus = custom.GetBeadStatus
+	}
+	if custom.GetBeadDetails != nil {
+		deps.GetBeadDetails = custom.GetBeadDetails
+	} else if custom.ClaimBead != nil {
+		// Legacy focused tests that replace the guarded claim have no live br
+		// database. Production and policy-focused tests keep the exact reader.
+		deps.GetBeadDetails = nil
 	}
 	if custom.NewIdempotencyKey != nil {
 		deps.NewIdempotencyKey = custom.NewIdempotencyKey

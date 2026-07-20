@@ -104,7 +104,7 @@ func TestUpdateQualityStoresMachineReadableYAML(t *testing.T) {
 func TestGenerateFromOutputPopulatesQuality(t *testing.T) {
 	now := time.Now().UTC()
 	g := NewGenerator(t.TempDir())
-	h, err := g.GenerateFromOutput("handoffquality", []byte("Implemented quality scoring.\nTODO: Run focused tests.\nDecision: keep scoring deterministic."))
+	h, err := g.GenerateFromOutput(t.Context(), "handoffquality", []byte("Implemented quality scoring.\nTODO: Run focused tests.\nDecision: keep scoring deterministic."))
 	if err != nil {
 		t.Fatalf("GenerateFromOutput returned error: %v", err)
 	}

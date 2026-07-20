@@ -478,6 +478,30 @@ func TestRenderPaneDetail(t *testing.T) {
 		}
 	})
 
+	t.Run("grok_alias_uses_canonical_badge", func(t *testing.T) {
+		pane := tmux.Pane{
+			Index: 7,
+			Type:  tmux.AgentType("grok-build"),
+			Title: "grok-agent",
+			Width: 80, Height: 24,
+		}
+		ps := PaneStatus{State: "working"}
+		dims := CalculateLayout(140, 30)
+
+		got := RenderPaneDetail(pane, ps, dims, th, 0)
+
+		if !strings.Contains(got, string(tmux.AgentGrok)) {
+			t.Fatalf("expected canonical Grok type badge in detail output, got %q", got)
+		}
+		if strings.Contains(got, "grok-build") {
+			t.Fatalf("expected Grok alias to be canonicalized in detail output, got %q", got)
+		}
+		color, _ := agentRowTypePresentation(string(pane.Type), th)
+		if color != th.Pink {
+			t.Fatalf("Grok pane detail color = %q, want pink %q", color, th.Pink)
+		}
+	})
+
 	t.Run("with_context_usage", func(t *testing.T) {
 		pane := tmux.Pane{
 			Index: 3,

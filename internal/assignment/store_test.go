@@ -1174,6 +1174,94 @@ func mustReadAssignmentSnapshot(t *testing.T, path, session string) (*Assignment
 	return candidate.snapshot, candidate.data
 }
 
+func TestLoadStoreStrictReadOnlyDoesNotCreateOrRepairDurableState(t *testing.T) {
+	t.Run("absent ledger does not create session directory or lock", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		const session = "strict-read-only-absent"
+		sessionDir := filepath.Join(StorageDir(), session)
+
+		loaded, err := LoadStoreStrictReadOnly(session)
+		if err != nil {
+			t.Fatalf("LoadStoreStrictReadOnly: %v", err)
+		}
+		if loaded.SessionName != session || len(loaded.Assignments) != 0 {
+			t.Fatalf("read-only empty store=%+v", loaded)
+		}
+		if _, err := os.Stat(sessionDir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read-only load created session directory %s: %v", sessionDir, err)
+		}
+	})
+
+	t.Run("newer backup is selected without lock or primary promotion", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		const (
+			session = "strict-read-only-newer-backup"
+			beadID  = "ntm-read-only-conflict"
+		)
+		sessionDir := filepath.Join(StorageDir(), session)
+		if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+			t.Fatalf("create ledger fixture directory: %v", err)
+		}
+		ledgerPath := filepath.Join(sessionDir, assignmentsDirName+fileExtension)
+		now := time.Now().UTC()
+		primaryAssignment := &Assignment{
+			BeadID: beadID, BeadTitle: "primary", Pane: 1, AgentType: "codex", AgentName: "CodexOne",
+			Status: StatusAssigned, AssignedAt: now, DispatchTarget: "%7", OccupancyKey: "%7",
+		}
+		backupAssignment := cloneAssignment(primaryAssignment)
+		backupAssignment.BeadTitle = "newer backup"
+		primary := &AssignmentStore{
+			SessionName: session, Assignments: map[string]*Assignment{beadID: primaryAssignment},
+			ClearedGenerations: map[string]uint64{}, PersistenceGeneration: 1, UpdatedAt: now, Version: assignmentStoreVersion,
+		}
+		backup := &AssignmentStore{
+			SessionName: session, Assignments: map[string]*Assignment{beadID: backupAssignment},
+			ClearedGenerations: map[string]uint64{}, PersistenceGeneration: 2, UpdatedAt: now.Add(time.Second), Version: assignmentStoreVersion,
+		}
+		primaryData, err := json.MarshalIndent(primary, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal primary fixture: %v", err)
+		}
+		backupData, err := json.MarshalIndent(backup, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal backup fixture: %v", err)
+		}
+		if err := os.WriteFile(ledgerPath, primaryData, 0o600); err != nil {
+			t.Fatalf("write primary fixture: %v", err)
+		}
+		if err := os.WriteFile(ledgerPath+".bak", backupData, 0o600); err != nil {
+			t.Fatalf("write backup fixture: %v", err)
+		}
+		lockPath := ledgerPath + ".lock"
+		if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("fixture unexpectedly has lock file %s: %v", lockPath, err)
+		}
+
+		loaded, err := LoadStoreStrictReadOnly(session)
+		if err != nil {
+			t.Fatalf("LoadStoreStrictReadOnly: %v", err)
+		}
+		if loaded.PersistenceGeneration != 2 || loaded.Get(beadID) == nil || loaded.Get(beadID).BeadTitle != "newer backup" ||
+			loaded.Get(beadID).OccupancyKey != "%7" {
+			t.Fatalf("selected read-only snapshot generation=%d assignment=%+v", loaded.PersistenceGeneration, loaded.Get(beadID))
+		}
+		afterPrimary, err := os.ReadFile(ledgerPath)
+		if err != nil {
+			t.Fatalf("read primary after read-only load: %v", err)
+		}
+		afterBackup, err := os.ReadFile(ledgerPath + ".bak")
+		if err != nil {
+			t.Fatalf("read backup after read-only load: %v", err)
+		}
+		if string(afterPrimary) != string(primaryData) || string(afterBackup) != string(backupData) {
+			t.Fatal("read-only strict load promoted or rewrote a durable ledger replica")
+		}
+		if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read-only strict load created lock file %s: %v", lockPath, err)
+		}
+	})
+}
+
 func TestLoadStoreStrictRejectsCorruptLedgerWithoutBackup(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)

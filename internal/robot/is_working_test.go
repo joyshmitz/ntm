@@ -1,8 +1,10 @@
 package robot
 
 import (
+	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,7 +36,7 @@ func TestPrintIsWorkingFailureReturnsTypedErrorAndRawJSON(t *testing.T) {
 	t.Cleanup(func() { SetOutputFormat(originalFormat) })
 
 	stdout, err := captureStdout(t, func() error {
-		return PrintIsWorking(IsWorkingOptions{Session: "ntm-is-working-missing-session-for-test"})
+		return PrintIsWorking(t.Context(), IsWorkingOptions{Session: "ntm-is-working-missing-session-for-test"})
 	})
 	if err == nil {
 		t.Fatal("PrintIsWorking() error = nil, want typed terminal failure")
@@ -48,6 +50,18 @@ func TestPrintIsWorkingFailureReturnsTypedErrorAndRawJSON(t *testing.T) {
 	}
 	if response.Query.PanesRequested == nil || response.Panes == nil || response.Summary.ByRecommendation == nil {
 		t.Fatalf("critical collections must be empty, not null: %+v", response)
+	}
+}
+
+func TestGetIsWorkingCanceledContextReturnsTimeoutWithoutObservation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	out, err := GetIsWorking(ctx, IsWorkingOptions{Session: "must-not-observe"})
+	if err != nil {
+		t.Fatalf("GetIsWorking() error=%v", err)
+	}
+	if out == nil || out.Success || out.ErrorCode != ErrCodeTimeout || !strings.Contains(strings.ToLower(out.Error), "canceled") {
+		t.Fatalf("canceled is-working output=%+v", out)
 	}
 }
 

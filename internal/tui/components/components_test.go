@@ -94,7 +94,7 @@ func TestRenderSection(t *testing.T) {
 }
 
 func TestRenderAgentBadge(t *testing.T) {
-	tests := []string{"claude", "cc", "codex", "cod", "gemini", "gmi", "cursor", "windsurf", "aider", "ollama", "user", "unknown"}
+	tests := []string{"claude", "cc", "codex", "cod", "gemini", "gmi", "grok", "grok-build", "cursor", "windsurf", "aider", "ollama", "user", "unknown"}
 
 	for _, agent := range tests {
 		t.Run(agent, func(t *testing.T) {
@@ -119,6 +119,7 @@ func TestRenderAgentBadgeStyle(t *testing.T) {
 		{"claude", "claude", string(currentTheme.Claude), currentIcons.Claude},
 		{"codex alias", "openai-codex", string(currentTheme.Codex), currentIcons.Codex},
 		{"gemini alias", "google-gemini", string(currentTheme.Gemini), currentIcons.Gemini},
+		{"grok alias", "grok-build", string(currentTheme.Pink), currentIcons.Robot},
 		{"cursor", "cursor", string(currentTheme.Cursor), currentIcons.Cursor},
 		{"windsurf alias", "ws", string(currentTheme.Windsurf), currentIcons.Windsurf},
 		{"aider", "aider", string(currentTheme.Aider), currentIcons.Aider},
@@ -145,6 +146,7 @@ func TestRenderAgentBadgeCanonicalizesLabel(t *testing.T) {
 	}{
 		{"codex alias", "openai-codex", "CODEX"},
 		{"gemini alias", "google-gemini", "GEMINI"},
+		{"grok alias", "grok-build", "GROK"},
 		{"windsurf alias", "ws", "WINDSURF"},
 		{"empty", "", "UNKNOWN"},
 	}

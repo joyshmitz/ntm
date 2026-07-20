@@ -10,22 +10,36 @@ import (
 )
 
 type fakeAMClient struct {
-	available      bool
-	inboxResponses [][]InboxMessage
-	inboxErrors    []error
-	fetchCalls     int
+	available           bool
+	availabilityCalls   int
+	availabilityStarted chan struct{}
+	inboxResponses      [][]InboxMessage
+	inboxErrors         []error
+	fetchCalls          int
 
 	sendCalls []SendMessageOptions
 	sendErr   error
 
 	readCalls []int
+	markErr   error
 	ackCalls  []int
+	ackErr    error
 
 	getMessageCalls []int
 	getMessageErr   error
 }
 
-func (f *fakeAMClient) IsAvailable() bool {
+func (f *fakeAMClient) IsAvailableContext(ctx context.Context) bool {
+	f.availabilityCalls++
+	if f.availabilityStarted != nil {
+		select {
+		case f.availabilityStarted <- struct{}{}:
+		case <-ctx.Done():
+			return false
+		}
+		<-ctx.Done()
+		return false
+	}
 	return f.available
 }
 
@@ -86,23 +100,31 @@ func (f *fakeAMClient) SendMessage(ctx context.Context, opts SendMessageOptions)
 
 func (f *fakeAMClient) MarkMessageRead(ctx context.Context, projectKey, agentName string, messageID int) (*MessageReadResult, error) {
 	f.readCalls = append(f.readCalls, messageID)
+	if f.markErr != nil {
+		return nil, f.markErr
+	}
 	return &MessageReadResult{MessageID: messageID, Read: true}, nil
 }
 
 func (f *fakeAMClient) AcknowledgeMessage(ctx context.Context, projectKey, agentName string, messageID int) (*MessageAckResult, error) {
 	f.ackCalls = append(f.ackCalls, messageID)
+	if f.ackErr != nil {
+		return nil, f.ackErr
+	}
 	return &MessageAckResult{MessageID: messageID, Acknowledged: true}, nil
 }
 
 type fakeBDClient struct {
-	inbox    []bd.Message
-	inboxErr error
+	inbox      []bd.Message
+	inboxErr   error
+	inboxCalls int
 
 	sendCalls []bdSendCall
 	sendErr   error
 
 	readMessages map[string]*bd.Message
 	readErr      error
+	readCalls    []string
 
 	ackCalls []string
 	ackErr   error
@@ -119,10 +141,12 @@ func (f *fakeBDClient) Send(ctx context.Context, to, body string) error {
 }
 
 func (f *fakeBDClient) Inbox(ctx context.Context, unreadOnly, urgentOnly bool) ([]bd.Message, error) {
+	f.inboxCalls++
 	return f.inbox, f.inboxErr
 }
 
 func (f *fakeBDClient) Read(ctx context.Context, id string) (*bd.Message, error) {
+	f.readCalls = append(f.readCalls, id)
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
@@ -362,5 +386,218 @@ func TestUnifiedMessengerAck_InvalidID(t *testing.T) {
 	}
 	if err := unified.Ack(context.Background(), "zz-123"); err == nil {
 		t.Fatal("expected error for unknown channel")
+	}
+}
+
+func TestUnifiedMessengerRejectsPreCanceledContextsBeforeChannelWork(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(*UnifiedMessenger, context.Context) error
+	}{
+		{
+			name: "inbox",
+			call: func(m *UnifiedMessenger, ctx context.Context) error {
+				_, err := m.Inbox(ctx)
+				return err
+			},
+		},
+		{
+			name: "send",
+			call: func(m *UnifiedMessenger, ctx context.Context) error {
+				return m.Send(ctx, "target", "subject", "body")
+			},
+		},
+		{
+			name: "read",
+			call: func(m *UnifiedMessenger, ctx context.Context) error {
+				_, err := m.Read(ctx, "am-1")
+				return err
+			},
+		},
+		{
+			name: "ack",
+			call: func(m *UnifiedMessenger, ctx context.Context) error {
+				return m.Ack(ctx, "am-1")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			am := &fakeAMClient{available: true}
+			bdClient := &fakeBDClient{}
+			messenger := &UnifiedMessenger{
+				amClient:   am,
+				bdClient:   bdClient,
+				projectKey: "proj",
+				agentName:  "agent",
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			err := tt.call(messenger, ctx)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("operation error = %v, want context.Canceled", err)
+			}
+			assertNoUnifiedChannelCalls(t, am, bdClient)
+		})
+	}
+}
+
+func TestUnifiedMessengerRejectsNilContextsBeforeChannelWork(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(*UnifiedMessenger) error
+	}{
+		{
+			name: "inbox",
+			call: func(m *UnifiedMessenger) error {
+				_, err := m.Inbox(nil)
+				return err
+			},
+		},
+		{
+			name: "send",
+			call: func(m *UnifiedMessenger) error {
+				return m.Send(nil, "target", "subject", "body")
+			},
+		},
+		{
+			name: "read",
+			call: func(m *UnifiedMessenger) error {
+				_, err := m.Read(nil, "am-1")
+				return err
+			},
+		},
+		{
+			name: "ack",
+			call: func(m *UnifiedMessenger) error {
+				return m.Ack(nil, "am-1")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			am := &fakeAMClient{available: true}
+			bdClient := &fakeBDClient{}
+			messenger := &UnifiedMessenger{
+				amClient:   am,
+				bdClient:   bdClient,
+				projectKey: "proj",
+				agentName:  "agent",
+			}
+
+			if err := tt.call(messenger); err == nil {
+				t.Fatal("operation succeeded with a nil context")
+			}
+			assertNoUnifiedChannelCalls(t, am, bdClient)
+		})
+	}
+}
+
+func TestUnifiedMessengerSend_CancelDuringAvailabilityDoesNotFallBack(t *testing.T) {
+	started := make(chan struct{})
+	am := &fakeAMClient{
+		available:           true,
+		availabilityStarted: started,
+	}
+	bdClient := &fakeBDClient{}
+	messenger := &UnifiedMessenger{
+		amClient:   am,
+		bdClient:   bdClient,
+		projectKey: "proj",
+		agentName:  "agent",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- messenger.Send(ctx, "target", "subject", "body")
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("availability check did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Send() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send() did not return after cancellation")
+	}
+	if len(am.sendCalls) != 0 {
+		t.Fatalf("agent mail send called after canceled availability check: %d", len(am.sendCalls))
+	}
+	if len(bdClient.sendCalls) != 0 {
+		t.Fatalf("BD fallback called after cancellation: %d", len(bdClient.sendCalls))
+	}
+}
+
+func TestUnifiedMessengerInbox_PreservesFetchCancellation(t *testing.T) {
+	am := &fakeAMClient{available: true, inboxErrors: []error{context.Canceled}}
+	bdClient := &fakeBDClient{}
+	messenger := &UnifiedMessenger{amClient: am, bdClient: bdClient}
+
+	_, err := messenger.Inbox(context.Background())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Inbox() error = %v, want context.Canceled", err)
+	}
+	if bdClient.inboxCalls != 0 {
+		t.Fatalf("BD fallback called after canceled inbox fetch: %d", bdClient.inboxCalls)
+	}
+}
+
+func TestUnifiedMessengerSend_PreservesSendCancellation(t *testing.T) {
+	am := &fakeAMClient{available: true, sendErr: context.DeadlineExceeded}
+	bdClient := &fakeBDClient{}
+	messenger := &UnifiedMessenger{amClient: am, bdClient: bdClient}
+
+	err := messenger.Send(context.Background(), "target", "subject", "body")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send() error = %v, want context.DeadlineExceeded", err)
+	}
+	if len(bdClient.sendCalls) != 0 {
+		t.Fatalf("BD fallback called after canceled send: %d", len(bdClient.sendCalls))
+	}
+}
+
+func TestUnifiedMessengerRead_PreservesGetCancellation(t *testing.T) {
+	am := &fakeAMClient{available: true, getMessageErr: context.Canceled}
+	messenger := &UnifiedMessenger{amClient: am}
+
+	_, err := messenger.Read(context.Background(), "am-42")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Read() error = %v, want context.Canceled", err)
+	}
+	if am.fetchCalls != 0 {
+		t.Fatalf("inbox fallback called after canceled get: %d", am.fetchCalls)
+	}
+}
+
+func TestUnifiedMessengerAck_PreservesAcknowledgeCancellation(t *testing.T) {
+	am := &fakeAMClient{available: true, ackErr: context.DeadlineExceeded}
+	messenger := &UnifiedMessenger{amClient: am}
+
+	err := messenger.Ack(context.Background(), "am-7")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Ack() error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func assertNoUnifiedChannelCalls(t *testing.T, am *fakeAMClient, bdClient *fakeBDClient) {
+	t.Helper()
+	if am.availabilityCalls != 0 || am.fetchCalls != 0 || len(am.sendCalls) != 0 ||
+		len(am.getMessageCalls) != 0 || len(am.readCalls) != 0 || len(am.ackCalls) != 0 {
+		t.Fatalf("agent mail was called: %+v", am)
+	}
+	if bdClient.inboxCalls != 0 || len(bdClient.sendCalls) != 0 ||
+		len(bdClient.readCalls) != 0 || len(bdClient.ackCalls) != 0 {
+		t.Fatalf("BD was called: %+v", bdClient)
 	}
 }

@@ -93,6 +93,8 @@ func (p *Persona) AgentTypeFlag() string {
 		return "gmi"
 	case agentpkg.AgentTypeAntigravity:
 		return "agy"
+	case agentpkg.AgentTypeGrok:
+		return "grok"
 	case agentpkg.AgentTypeCursor:
 		return "cursor"
 	case agentpkg.AgentTypeWindsurf:
@@ -124,7 +126,7 @@ func (p *Persona) Validate() error {
 		// Validate agent type aliases against the shared canonical resolver.
 		switch agentpkg.AgentType(p.AgentType).Canonical() {
 		case agentpkg.AgentTypeClaudeCode, agentpkg.AgentTypeCodex, agentpkg.AgentTypeGemini,
-			agentpkg.AgentTypeAntigravity, agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf,
+			agentpkg.AgentTypeAntigravity, agentpkg.AgentTypeGrok, agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf,
 			agentpkg.AgentTypeAider, agentpkg.AgentTypeOpencode, agentpkg.AgentTypeOllama:
 			// valid
 		default:

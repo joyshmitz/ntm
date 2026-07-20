@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -303,6 +304,8 @@ func TestValidateAgentType(t *testing.T) {
 		{"claude_code", false},
 		{"openai-codex", false},
 		{"google-gemini", false},
+		{"grok", false},
+		{"xai_grok_build", false},
 		{"CC", false},
 		{"cursor", false},
 		{"ws", false},
@@ -389,6 +392,210 @@ func TestAgentLauncherLaunchAgent(t *testing.T) {
 	second := mock.SendKeysCalls[1]
 	if second.Target != "test_session:1.1" || second.Keys != "" || !second.Enter {
 		t.Errorf("unexpected second SendKeys call: %+v", second)
+	}
+}
+
+func TestAgentLauncherLaunchAgentGrokUsesPhaseOneFlags(t *testing.T) {
+	mock := &MockTmuxClient{
+		t:     t,
+		Panes: []tmux.Pane{{ID: "%7", Index: 1}},
+	}
+	launcher := NewAgentLauncherWithClient(mock)
+	launcher.PostLaunchDelay = 0
+	waitCalls := 0
+	launcher.waitForPaneProcessStart = func(ctx context.Context, session, paneID string) (tmux.Pane, error) {
+		waitCalls++
+		if ctx == nil || session != "test_session" || paneID != "%7" {
+			t.Fatalf("stable-process wait = ctx:%v session:%q pane:%q", ctx, session, paneID)
+		}
+		return tmux.Pane{ID: paneID, Index: 1, Command: "grok"}, nil
+	}
+
+	if err := launcher.LaunchAgent("test_session", 1, "xai-grok-build"); err != nil {
+		t.Fatalf("LaunchAgent Grok failed: %v", err)
+	}
+	if waitCalls != 1 {
+		t.Fatalf("Grok stable-process wait calls = %d, want 1", waitCalls)
+	}
+	if len(mock.GetPanesCalls) != 1 || mock.GetPanesCalls[0] != "test_session" {
+		t.Fatalf("Grok pane resolution calls = %v, want [test_session]", mock.GetPanesCalls)
+	}
+	if len(mock.SendKeysCalls) != 2 {
+		t.Fatalf("Grok SendKeys calls = %d, want 2", len(mock.SendKeysCalls))
+	}
+	if got := mock.SendKeysCalls[0]; got.Target != "%7" || got.Keys != "grok --always-approve" || got.Enter {
+		t.Fatalf("Grok launch call = %+v", got)
+	}
+	if got := mock.SendKeysCalls[1]; got.Target != "%7" || got.Keys != "" || !got.Enter {
+		t.Fatalf("Grok submit call = %+v", got)
+	}
+}
+
+func TestAgentLauncherLaunchAgentGrokFailsBeforeSendWhenPaneCannotResolve(t *testing.T) {
+	mock := &MockTmuxClient{t: t}
+	launcher := NewAgentLauncherWithClient(mock)
+	launcher.PostLaunchDelay = 0
+
+	err := launcher.LaunchAgent("test_session", 1, "grok")
+	if err == nil || !strings.Contains(err.Error(), `pane 1 not found in session "test_session"`) {
+		t.Fatalf("LaunchAgent unresolved Grok error = %v", err)
+	}
+	if len(mock.SendKeysCalls) != 0 {
+		t.Fatalf("unresolved Grok SendKeys calls = %+v, want none", mock.SendKeysCalls)
+	}
+}
+
+func TestAgentLauncherRejectsOccupiedGrokPaneAcrossLaunchPaths(t *testing.T) {
+	newLauncher := func(t *testing.T) (*AgentLauncher, *MockTmuxClient, *int) {
+		t.Helper()
+		mock := &MockTmuxClient{
+			t:     t,
+			Panes: []tmux.Pane{{ID: "%occupied", Index: 1, Command: "sleep"}},
+		}
+		launcher := NewAgentLauncherWithClient(mock)
+		launcher.LaunchDelay = 0
+		launcher.PostLaunchDelay = 0
+		waitCalls := new(int)
+		launcher.waitForPaneProcessStart = func(context.Context, string, string) (tmux.Pane, error) {
+			(*waitCalls)++
+			return tmux.Pane{}, nil
+		}
+		return launcher, mock, waitCalls
+	}
+
+	requireRejected := func(t *testing.T, mock *MockTmuxClient, waitCalls int, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("occupied Grok launch error = nil")
+		}
+		for _, want := range []string{"%occupied", "sleep", "pre-launch", "non-shell"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("occupied Grok launch error = %q, want %q", err, want)
+			}
+		}
+		if len(mock.SendKeysCalls) != 0 {
+			t.Fatalf("occupied Grok launch SendKeys calls = %+v, want none", mock.SendKeysCalls)
+		}
+		if waitCalls != 0 {
+			t.Fatalf("occupied Grok stable-process wait calls = %d, want zero", waitCalls)
+		}
+	}
+
+	t.Run("LaunchAgent", func(t *testing.T) {
+		launcher, mock, waitCalls := newLauncher(t)
+		err := launcher.LaunchAgent("occupied_session", 1, "xai-grok-build")
+		requireRejected(t, mock, *waitCalls, err)
+	})
+
+	t.Run("LaunchAgentWithContext", func(t *testing.T) {
+		launcher, mock, waitCalls := newLauncher(t)
+		err := launcher.LaunchAgentWithContext("occupied_session", 1, "grok-build", t.TempDir())
+		requireRejected(t, mock, *waitCalls, err)
+	})
+
+	t.Run("LaunchAgentWithCommand", func(t *testing.T) {
+		launcher, mock, waitCalls := newLauncher(t)
+		err := launcher.LaunchAgentWithCommand("occupied_session", 1, LaunchCommand{
+			Binary:    "/opt/bin/grok",
+			Args:      []string{"--always-approve"},
+			AgentType: "GROK_BUILD",
+		})
+		requireRejected(t, mock, *waitCalls, err)
+	})
+
+	t.Run("LaunchSwarm", func(t *testing.T) {
+		launcher, mock, waitCalls := newLauncher(t)
+		result, err := launcher.LaunchSwarm(&SwarmPlan{Sessions: []SessionSpec{{
+			Name: "occupied_session",
+			Panes: []PaneSpec{{
+				Index: 1, AgentType: "grok", LaunchCmd: "grok --always-approve",
+			}},
+		}}})
+		if result == nil || result.TotalLaunched != 0 || result.TotalFailed != 0 ||
+			len(result.Errors) != 0 || len(result.LaunchResults) != 0 {
+			t.Fatalf("LaunchSwarm occupied Grok result = %+v", result)
+		}
+		requireRejected(t, mock, *waitCalls, err)
+	})
+
+	t.Run("LaunchAllInSession", func(t *testing.T) {
+		launcher, mock, waitCalls := newLauncher(t)
+		err := launcher.LaunchAllInSession("occupied_session", "xai_grok_build")
+		requireRejected(t, mock, *waitCalls, err)
+	})
+
+	t.Run("LaunchSwarm mixed batch rejects before earlier send", func(t *testing.T) {
+		mock := &MockTmuxClient{t: t, Panes: []tmux.Pane{
+			{ID: "%idle", Index: 1, Command: "zsh"},
+			{ID: "%occupied", Index: 2, Command: "sleep"},
+		}}
+		launcher := NewAgentLauncherWithClient(mock)
+		launcher.LaunchDelay = 0
+		launcher.PostLaunchDelay = 0
+
+		result, err := launcher.LaunchSwarm(&SwarmPlan{Sessions: []SessionSpec{{
+			Name: "mixed_session",
+			Panes: []PaneSpec{
+				{Index: 1, AgentType: AgentCC},
+				{Index: 2, AgentType: "grok"},
+			},
+		}}})
+		if err == nil {
+			t.Fatal("LaunchSwarm mixed occupied Grok error = nil")
+		}
+		for _, want := range []string{"%occupied", "sleep", "preflight Grok Build pane 2"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("LaunchSwarm mixed occupied Grok error = %q, want %q", err, want)
+			}
+		}
+		if result == nil || result.TotalLaunched != 0 || len(result.LaunchResults) != 0 {
+			t.Fatalf("LaunchSwarm mixed occupied Grok result = %+v", result)
+		}
+		if len(mock.SendKeysCalls) != 0 {
+			t.Fatalf("LaunchSwarm mixed occupied Grok SendKeys calls = %+v, want none", mock.SendKeysCalls)
+		}
+	})
+
+	t.Run("LaunchAllInSession rejects later occupied pane before earlier send", func(t *testing.T) {
+		mock := &MockTmuxClient{t: t, Panes: []tmux.Pane{
+			{ID: "%user", Index: 0, Command: "zsh"},
+			{ID: "%idle", Index: 1, Command: "bash"},
+			{ID: "%occupied", Index: 2, Command: "sleep"},
+		}}
+		launcher := NewAgentLauncherWithClient(mock)
+		launcher.LaunchDelay = 0
+		launcher.PostLaunchDelay = 0
+
+		err := launcher.LaunchAllInSession("mixed_session", "grok-build")
+		if err == nil {
+			t.Fatal("LaunchAllInSession mixed occupied Grok error = nil")
+		}
+		for _, want := range []string{"%occupied", "sleep", "preflight Grok Build pane 2"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("LaunchAllInSession mixed occupied Grok error = %q, want %q", err, want)
+			}
+		}
+		if len(mock.SendKeysCalls) != 0 {
+			t.Fatalf("LaunchAllInSession mixed occupied Grok SendKeys calls = %+v, want none", mock.SendKeysCalls)
+		}
+	})
+}
+
+func TestAgentLauncherLaunchAgentGrokPropagatesStableProcessFailure(t *testing.T) {
+	mock := &MockTmuxClient{t: t, Panes: []tmux.Pane{{ID: "%8", Index: 1}}}
+	launcher := NewAgentLauncherWithClient(mock)
+	launcher.PostLaunchDelay = 0
+	waitErr := errors.New("process returned to shell")
+	launcher.waitForPaneProcessStart = func(context.Context, string, string) (tmux.Pane, error) {
+		return tmux.Pane{}, waitErr
+	}
+
+	err := launcher.LaunchAgent("test_session", 1, "grok-build")
+	if !errors.Is(err, waitErr) || !strings.Contains(err.Error(), "did not start a stable process") {
+		t.Fatalf("LaunchAgent unstable Grok error = %v", err)
+	}
+	if len(mock.SendKeysCalls) != 2 {
+		t.Fatalf("unstable Grok SendKeys calls = %d, want 2", len(mock.SendKeysCalls))
 	}
 }
 
@@ -509,6 +716,67 @@ func TestLaunchSwarmSuccess(t *testing.T) {
 	}
 }
 
+func TestLaunchSwarmGrokCustomCommandUsesStablePaneVerification(t *testing.T) {
+	mock := &MockTmuxClient{t: t, Panes: []tmux.Pane{{ID: "%11", Index: 2}}}
+	launcher := NewAgentLauncherWithClient(mock)
+	launcher.LaunchDelay = 0
+	launcher.PostLaunchDelay = 0
+	waitCalls := 0
+	launcher.waitForPaneProcessStart = func(_ context.Context, session, paneID string) (tmux.Pane, error) {
+		waitCalls++
+		if session != "grok_agents" || paneID != "%11" {
+			t.Fatalf("custom Grok wait session=%q pane=%q", session, paneID)
+		}
+		return tmux.Pane{ID: paneID, Index: 2, Command: "grok"}, nil
+	}
+	plan := &SwarmPlan{Sessions: []SessionSpec{{
+		Name: "grok_agents",
+		Panes: []PaneSpec{{
+			Index: 2, AgentType: "xai_grok_build", LaunchCmd: "/opt/bin/grok --always-approve --model grok-4",
+		}},
+	}}}
+
+	result, err := launcher.LaunchSwarm(plan)
+	if err != nil {
+		t.Fatalf("LaunchSwarm custom Grok error: %v", err)
+	}
+	if result.TotalLaunched != 1 || result.TotalFailed != 0 || waitCalls != 1 {
+		t.Fatalf("custom Grok result = %+v waitCalls=%d", result, waitCalls)
+	}
+	if got := mock.SendKeysCalls[0]; got.Target != "%11" || got.Keys != "/opt/bin/grok --always-approve --model grok-4" {
+		t.Fatalf("custom Grok launch call = %+v", got)
+	}
+}
+
+func TestLaunchSwarmGrokCustomCommandReportsStableProcessFailure(t *testing.T) {
+	mock := &MockTmuxClient{t: t, Panes: []tmux.Pane{{ID: "%12", Index: 2}}}
+	launcher := NewAgentLauncherWithClient(mock)
+	launcher.LaunchDelay = 0
+	launcher.PostLaunchDelay = 0
+	waitErr := errors.New("grok process exited")
+	launcher.waitForPaneProcessStart = func(context.Context, string, string) (tmux.Pane, error) {
+		return tmux.Pane{}, waitErr
+	}
+	plan := &SwarmPlan{Sessions: []SessionSpec{{
+		Name: "grok_agents",
+		Panes: []PaneSpec{{
+			Index: 2, AgentType: "grok", LaunchCmd: "/opt/bin/grok --always-approve",
+		}},
+	}}}
+
+	result, err := launcher.LaunchSwarm(plan)
+	if err != nil {
+		t.Fatalf("LaunchSwarm unstable Grok returned top-level error: %v", err)
+	}
+	if result.TotalLaunched != 0 || result.TotalFailed != 1 || len(result.Errors) != 1 || len(result.LaunchResults) != 1 {
+		t.Fatalf("unstable custom Grok result = %+v", result)
+	}
+	if !errors.Is(result.Errors[0], waitErr) || result.LaunchResults[0].Success ||
+		!strings.Contains(result.LaunchResults[0].Error, "did not start a stable process") {
+		t.Fatalf("unstable custom Grok failure = %+v errors=%v", result.LaunchResults[0], result.Errors)
+	}
+}
+
 func TestLaunchSwarmFailures(t *testing.T) {
 	mock := &MockTmuxClient{t: t, SendErr: errors.New("send failed")}
 	launcher := NewAgentLauncherWithClient(mock)
@@ -624,6 +892,7 @@ func TestDefaultAgentCommands(t *testing.T) {
 		{"cc", "claude"},
 		{"cod", "codex"},
 		{"gmi", "gemini"},
+		{"grok", "grok"},
 	}
 
 	for _, tt := range tests {
@@ -648,6 +917,7 @@ func TestDefaultAgentArgs(t *testing.T) {
 		{"cc", []string{}},
 		{"cod", []string{}},
 		{"gmi", []string{}},
+		{"grok", []string{"--always-approve"}},
 	}
 
 	for _, tt := range tests {
@@ -797,6 +1067,51 @@ func TestLaunchCommandToSimpleCommand(t *testing.T) {
 	}
 }
 
+func TestLaunchAgentWithCommandGrokUsesStablePaneVerification(t *testing.T) {
+	mock := &MockTmuxClient{t: t, Panes: []tmux.Pane{{ID: "%13", Index: 3}}}
+	launcher := NewAgentLauncherWithClient(mock)
+	launcher.PostLaunchDelay = 0
+	waitCalls := 0
+	launcher.waitForPaneProcessStart = func(_ context.Context, session, paneID string) (tmux.Pane, error) {
+		waitCalls++
+		return tmux.Pane{ID: paneID, Index: 3, Command: "grok"}, nil
+	}
+	cmd := LaunchCommand{
+		Binary:    "/opt/bin/grok",
+		Args:      []string{"--always-approve", "--effort", "high"},
+		AgentType: "GROK_BUILD",
+	}
+
+	if err := launcher.LaunchAgentWithCommand("grok_session", 3, cmd); err != nil {
+		t.Fatalf("LaunchAgentWithCommand Grok error: %v", err)
+	}
+	if waitCalls != 1 {
+		t.Fatalf("LaunchAgentWithCommand wait calls = %d, want 1", waitCalls)
+	}
+	if got := mock.SendKeysCalls[0]; got.Target != "%13" || got.Keys != "/opt/bin/grok --always-approve --effort high" {
+		t.Fatalf("LaunchAgentWithCommand Grok launch call = %+v", got)
+	}
+}
+
+func TestLaunchAgentWithCommandGrokPropagatesStableProcessFailure(t *testing.T) {
+	mock := &MockTmuxClient{t: t, Panes: []tmux.Pane{{ID: "%14", Index: 4}}}
+	launcher := NewAgentLauncherWithClient(mock)
+	launcher.PostLaunchDelay = 0
+	waitErr := errors.New("pane returned to shell")
+	launcher.waitForPaneProcessStart = func(context.Context, string, string) (tmux.Pane, error) {
+		return tmux.Pane{}, waitErr
+	}
+
+	err := launcher.LaunchAgentWithCommand("grok_session", 4, LaunchCommand{
+		Binary:    "grok",
+		Args:      []string{"--always-approve"},
+		AgentType: "xai-grok-build",
+	})
+	if !errors.Is(err, waitErr) || !strings.Contains(err.Error(), "did not start a stable process") {
+		t.Fatalf("LaunchAgentWithCommand unstable Grok error = %v", err)
+	}
+}
+
 func TestBuildLaunchCommand(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -853,6 +1168,22 @@ func TestBuildLaunchCommand(t *testing.T) {
 			expectedBinary: "gemini",
 			expectedType:   "gmi",
 			expectedArgs:   []string{},
+		},
+		{
+			name:           "Grok phase one with shell command",
+			agentType:      "xai_grok_build",
+			useFullPaths:   false,
+			expectedBinary: "grok",
+			expectedType:   "grok",
+			expectedArgs:   []string{"--always-approve"},
+		},
+		{
+			name:           "Grok phase one with full path",
+			agentType:      "grok-build",
+			useFullPaths:   true,
+			expectedBinary: "grok",
+			expectedType:   "grok",
+			expectedArgs:   []string{"--always-approve"},
 		},
 		{
 			name:           "claude alias normalizes to cc",

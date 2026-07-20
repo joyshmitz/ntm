@@ -58,6 +58,13 @@ type BatchInjectionResult struct {
 	Duration   time.Duration     `json:"duration"`
 }
 
+type promptInjectionTmuxClient interface {
+	CaptureForStatusDetectionContext(context.Context, string) (string, error)
+	GetPanes(string) ([]tmux.Pane, error)
+	SendKeys(string, string, bool) error
+	SendKeysForAgent(string, string, bool, tmux.AgentType) error
+}
+
 // PromptInjector sends prompts (marching orders) to agent panes.
 // It handles staggered sending to avoid rate limits and agent-specific quirks.
 //
@@ -66,7 +73,8 @@ type BatchInjectionResult struct {
 type PromptInjector struct {
 	// TmuxClient for sending keys to panes.
 	// If nil, the default tmux client is used.
-	TmuxClient *tmux.Client
+	TmuxClient         *tmux.Client
+	tmuxClientOverride promptInjectionTmuxClient
 
 	// SessionOrchestrator for cached session targeting.
 	SessionOrchestrator *SessionOrchestrator
@@ -151,7 +159,10 @@ func (p *PromptInjector) WithAdaptiveDelay(enabled bool) *PromptInjector {
 }
 
 // tmuxClient returns the configured tmux client or the default client.
-func (p *PromptInjector) tmuxClient() *tmux.Client {
+func (p *PromptInjector) tmuxClient() promptInjectionTmuxClient {
+	if p.tmuxClientOverride != nil {
+		return p.tmuxClientOverride
+	}
 	if p.TmuxClient != nil {
 		return p.TmuxClient
 	}
@@ -202,6 +213,10 @@ func (p *PromptInjector) SetTemplate(name, template string) {
 // agentType is used to handle agent-specific quirks (e.g., Codex needs double-Enter).
 // This method satisfies the ensemble.BasicInjector interface.
 func (p *PromptInjector) InjectPrompt(sessionPane, agentType, prompt string) error {
+	if err := validatePromptInjectionTarget(InjectionTarget{SessionPane: sessionPane, AgentType: agentType}); err != nil {
+		return err
+	}
+
 	p.logger().Info("[PromptInjector] inject_start",
 		"session_pane", sessionPane,
 		"agent_type", agentType,
@@ -250,6 +265,10 @@ func (p *PromptInjector) InjectPromptWithResult(sessionPane, agentType, prompt s
 
 // sendToPane sends a prompt to a specific pane, handling agent-specific quirks.
 func (p *PromptInjector) sendToPane(sessionPane, agentType string, prompt string) error {
+	if err := validatePromptInjectionTarget(InjectionTarget{SessionPane: sessionPane, AgentType: agentType}); err != nil {
+		return err
+	}
+
 	client := p.tmuxClient()
 
 	// Wait for agent to be ready (at idle prompt)
@@ -334,6 +353,10 @@ func (p *PromptInjector) InjectBatchWithContext(ctx context.Context, targets []I
 	if len(targets) == 0 {
 		return result, nil
 	}
+	if err := validatePromptInjectionTargets(targets); err != nil {
+		result.Duration = time.Since(start)
+		return result, err
+	}
 
 	p.logger().Info("[PromptInjector] batch_start",
 		"total_targets", len(targets),
@@ -395,6 +418,23 @@ func (p *PromptInjector) InjectBatchWithContext(ctx context.Context, targets []I
 		"duration", result.Duration)
 
 	return result, nil
+}
+
+func validatePromptInjectionTargets(targets []InjectionTarget) error {
+	for _, target := range targets {
+		if err := validatePromptInjectionTarget(target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePromptInjectionTarget(target InjectionTarget) error {
+	agentType := tmux.AgentType(target.AgentType)
+	if err := agentType.ValidateAutomatedPromptDelivery(); err != nil {
+		return fmt.Errorf("pane %s (%s) does not support automated prompt delivery: %w", target.SessionPane, agentType.Canonical(), err)
+	}
+	return nil
 }
 
 // InjectSwarm sends marching orders to all panes in a SwarmPlan.

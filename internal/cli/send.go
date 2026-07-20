@@ -22,6 +22,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/audit"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/cass"
@@ -148,8 +149,13 @@ func outputSendCommandError(session string, err error) error {
 		Targets: []string{},
 		Error:   err.Error(),
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 		result.ErrorCode = robot.ErrCodeTimeout
+	case errors.Is(err, errCLIInvalidInput):
+		result.ErrorCode = robot.ErrCodeInvalidFlag
+	default:
+		result.ErrorCode = robot.ErrCodeInternalError
 	}
 	emitErr := emitJSONFailureEnvelope(result)
 	if !errors.Is(emitErr, errJSONFailure) {
@@ -230,7 +236,7 @@ func init() {
 		if strings.TrimSpace(opts.Session) == "" {
 			return nil, fmt.Errorf("session is required")
 		}
-		return buildInterruptResponse(opts.Session, opts.Tags)
+		return buildInterruptResponse(ctx, opts.Session, opts.Tags)
 	})
 
 	// Register sessions.kill command
@@ -278,7 +284,7 @@ func init() {
 		if strings.TrimSpace(opts.Session) == "" {
 			return nil, fmt.Errorf("session is required")
 		}
-		return buildKillResponse(opts.Session, opts.Force, opts.Tags, opts.NoHooks, opts.Summarize)
+		return buildKillResponse(ctx, opts.Session, opts.Force, opts.Tags, opts.NoHooks, opts.Summarize)
 	})
 }
 
@@ -504,7 +510,7 @@ func matchesLegacySendTypeFilter(pane tmux.Pane, targetCC, targetCod, targetGmi 
 
 func isInterruptibleAgentPane(pane tmux.Pane) bool {
 	switch tmux.AgentType(pane.Type).Canonical() {
-	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOpencode, tmux.AgentOllama:
+	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentGrok, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOpencode, tmux.AgentOllama:
 		return true
 	default:
 		return false
@@ -1687,7 +1693,9 @@ func runSendInternal(opts SendOptions) (err error) {
 		}
 		_ = history.Append(entry)
 
-		// Also persist to session-specific storage for restart resilience
+		// Session prompt history is replayable restart state, so only record
+		// prompts that reached at least one pane. Global history above retains
+		// failed attempts with their error metadata.
 		promptEntry := sessionPkg.PromptEntry{
 			Session:  session,
 			Content:  prompt,
@@ -1695,7 +1703,7 @@ func runSendInternal(opts SendOptions) (err error) {
 			Source:   "cli",
 			Template: templateName,
 		}
-		_ = sessionPkg.SavePrompt(promptEntry)
+		_ = saveDeliveredPrompt(delivered, promptEntry)
 	}()
 
 	// Smart routing: select best agent automatically.
@@ -1836,7 +1844,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	// Build execution context for hooks
 	hookCtx := hooks.ExecutionContext{
 		SessionName: session,
-		ProjectDir:  getSessionWorkingDir(session, sessionInferred),
+		ProjectDir:  getSessionWorkingDir(ctx, session, sessionInferred),
 		Message:     prompt,
 		AdditionalEnv: map[string]string{
 			"NTM_SEND_TARGETS":   targetDesc,
@@ -2211,6 +2219,13 @@ func runSendInternal(opts SendOptions) (err error) {
 	return nil
 }
 
+func saveDeliveredPrompt(delivered int, entry sessionPkg.PromptEntry) error {
+	if delivered <= 0 {
+		return nil
+	}
+	return sessionPkg.SavePrompt(entry)
+}
+
 func paneAgentLabel(p tmux.Pane) string {
 	if sendValueNotEqual(p.Type, tmux.AgentUnknown) && sendValueNotEqual(p.Type, tmux.AgentUser) && p.NTMIndex > 0 {
 		return fmt.Sprintf("%s_%d", p.Type, p.NTMIndex)
@@ -2404,11 +2419,11 @@ func runInterrupt(session string, tags []string) error {
 
 // buildInterruptResponse constructs the response for session interrupt.
 // Used by both kernel handler and direct CLI calls.
-func buildInterruptResponse(session string, tags []string) (*output.InterruptResponse, error) {
+func buildInterruptResponse(ctx context.Context, session string, tags []string) (*output.InterruptResponse, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return nil, err
 	}
-	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	resolvedSession, err := normalizeExplicitLiveSessionName(ctx, session, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2481,12 +2496,12 @@ Examples:
 				return fmt.Errorf("cannot use --project with a specific session name")
 			}
 			if project != "" {
-				return runKillProject(cmd.OutOrStdout(), project, force, tags, noHooks, summarize)
+				return runKillProject(cmd.Context(), cmd.OutOrStdout(), project, force, tags, noHooks, summarize)
 			}
 			if len(args) == 0 {
 				return fmt.Errorf("session name or --project required")
 			}
-			return runKill(cmd.OutOrStdout(), args[0], force, tags, noHooks, summarize)
+			return runKill(cmd.Context(), cmd.OutOrStdout(), args[0], force, tags, noHooks, summarize)
 		},
 	}
 
@@ -2499,10 +2514,10 @@ Examples:
 	return cmd
 }
 
-func runKill(w io.Writer, session string, force bool, tags []string, noHooks bool, summarize bool) (err error) {
+func runKill(ctx context.Context, w io.Writer, session string, force bool, tags []string, noHooks bool, summarize bool) (err error) {
 	// Use kernel for JSON output mode
 	if IsJSONOutput() {
-		result, err := kernel.Run(context.Background(), "sessions.kill", SessionKillInput{
+		result, err := kernel.Run(ctx, "sessions.kill", SessionKillInput{
 			Session:   session,
 			Force:     force,
 			Tags:      tags,
@@ -2533,7 +2548,7 @@ func runKill(w io.Writer, session string, force bool, tags []string, noHooks boo
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
-	dir := getSessionWorkingDir(session, sessionInferred)
+	dir := getSessionWorkingDir(ctx, session, sessionInferred)
 	auditStart := time.Now()
 	auditAborted := false
 	auditKilled := false
@@ -2619,7 +2634,7 @@ func runKill(w io.Writer, session string, force bool, tags []string, noHooks boo
 	// Generate summary before killing if requested
 	if summarize {
 		fmt.Println("Generating session summary...")
-		summaryResult, err := generateKillSummary(session, sessionInferred)
+		summaryResult, err := generateKillSummary(ctx, session, sessionInferred)
 		if err != nil {
 			fmt.Printf("⚠ Summary generation failed: %v\n", err)
 		} else {
@@ -2851,7 +2866,7 @@ func reapOrphanProcesses(pids []int) {
 }
 
 // runKillProject kills all sessions matching a base project name (bd-3cu02.14).
-func runKillProject(w io.Writer, project string, force bool, tags []string, noHooks bool, summarize bool) error {
+func runKillProject(ctx context.Context, w io.Writer, project string, force bool, tags []string, noHooks bool, summarize bool) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
@@ -2889,7 +2904,7 @@ func runKillProject(w io.Writer, project string, force bool, tags []string, noHo
 
 	var killErrors []string
 	for _, s := range targets {
-		if err := runKill(w, s.Name, true, tags, noHooks, summarize); err != nil {
+		if err := runKill(ctx, w, s.Name, true, tags, noHooks, summarize); err != nil {
 			killErrors = append(killErrors, fmt.Sprintf("%s: %v", s.Name, err))
 		}
 	}
@@ -2903,11 +2918,11 @@ func runKillProject(w io.Writer, project string, force bool, tags []string, noHo
 // buildKillResponse constructs the response for session kill.
 // Used by both kernel handler and direct CLI calls.
 // In JSON/robot mode, force is effectively always true (no interactive confirmation).
-func buildKillResponse(session string, force bool, tags []string, noHooks bool, summarize bool) (resp *output.KillResponse, err error) {
+func buildKillResponse(ctx context.Context, session string, force bool, tags []string, noHooks bool, summarize bool) (resp *output.KillResponse, err error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return nil, err
 	}
-	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	resolvedSession, err := normalizeExplicitLiveSessionName(ctx, session, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2917,7 +2932,7 @@ func buildKillResponse(session string, force bool, tags []string, noHooks bool, 
 		return nil, fmt.Errorf("session '%s' not found", session)
 	}
 
-	dir := getSessionWorkingDir(session, false)
+	dir := getSessionWorkingDir(ctx, session, false)
 	auditStart := time.Now()
 	auditScope := "session"
 	if len(tags) > 0 {
@@ -3015,7 +3030,7 @@ func buildKillResponse(session string, force bool, tags []string, noHooks bool, 
 	var summaryResult *summary.SessionSummary
 	if summarize {
 		var err error
-		summaryResult, err = generateKillSummary(session, false)
+		summaryResult, err = generateKillSummary(ctx, session, false)
 		if err != nil {
 			// Non-fatal - continue with kill but note the error
 			summaryResult = nil
@@ -3136,7 +3151,7 @@ func buildKillResponse(session string, force bool, tags []string, noHooks bool, 
 
 // generateKillSummary generates a session summary for use before killing.
 // It captures pane outputs and runs them through the summary generator.
-func generateKillSummary(session string, inferred bool) (*summary.SessionSummary, error) {
+func generateKillSummary(ctx context.Context, session string, inferred bool) (*summary.SessionSummary, error) {
 	// Get panes from session
 	panes, err := tmux.GetPanes(session)
 	if err != nil {
@@ -3151,7 +3166,7 @@ func generateKillSummary(session string, inferred bool) (*summary.SessionSummary
 		return nil, fmt.Errorf("no agent outputs to summarize")
 	}
 
-	projectDir := getSessionWorkingDir(session, inferred)
+	projectDir := getSessionWorkingDir(ctx, session, inferred)
 	if projectDir == "" {
 		return nil, fmt.Errorf("getting project root failed")
 	}
@@ -3258,8 +3273,8 @@ func buildSendTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targe
 
 // getSessionWorkingDir returns the working directory for a resolved session,
 // preserving workspace fallback only for inferred-session commands.
-func getSessionWorkingDir(session string, inferred bool) string {
-	return resolveCommandProjectDirForSession(session, inferred)
+func getSessionWorkingDir(ctx context.Context, session string, inferred bool) string {
+	return resolveCommandProjectDirForSession(ctx, session, inferred)
 }
 
 // boolToStr converts a boolean to "true" or "false" string
@@ -4058,7 +4073,7 @@ func checkCassDuplicates(ctx context.Context, session string, inferred bool, pro
 	}
 
 	// Get workspace from session
-	dir := getSessionWorkingDir(session, inferred)
+	dir := getSessionWorkingDir(ctx, session, inferred)
 	if dir == "" {
 		return fmt.Errorf("getting project root failed")
 	}
@@ -4152,6 +4167,9 @@ func runDistributeMode(ctx context.Context, session, strategy string, limit int,
 	projectDir, err := resolveExplicitProjectDirForSessionContext(ctx, session)
 	if err != nil {
 		return outputError(fmt.Errorf("resolve distribute project for session %s: %w", session, err))
+	}
+	if err := configureAuthoritativeAssignmentPolicy(projectDir); err != nil {
+		return outputError(err)
 	}
 
 	// Get assignment recommendations using robot module
@@ -4274,30 +4292,46 @@ func runDistributeMode(ctx context.Context, session, strategy string, limit int,
 	// unified dispatch request and safe receipt.
 	var delivered, failed int
 	receipts := make([]DistributeDispatchReceipt, 0, len(recs))
-	for _, rec := range recs {
+	for i := range recs {
+		rec := recs[i]
 		if err := ctx.Err(); err != nil {
 			return outputError(fmt.Errorf("distribute canceled before %s: %w", rec.BeadID, err))
 		}
+		validated, err := revalidateDistributeRecommendation(ctx, projectDir, rec)
+		if err != nil {
+			return outputError(fmt.Errorf("revalidate distribute bead %s immediately before dispatch: %w", rec.BeadID, err))
+		}
+		rec = validated
+		recs[i] = validated
 		// Build the prompt for this task
-		taskPrompt := fmt.Sprintf("Please work on this task:\n\n**[%s] %s**\n\nClaim it with: br update %s --status in_progress",
-			rec.BeadID, rec.Title, rec.BeadID)
+		taskPrompt := fmt.Sprintf("Please work on this task:\n\n**[%s] %s**\n\nNTM has atomically claimed this task for this pane.",
+			rec.BeadID, rec.Title)
 
-		dispatchResult, dispatchErr := executeDistributeDispatch(ctx, session, rec, taskPrompt)
+		dispatchResult, dispatchErr := executeDistributeDispatch(ctx, projectDir, session, rec, taskPrompt)
 		if err := ctx.Err(); err != nil {
 			return outputError(fmt.Errorf("distribute canceled while dispatching %s: %w", rec.BeadID, err))
 		}
 		receipt := buildDistributeDispatchReceipt(rec, dispatchResult, dispatchErr)
 		receipts = append(receipts, receipt)
-		if dispatchErr != nil || dispatchResult.Delivered != 1 {
+		if dispatchErr != nil || !dispatchResult.Atomic.Sent {
 			if !jsonOutput {
 				failure := dispatchErr
 				if failure == nil {
-					failure = errors.New("dispatch did not produce exactly one delivery receipt")
+					failure = errors.New("atomic dispatch did not produce a durable sent receipt")
 				}
 				fmt.Printf("  ✗ Failed to send to pane %s (%s): %v\n", rec.PaneTarget, rec.PaneID, failure)
 			}
 			failed++
 			continue
+		}
+		if !dispatchResult.Atomic.Replayed {
+			bestEffortStampBeadLabel(
+				projectDir,
+				rec.BeadID,
+				session,
+				dispatchResult.Target.WindowIndex,
+				dispatchResult.Target.Index,
+			)
 		}
 
 		if !jsonOutput {
@@ -4354,48 +4388,219 @@ func (e *DistributeDispatchError) Error() string {
 // DistributeDispatchReceipt maps one task to the safe unified-dispatch receipt
 // without retaining the outbound prompt.
 type DistributeDispatchReceipt struct {
-	BeadID     string                       `json:"bead_id"`
-	PaneID     string                       `json:"pane_id"`
-	PaneTarget string                       `json:"pane_target"`
-	Status     dispatchsvc.ReceiptStatus    `json:"status"`
-	Protocol   dispatchsvc.DeliveryProtocol `json:"protocol,omitempty"`
-	Redaction  dispatchsvc.RedactionReceipt `json:"redaction"`
-	Error      string                       `json:"error,omitempty"`
+	BeadID         string                       `json:"bead_id"`
+	PaneID         string                       `json:"pane_id"`
+	PaneTarget     string                       `json:"pane_target"`
+	Status         dispatchsvc.ReceiptStatus    `json:"status"`
+	Protocol       dispatchsvc.DeliveryProtocol `json:"protocol,omitempty"`
+	Redaction      dispatchsvc.RedactionReceipt `json:"redaction"`
+	DeliveryID     string                       `json:"delivery_id,omitempty"`
+	IdempotencyKey string                       `json:"idempotency_key,omitempty"`
+	ClaimActor     string                       `json:"claim_actor,omitempty"`
+	Replayed       bool                         `json:"replayed,omitempty"`
+	Recovered      bool                         `json:"recovered,omitempty"`
+	Error          string                       `json:"error,omitempty"`
 }
 
-func executeDistributeDispatch(ctx context.Context, session string, rec robot.DistributeRecommendation, prompt string) (dispatchsvc.Result, error) {
+func revalidateDistributeRecommendation(ctx context.Context, projectDir string, rec robot.DistributeRecommendation) (robot.DistributeRecommendation, error) {
 	if ctx == nil {
-		return dispatchsvc.Result{}, errors.New("distribute dispatch context is required")
+		return rec, errors.New("distribute revalidation context is required")
 	}
 	if err := ctx.Err(); err != nil {
-		return dispatchsvc.Result{}, err
+		return rec, err
 	}
-	panes, err := tmux.GetPanesContext(ctx, session)
+	details, err := bv.GetBeadAssignmentDetailsContext(ctx, projectDir, rec.BeadID)
 	if err != nil {
-		return dispatchsvc.Result{}, fmt.Errorf("refresh distribute topology: %w", err)
+		return rec, fmt.Errorf("read live bead details: %w", err)
+	}
+	if err := validateDistributeBeadDetailsForProject(projectDir, rec, details, time.Now()); err != nil {
+		return rec, err
+	}
+	if title := strings.TrimSpace(details.Title); title != "" {
+		rec.Title = title
+	}
+	return rec, nil
+}
+
+func validateDistributeBeadDetails(rec robot.DistributeRecommendation, details *bv.BeadAssignmentDetails, now time.Time) error {
+	return validateDistributeBeadDetailsWithGate(rec, details, now, bv.IsOperatorGatedLabel)
+}
+
+func validateDistributeBeadDetailsForProject(projectDir string, rec robot.DistributeRecommendation, details *bv.BeadAssignmentDetails, now time.Time) error {
+	return validateDistributeBeadDetailsWithGate(rec, details, now, func(label string) bool {
+		return bv.IsOperatorGatedLabelForProject(projectDir, label)
+	})
+}
+
+func validateDistributeBeadDetailsWithGate(rec robot.DistributeRecommendation, details *bv.BeadAssignmentDetails, now time.Time, operatorGated func(string) bool) error {
+	beadID := strings.TrimSpace(rec.BeadID)
+	if beadID == "" {
+		return errors.New("distribute recommendation has no bead ID")
+	}
+	if details == nil {
+		return fmt.Errorf("bead %s has no live assignment details", beadID)
+	}
+	liveID := strings.TrimSpace(details.ID)
+	if liveID != beadID {
+		return fmt.Errorf("live bead ID %q does not match recommendation %q", liveID, beadID)
+	}
+	if len(details.BlockedBy) > 0 {
+		return fmt.Errorf("bead %s is blocked by dependencies: %s", beadID, strings.Join(details.BlockedBy, ", "))
+	}
+	for _, label := range details.Labels {
+		if operatorGated(label) {
+			return fmt.Errorf("bead %s is operator-gated by label %q", beadID, strings.TrimSpace(label))
+		}
+	}
+	if status := normalizeBeadStatus(details.Status); status != "open" {
+		return fmt.Errorf("bead %s has status %q, want open", beadID, strings.TrimSpace(details.Status))
+	}
+	if assignee := strings.TrimSpace(details.Assignee); assignee != "" {
+		return fmt.Errorf("bead %s is already assigned to %q", beadID, assignee)
+	}
+	if details.DeferUntil != nil && details.DeferUntil.After(now) {
+		return fmt.Errorf("bead %s is deferred until %s", beadID, details.DeferUntil.UTC().Format(time.RFC3339))
+	}
+	if details.Pinned {
+		return fmt.Errorf("bead %s is pinned", beadID)
+	}
+	if details.Ephemeral {
+		return fmt.Errorf("bead %s is ephemeral", beadID)
+	}
+	if details.Template {
+		return fmt.Errorf("bead %s is a template", beadID)
+	}
+	if details.Wisp || strings.Contains(strings.ToLower(liveID), "-wisp-") {
+		return fmt.Errorf("bead %s is a wisp", beadID)
+	}
+	return nil
+}
+
+type distributeAtomicDispatchResult struct {
+	Atomic         assignment.AtomicResult
+	Target         tmux.Pane
+	Redaction      dispatchsvc.RedactionReceipt
+	Protocol       dispatchsvc.DeliveryProtocol
+	IdempotencyKey string
+}
+
+type distributeAtomicExecutor interface {
+	Execute(context.Context, assignment.AtomicRequest) (assignment.AtomicResult, error)
+}
+
+var (
+	getDistributePanes          = tmux.GetPanesContext
+	loadDistributeStore         = assignment.LoadStoreStrict
+	newDistributeAtomicExecutor = func(store *assignment.AssignmentStore, projectDir string) distributeAtomicExecutor {
+		return newCLIAtomicAssignmentCoordinator(store, projectDir, nil)
+	}
+)
+
+func executeDistributeDispatch(ctx context.Context, projectDir, session string, rec robot.DistributeRecommendation, prompt string) (distributeAtomicDispatchResult, error) {
+	if ctx == nil {
+		return distributeAtomicDispatchResult{}, errors.New("distribute dispatch context is required")
 	}
 	if err := ctx.Err(); err != nil {
-		return dispatchsvc.Result{}, err
+		return distributeAtomicDispatchResult{}, err
+	}
+	panes, err := getDistributePanes(ctx, session)
+	if err != nil {
+		return distributeAtomicDispatchResult{}, fmt.Errorf("refresh distribute topology: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return distributeAtomicDispatchResult{}, err
 	}
 	panes = sortPanesByTopology(panes)
 	target, err := resolveDistributeRecommendationPane(rec, panes)
 	if err != nil {
-		return dispatchsvc.Result{}, err
+		return distributeAtomicDispatchResult{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return dispatchsvc.Result{}, err
+		return distributeAtomicDispatchResult{}, err
 	}
-	service, err := newShellDispatchServiceWithGate(
-		session,
-		[]tmux.Pane{target},
-		activeShellDispatchRedactionConfig(),
-		distributeDispatchGate(session),
-	)
+	store, err := loadDistributeStore(session)
 	if err != nil {
-		return dispatchsvc.Result{}, err
+		return distributeAtomicDispatchResult{}, fmt.Errorf("load distribute assignment ledger: %w", err)
 	}
-	request := shellDispatchRequest(session, panes, []tmux.Pane{target}, prompt, true)
-	return service.Execute(ctx, request)
+	stableTarget := assignmentPaneStableKey(target)
+	agentType := string(target.Type.Canonical())
+	agentName := assignmentAgentNameForPane(session, agentType, target, tmux.PanesSpanMultipleWindows(panes))
+	stampedPrompt := stampMarchingOrders(prompt, session, target.WindowIndex, target.Index)
+	idempotencyKey := distributeAssignmentIdempotencyKey(
+		session,
+		rec.BeadID,
+		stableTarget,
+		stampedPrompt,
+		store.ClearedGeneration(rec.BeadID),
+	)
+	result := distributeAtomicDispatchResult{
+		Target:         target,
+		Redaction:      distributeRedactionReceipt(stampedPrompt),
+		IdempotencyKey: idempotencyKey,
+	}
+	coordinator := newDistributeAtomicExecutor(store, projectDir)
+	if coordinator == nil {
+		return result, errors.New("distribute atomic assignment coordinator is not configured")
+	}
+	result.Atomic, err = coordinator.Execute(ctx, assignment.AtomicRequest{
+		BeadID:         strings.TrimSpace(rec.BeadID),
+		BeadTitle:      strings.TrimSpace(rec.Title),
+		Target:         stableTarget,
+		OccupancyKey:   stableTarget,
+		Pane:           target.Index,
+		AgentType:      agentType,
+		AgentName:      agentName,
+		Actor:          fmt.Sprintf("%s-distribute-%s", session, agentName),
+		Prompt:         stampedPrompt,
+		IdempotencyKey: idempotencyKey,
+	})
+	result.Protocol = distributeProtocolFromDeliveryID(result.Atomic.Dispatch.DeliveryID)
+	return result, err
+}
+
+func distributeAssignmentIdempotencyKey(session, beadID, paneID, prompt string, clearedGeneration uint64) string {
+	parts := []string{
+		"ntm/distribute/v1",
+		strings.TrimSpace(session),
+		strings.TrimSpace(beadID),
+		strings.TrimSpace(paneID),
+		assignment.PromptSHA256(prompt),
+	}
+	if clearedGeneration > 0 {
+		parts = append(parts, fmt.Sprintf("cleared-generation=%d", clearedGeneration))
+	}
+	return assignment.AssignmentIdempotencyKey(parts...)
+}
+
+func distributeProtocolFromDeliveryID(deliveryID string) dispatchsvc.DeliveryProtocol {
+	parts := strings.Split(strings.TrimSpace(deliveryID), "/")
+	if len(parts) != 3 {
+		return ""
+	}
+	protocol := dispatchsvc.DeliveryProtocol(parts[1])
+	switch protocol {
+	case dispatchsvc.ProtocolStageOnly, dispatchsvc.ProtocolSingleEnter, dispatchsvc.ProtocolDoubleEnter:
+		return protocol
+	default:
+		return ""
+	}
+}
+
+func distributeRedactionReceipt(prompt string) dispatchsvc.RedactionReceipt {
+	result := redaction.ScanAndRedact(prompt, activeShellDispatchRedactionConfig())
+	categories := make(map[string]int, len(result.Findings))
+	for _, finding := range result.Findings {
+		categories[string(finding.Category)]++
+	}
+	if len(categories) == 0 {
+		categories = nil
+	}
+	return dispatchsvc.RedactionReceipt{
+		Mode:       string(result.Mode),
+		Findings:   len(result.Findings),
+		Categories: categories,
+		Blocked:    result.Blocked,
+	}
 }
 
 func resolveDistributeRecommendationPane(rec robot.DistributeRecommendation, panes []tmux.Pane) (tmux.Pane, error) {
@@ -4421,17 +4626,24 @@ func resolveDistributeRecommendationPane(rec robot.DistributeRecommendation, pan
 	return target, nil
 }
 
-func buildDistributeDispatchReceipt(rec robot.DistributeRecommendation, result dispatchsvc.Result, dispatchErr error) DistributeDispatchReceipt {
+func buildDistributeDispatchReceipt(rec robot.DistributeRecommendation, result distributeAtomicDispatchResult, dispatchErr error) DistributeDispatchReceipt {
 	receipt := DistributeDispatchReceipt{
 		BeadID: rec.BeadID, PaneID: rec.PaneID, PaneTarget: rec.PaneTarget,
-		Status: dispatchsvc.ReceiptFailed,
+		Status: dispatchsvc.ReceiptFailed, Protocol: result.Protocol, Redaction: result.Redaction,
+		DeliveryID: result.Atomic.Dispatch.DeliveryID, IdempotencyKey: result.IdempotencyKey,
+		Replayed: result.Atomic.Replayed, Recovered: result.Atomic.Recovered,
 	}
-	if len(result.Receipts) > 0 {
-		attempt := result.Receipts[0]
-		receipt.Status = attempt.Status
-		receipt.Protocol = attempt.Protocol
-		receipt.Redaction = attempt.Redaction
-		receipt.Error = attempt.Error
+	if result.Atomic.Assignment != nil {
+		receipt.ClaimActor = result.Atomic.Assignment.ClaimActor
+		if receipt.DeliveryID == "" {
+			receipt.DeliveryID = result.Atomic.Assignment.DispatchReceiptID
+		}
+	}
+	if result.Atomic.Sent {
+		receipt.Status = dispatchsvc.ReceiptDelivered
+		if receipt.Protocol == "" {
+			receipt.Protocol = distributeProtocolFromDeliveryID(receipt.DeliveryID)
+		}
 	}
 	if dispatchErr != nil {
 		receipt.Error = dispatchErr.Error()

@@ -37,6 +37,7 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
@@ -82,8 +83,12 @@ type Server struct {
 	wsHubStartOnce sync.Once
 
 	// Pane output streaming
-	streamManager *tmux.StreamManager
-	spawnAgents   func(context.Context, robot.SpawnOptions) (*robot.SpawnOutput, error)
+	streamManager   *tmux.StreamManager
+	spawnAgents     func(context.Context, robot.SpawnOptions) (*robot.SpawnOutput, error)
+	sendAgents      func(robot.SendOptions) (*robot.SendOutput, error)
+	interruptAgents func(robot.InterruptOptions) (*robot.InterruptOutput, error)
+	resolvePane     func(context.Context, string, int) (tmux.Pane, error)
+	sendPaneKeys    func(string, string, bool) error
 
 	// Agent Mail client (lazy-init)
 	mailClient *agentmail.Client
@@ -3322,12 +3327,24 @@ func (s *Server) handlePaneInputV1(w http.ResponseWriter, r *http.Request) {
 	// the target is base-index-independent — `<session>:<paneIdx>` looks
 	// like a pane index but tmux interprets it as a window index, which
 	// breaks on hosts with `base-index = 1` (see #141).
-	paneTarget, ok := s.resolvePaneTargetForRequest(w, r, sessionID, paneIdx, reqID)
+	pane, ok := s.resolvePaneForRequest(w, r, sessionID, paneIdx, reqID)
 	if !ok {
 		return
 	}
+	if err := pane.Type.ValidateAutomatedPromptDelivery(); err != nil {
+		writeErrorResponse(w, http.StatusNotImplemented, ErrCodeNotImplemented, err.Error(), map[string]interface{}{
+			"agent_type": pane.Type.Canonical().String(),
+			"hint":       agent.GrokPromptDeliveryCapabilityHint,
+		}, reqID)
+		return
+	}
+	paneTarget := pane.ID
 
-	if err := tmux.SendKeys(paneTarget, req.Text, req.Enter); err != nil {
+	sendKeys := tmux.SendKeys
+	if s.sendPaneKeys != nil {
+		sendKeys = s.sendPaneKeys
+	}
+	if err := sendKeys(paneTarget, req.Text, req.Enter); err != nil {
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
 		return
 	}
@@ -3752,9 +3769,25 @@ func (s *Server) handleAgentSendV1(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: r.Header.Get("Idempotency-Key"),
 	}
 
-	result, err := robot.GetSend(opts)
+	sendAgents := robot.GetSend
+	if s.sendAgents != nil {
+		sendAgents = s.sendAgents
+	}
+	result, err := sendAgents(opts)
 	if err != nil {
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		return
+	}
+	if result == nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, "agent send returned no result", nil, reqID)
+		return
+	}
+	if !result.Success {
+		details := map[string]interface{}{}
+		if result.Hint != "" {
+			details["hint"] = result.Hint
+		}
+		writeErrorResponse(w, robotErrorHTTPStatus(result.ErrorCode), result.ErrorCode, result.Error, details, reqID)
 		return
 	}
 
@@ -3815,9 +3848,25 @@ func (s *Server) handleAgentInterruptV1(w http.ResponseWriter, r *http.Request) 
 		IdempotencyKey: r.Header.Get("Idempotency-Key"),
 	}
 
-	result, err := robot.GetInterrupt(opts)
+	interruptAgents := robot.GetInterrupt
+	if s.interruptAgents != nil {
+		interruptAgents = s.interruptAgents
+	}
+	result, err := interruptAgents(opts)
 	if err != nil {
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		return
+	}
+	if result == nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, "agent interrupt returned no result", nil, reqID)
+		return
+	}
+	if !result.Success {
+		details := map[string]interface{}{}
+		if result.Hint != "" {
+			details["hint"] = result.Hint
+		}
+		writeErrorResponse(w, robotErrorHTTPStatus(result.ErrorCode), result.ErrorCode, result.Error, details, reqID)
 		return
 	}
 
@@ -5956,36 +6005,50 @@ func matchesAttentionFilters(event robot.AttentionEvent, categoryFilter []string
 	return true
 }
 
-// resolvePaneTargetByIndex looks up the tmux pane in the given session whose
-// `pane_index` matches `paneIdx` and returns its tmux pane ID (the `%N`
-// form), which is base-index-independent. The naive `<session>:<paneIdx>`
-// target form looks like a pane index but tmux interprets the second
-// component as a *window* index, so hosts with `base-index = 1` see
-// `can't find window: N` (#141). Using the pane ID avoids the entire
-// window/pane ambiguity. The context is honored so the HTTP layer can
-// cancel a slow tmux ListPanes call, matching the rest of the handlers
-// (`handleGetPaneV1` etc.).
-func resolvePaneTargetByIndex(ctx context.Context, session string, paneIdx int) (string, error) {
+// resolvePaneByIndex returns the complete pane snapshot so callers can run
+// agent-specific admission before using its base-index-independent tmux ID.
+// The context is honored so the HTTP layer can cancel a slow ListPanes call.
+func resolvePaneByIndex(ctx context.Context, session string, paneIdx int) (tmux.Pane, error) {
 	panes, err := tmux.GetPanesContext(ctx, session)
 	if err != nil {
-		return "", fmt.Errorf("list panes: %w", err)
+		return tmux.Pane{}, fmt.Errorf("list panes: %w", err)
 	}
 	for _, p := range panes {
 		if p.Index == paneIdx {
-			return p.ID, nil
+			return p, nil
 		}
 	}
-	return "", fmt.Errorf("no pane with index %d in session %q", paneIdx, session)
+	return tmux.Pane{}, fmt.Errorf("no pane with index %d in session %q", paneIdx, session)
 }
 
-func (s *Server) resolvePaneTargetForRequest(w http.ResponseWriter, r *http.Request, session string, paneIdx int, reqID string) (string, bool) {
-	target, err := resolvePaneTargetByIndex(r.Context(), session, paneIdx)
+func resolvePaneTargetByIndex(ctx context.Context, session string, paneIdx int) (string, error) {
+	pane, err := resolvePaneByIndex(ctx, session, paneIdx)
+	if err != nil {
+		return "", err
+	}
+	return pane.ID, nil
+}
+
+func (s *Server) resolvePaneForRequest(w http.ResponseWriter, r *http.Request, session string, paneIdx int, reqID string) (tmux.Pane, bool) {
+	resolvePane := resolvePaneByIndex
+	if s.resolvePane != nil {
+		resolvePane = s.resolvePane
+	}
+	pane, err := resolvePane(r.Context(), session, paneIdx)
 	if err != nil {
 		writeErrorResponse(w, http.StatusNotFound, ErrCodeNotFound,
 			fmt.Sprintf("pane not found: %v", err), nil, reqID)
+		return tmux.Pane{}, false
+	}
+	return pane, true
+}
+
+func (s *Server) resolvePaneTargetForRequest(w http.ResponseWriter, r *http.Request, session string, paneIdx int, reqID string) (string, bool) {
+	pane, ok := s.resolvePaneForRequest(w, r, session, paneIdx, reqID)
+	if !ok {
 		return "", false
 	}
-	return target, true
+	return pane.ID, true
 }
 
 // parseCSVParam parses a comma-separated query parameter into a slice.

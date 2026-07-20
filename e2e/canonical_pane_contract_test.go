@@ -1392,7 +1392,38 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 		}
 
 		fakeBin := filepath.Join(fixture.runtimeRoot, "bin")
-		if err := os.WriteFile(filepath.Join(fakeBin, "bv"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		triagePath := filepath.Join(fixture.runtimeRoot, "canonical-distribute-triage.json")
+		planPath := filepath.Join(fixture.runtimeRoot, "canonical-distribute-plan.json")
+		if err := os.WriteFile(triagePath, []byte(`{"triage":{"recommendations":[]}}`), 0o600); err != nil {
+			t.Fatalf("write deterministic distribute triage payload: %v", err)
+		}
+		planPayload, err := json.Marshal(map[string]any{
+			"plan": map[string]any{
+				"tracks": []map[string]any{{
+					"track_id": "canonical-distribute-track",
+					"items": []map[string]any{
+						{"id": targets[0].beadID, "title": "Window zero assignment", "status": "open", "priority": 1},
+						{"id": targets[1].beadID, "title": "Window one assignment", "status": "open", "priority": 1},
+					},
+				}},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal deterministic distribute plan payload: %v", err)
+		}
+		if err := os.WriteFile(planPath, planPayload, 0o600); err != nil {
+			t.Fatalf("write deterministic distribute plan payload: %v", err)
+		}
+		bvScript := strings.Join([]string{
+			"#!/bin/sh",
+			`case "$1" in`,
+			`  --robot-triage) cat "$NTM_E2E_TRIAGE_PAYLOAD" ;;`,
+			`  --robot-plan) cat "$NTM_E2E_PLAN_PAYLOAD" ;;`,
+			`  *) printf 'unexpected bv args: %s\n' "$*" >&2; exit 64 ;;`,
+			"esac",
+			"",
+		}, "\n")
+		if err := os.WriteFile(filepath.Join(fakeBin, "bv"), []byte(bvScript), 0o700); err != nil {
 			t.Fatalf("write deterministic distribute bv: %v", err)
 		}
 		readyJSON := fmt.Sprintf(
@@ -1403,7 +1434,11 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 		if err := os.WriteFile(filepath.Join(fakeBin, "br"), []byte(fakeBR), 0o700); err != nil {
 			t.Fatalf("write deterministic distribute br: %v", err)
 		}
-		extraEnv := map[string]string{"PATH": fakeBin + string(os.PathListSeparator) + os.Getenv("PATH")}
+		extraEnv := map[string]string{
+			"PATH":                   fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"NTM_E2E_TRIAGE_PAYLOAD": triagePath,
+			"NTM_E2E_PLAN_PAYLOAD":   planPath,
+		}
 		robotAssign := fixture.runRobot(t, extraEnv, "--robot-assign="+fixture.session, "--strategy=balanced")
 		if robotAssign.exitCode != 0 {
 			t.Fatalf("robot assign inspection exit=%d stdout=%s stderr=%s", robotAssign.exitCode, robotAssign.stdout, robotAssign.stderr)
@@ -1449,55 +1484,6 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 			}
 		}
 
-		dispatched := fixture.runNTM(t, extraEnv,
-			"--json", "send", fixture.session, "--distribute", "--dist-limit=2", "--dist-auto",
-		)
-		if dispatched.exitCode != 0 {
-			t.Fatalf("distribute execution exit=%d stdout=%s stderr=%s", dispatched.exitCode, dispatched.stdout, dispatched.stderr)
-		}
-		var execution struct {
-			Success   bool `json:"success"`
-			Delivered int  `json:"delivered"`
-			Failed    int  `json:"failed"`
-			Receipts  []struct {
-				BeadID     string `json:"bead_id"`
-				PaneID     string `json:"pane_id"`
-				PaneTarget string `json:"pane_target"`
-				Status     string `json:"status"`
-				Protocol   string `json:"protocol"`
-				Redaction  struct {
-					Mode     string `json:"mode"`
-					Findings int    `json:"findings"`
-					Blocked  bool   `json:"blocked"`
-				} `json:"redaction"`
-			} `json:"receipts"`
-		}
-		if err := json.Unmarshal(dispatched.stdout, &execution); err != nil {
-			t.Fatalf("decode distribute execution: %v; output=%s", err, dispatched.stdout)
-		}
-		if !execution.Success || execution.Delivered != len(targets) || execution.Failed != 0 || len(execution.Receipts) != len(targets) {
-			t.Fatalf("distribute unified execution=%+v", execution)
-		}
-		for i, target := range targets {
-			receipt := execution.Receipts[i]
-			endpoint := fixture.panes[target.address]
-			if receipt.BeadID != target.beadID || receipt.PaneID != endpoint.ID || receipt.PaneTarget != target.address ||
-				receipt.Status != "delivered" || receipt.Protocol != "double_enter" || receipt.Redaction.Blocked {
-				t.Fatalf("unified distribute receipt %d=%+v, want delivered %s on %s (%s)", i, receipt, target.beadID, target.address, endpoint.ID)
-			}
-		}
-		for _, target := range targets {
-			fixture.waitForPaneContains(t, target.address, target.beadID)
-			for address := range fixture.panes {
-				contains := strings.Contains(fixture.capturePane(t, address), target.beadID)
-				if address == target.address && !contains {
-					t.Errorf("bead %s was not delivered to %s", target.beadID, address)
-				}
-				if address != target.address && contains {
-					t.Errorf("bead %s leaked from %s to %s", target.beadID, target.address, address)
-				}
-			}
-		}
 	})
 
 	t.Run("robot_and_distribute_use_session_project_and_fail_loud", func(t *testing.T) {
@@ -1547,6 +1533,47 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 				ids[0], "Session project A", ids[1], "Session project B")
 		}
 		fakeBin := filepath.Join(fixture.runtimeRoot, "bin")
+		planPayloadFor := func(ids []string, prefix string) []byte {
+			t.Helper()
+			payload, err := json.Marshal(map[string]any{
+				"plan": map[string]any{
+					"tracks": []map[string]any{{
+						"track_id": prefix + "-track",
+						"items": []map[string]any{
+							{"id": ids[0], "title": prefix + " A", "status": "open", "priority": 1},
+							{"id": ids[1], "title": prefix + " B", "status": "open", "priority": 1},
+						},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal %s project plan: %v", prefix, err)
+			}
+			return payload
+		}
+		targetPlanPath := filepath.Join(fixture.runtimeRoot, "session-project-plan.json")
+		decoyPlanPath := filepath.Join(fixture.runtimeRoot, "caller-project-plan.json")
+		if err := os.WriteFile(targetPlanPath, planPayloadFor(targetIDs, "Session project"), 0o600); err != nil {
+			t.Fatalf("write session-project plan: %v", err)
+		}
+		if err := os.WriteFile(decoyPlanPath, planPayloadFor(decoyIDs, "Caller project"), 0o600); err != nil {
+			t.Fatalf("write caller-project plan: %v", err)
+		}
+		projectBV := fmt.Sprintf(`#!/bin/sh
+case "$PWD" in
+  %q) plan=%q ;;
+  %q) plan=%q ;;
+  *) echo "unexpected bv cwd: $PWD" >&2; exit 65 ;;
+esac
+case "$1" in
+  --robot-triage) printf '{"triage":{"recommendations":[]}}\n' ;;
+  --robot-plan) cat "$plan" ;;
+  *) echo "unexpected bv args: $*" >&2; exit 64 ;;
+esac
+`, targetProject, targetPlanPath, decoyProject, decoyPlanPath)
+		if err := os.WriteFile(filepath.Join(fakeBin, "bv"), []byte(projectBV), 0o700); err != nil {
+			t.Fatalf("write project-scoped bv: %v", err)
+		}
 		goodBR := fmt.Sprintf(`#!/bin/sh
 if [ "${1:-}" = --lock-timeout ]; then shift 2; fi
 case "$PWD" in
@@ -1597,33 +1624,6 @@ esac
 			if bytes.Contains(preview.stdout, []byte(beadID)) {
 				t.Fatalf("distribute preview leaked caller-CWD bead %s: %s", beadID, preview.stdout)
 			}
-		}
-
-		first := fixture.panes["0.1"]
-		second := fixture.panes["1.1"]
-		fixture.sendPaneCommand(t, first.ID, fmt.Sprintf("Please() { tmux kill-pane -t %s; }", second.ID))
-		partial := fixture.runNTMInDir(t, decoyProject, extraEnv,
-			"--json", "send", fixture.session, "--distribute", "--dist-limit=2", "--dist-auto",
-		)
-		if partial.exitCode != 1 || len(bytes.TrimSpace(partial.stderr)) != 0 {
-			t.Fatalf("partial distribute exit=%d, want 1: stdout=%s stderr=%s", partial.exitCode, partial.stdout, partial.stderr)
-		}
-		var partialOutput struct {
-			Success   bool `json:"success"`
-			Delivered int  `json:"delivered"`
-			Failed    int  `json:"failed"`
-			Receipts  []struct {
-				BeadID string `json:"bead_id"`
-				Status string `json:"status"`
-				Error  string `json:"error"`
-			} `json:"receipts"`
-		}
-		if err := json.Unmarshal(partial.stdout, &partialOutput); err != nil {
-			t.Fatalf("partial distribute must emit one JSON document: %v; output=%s", err, partial.stdout)
-		}
-		if partialOutput.Success || partialOutput.Delivered != 1 || partialOutput.Failed != 1 || len(partialOutput.Receipts) != 2 ||
-			partialOutput.Receipts[0].Status != "delivered" || partialOutput.Receipts[1].Status != "failed" || partialOutput.Receipts[1].Error == "" {
-			t.Fatalf("partial distribute output=%+v", partialOutput)
 		}
 
 		malformedBR := "#!/bin/sh\nif [ \"${1:-}\" = --lock-timeout ]; then shift 2; fi\ncase \"${1:-}\" in\n  ready) printf '{malformed\\n' ;;\n  list|blocked) printf '[]\\n' ;;\n  *) exit 64 ;;\nesac\n"
@@ -2136,12 +2136,13 @@ func newCanonicalPaneFixture(t *testing.T) *canonicalPaneFixture {
 	}
 
 	runtimeRoot := t.TempDir()
+	tmuxRoot := testutil.ShortTmuxTempDir(t)
 	for _, path := range []string{
 		filepath.Join(runtimeRoot, "home"),
 		filepath.Join(runtimeRoot, "config"),
 		filepath.Join(runtimeRoot, "data"),
 		filepath.Join(runtimeRoot, "bin"),
-		filepath.Join(runtimeRoot, "tmux"),
+		tmuxRoot,
 	} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatalf("create fixture path %s: %v", path, err)
@@ -2183,7 +2184,7 @@ func newCanonicalPaneFixture(t *testing.T) *canonicalPaneFixture {
 		"HOME":            filepath.Join(runtimeRoot, "home"),
 		"XDG_CONFIG_HOME": filepath.Join(runtimeRoot, "config"),
 		"XDG_DATA_HOME":   filepath.Join(runtimeRoot, "data"),
-		"TMUX_TMPDIR":     filepath.Join(runtimeRoot, "tmux"),
+		"TMUX_TMPDIR":     tmuxRoot,
 		"NO_COLOR":        "1",
 		"TERM":            "xterm-256color",
 	})

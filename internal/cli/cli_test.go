@@ -64,51 +64,74 @@ func TestExecuteRootWithSignalsSecondSignalUsesDefault(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start signal helper: %v", err)
 	}
-	waited := false
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	joined := false
 	t.Cleanup(func() {
-		if !waited && cmd.Process != nil {
+		if !joined && cmd.Process != nil {
 			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			<-waitCh
 		}
 	})
 
 	lines := make(chan string, 8)
+	scannerErr := make(chan error, 1)
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			lines <- scanner.Text()
 		}
+		scannerErr <- scanner.Err()
 		close(lines)
 	}()
-	waitForLine := func(want string) {
+	observed := make([]string, 0, 2)
+	waitForLine := func(want string, timeout time.Duration) {
 		t.Helper()
-		timer := time.NewTimer(5 * time.Second)
+		timer := time.NewTimer(timeout)
 		defer timer.Stop()
 		for {
 			select {
 			case line, ok := <-lines:
 				if !ok {
-					t.Fatalf("signal helper exited before %q", want)
+					t.Fatalf("signal helper exited before %q: observed=%q scanner_err=%v", want, observed, <-scannerErr)
+				}
+				observed = append(observed, line)
+				if line == "LOCAL_SIGNAL_MISSING" {
+					t.Fatalf("signal helper missed command-local notification while waiting for %q: observed=%q", want, observed)
 				}
 				if line == want {
 					return
 				}
 			case <-timer.C:
-				t.Fatalf("timed out waiting for signal helper line %q", want)
+				var scanErr error
+				select {
+				case scanErr = <-scannerErr:
+				default:
+				}
+				t.Fatalf("timed out after %s waiting for signal helper line %q: observed=%q scanner_err=%v", timeout, want, observed, scanErr)
 			}
 		}
 	}
 
-	waitForLine("READY")
+	waitForLine("READY", 45*time.Second)
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("send first interrupt: %v", err)
 	}
-	waitForLine("CANCELED_AND_LOCAL_NOTIFIED")
+	waitForLine("CANCELED_AND_LOCAL_NOTIFIED", 5*time.Second)
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("send second interrupt: %v", err)
 	}
-	err = cmd.Wait()
-	waited = true
+	joinTimer := time.NewTimer(5 * time.Second)
+	defer joinTimer.Stop()
+	select {
+	case err = <-waitCh:
+		joined = true
+	case <-joinTimer.C:
+		_ = cmd.Process.Kill()
+		err = <-waitCh
+		joined = true
+		t.Fatalf("signal helper did not exit within 5s after the second interrupt: wait_err=%v observed=%q", err, observed)
+	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
 		t.Fatalf("second interrupt wait error = %v, want signal exit", err)
@@ -129,6 +152,17 @@ func TestClassifyRobotExecuteErrorMapsCancellationToTimeout(t *testing.T) {
 		if code != robot.ErrCodeTimeout || !strings.Contains(strings.ToLower(hint), "cancellation") {
 			t.Fatalf("classifyRobotExecuteError(%v) = (%q, %q), want TIMEOUT cancellation guidance", err, code, hint)
 		}
+	}
+}
+
+func TestClassifyRobotExecuteErrorMapsMarkedInputToInvalidFlag(t *testing.T) {
+	err := markCLIInvalidInput(errors.New("invalid selected configuration"))
+	code, hint := classifyRobotExecuteError(fmt.Errorf("coordinator validation: %w", err))
+	if code != robot.ErrCodeInvalidFlag {
+		t.Fatalf("classifyRobotExecuteError() code = %q, want %q", code, robot.ErrCodeInvalidFlag)
+	}
+	if !strings.Contains(strings.ToLower(hint), "configuration") {
+		t.Fatalf("classifyRobotExecuteError() hint = %q, want configuration guidance", hint)
 	}
 }
 
@@ -699,6 +733,66 @@ func TestRunQuickUsesDefaultProjectsBaseWhenConfigNil(t *testing.T) {
 	}
 }
 
+func TestResolveMessageCommandScopeRejectsMissingOrCanceledContext(t *testing.T) {
+	t.Run("nil command", func(t *testing.T) {
+		_, _, err := resolveMessageCommandScope(nil)
+		if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+			t.Fatalf("resolveMessageCommandScope(nil) error = %v, want missing context error", err)
+		}
+	})
+
+	t.Run("nil context", func(t *testing.T) {
+		_, _, err := resolveMessageCommandScope(&cobra.Command{})
+		if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+			t.Fatalf("resolveMessageCommandScope() error = %v, want missing context error", err)
+		}
+	})
+
+	t.Run("pre-canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		cmd := &cobra.Command{}
+		cmd.SetContext(ctx)
+		_, _, err := resolveMessageCommandScope(cmd)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("resolveMessageCommandScope() error = %v, want context.Canceled", err)
+		}
+	})
+}
+
+func TestMessageSubcommandsRejectPreCanceledContextDirectly(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  func() *cobra.Command
+		args []string
+	}{
+		{name: "inbox", cmd: newMessageInboxCmd},
+		{name: "send", cmd: newMessageSendCmd, args: []string{"TargetAgent", "body"}},
+		{name: "read", cmd: newMessageReadCmd, args: []string{"am-1"}},
+		{name: "ack", cmd: newMessageAckCmd, args: []string{"am-1"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			cmd := tt.cmd()
+			cmd.SetContext(ctx)
+			var output bytes.Buffer
+			cmd.SetOut(&output)
+			cmd.SetErr(&output)
+
+			err := cmd.RunE(cmd, tt.args)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("direct %s command error = %v, want context.Canceled", tt.name, err)
+			}
+			if output.Len() != 0 {
+				t.Fatalf("direct %s command emitted output after cancellation: %q", tt.name, output.String())
+			}
+		})
+	}
+}
+
 func TestResolveMessageScopeUsesSessionProjectDir(t *testing.T) {
 	isolateSessionAgentStorage(t)
 
@@ -719,7 +813,7 @@ func TestResolveMessageScopeUsesSessionProjectDir(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotAgent, err := resolveMessageScope("mysession")
+	gotDir, gotAgent, err := resolveMessageScope(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolveMessageScope() error = %v", err)
 	}
@@ -746,7 +840,7 @@ func TestResolveMessageScopeRejectsWorkspaceFallbackForExplicitSession(t *testin
 	}
 	defer os.Chdir(oldWd)
 
-	_, _, err := resolveMessageScope("mysession")
+	_, _, err := resolveMessageScope(t.Context(), "mysession")
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -766,7 +860,7 @@ func TestResolveMessageScopeFallsBackToProjectRoot(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotAgent, err := resolveMessageScope("")
+	gotDir, gotAgent, err := resolveMessageScope(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveMessageScope() error = %v", err)
 	}
@@ -806,7 +900,7 @@ func TestResolveMessageScopeInfersLabeledSessionFromCurrentProject(t *testing.T)
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotAgent, err := resolveMessageScope("")
+	gotDir, gotAgent, err := resolveMessageScope(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveMessageScope() error = %v", err)
 	}
@@ -839,7 +933,7 @@ func TestResolveMessageScopeNormalizesExplicitPrefix(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotAgent, err := resolveMessageScope("messagep")
+	gotDir, gotAgent, err := resolveMessageScope(t.Context(), "messagep")
 	if err != nil {
 		t.Fatalf("resolveMessageScope() error = %v", err)
 	}
@@ -873,7 +967,7 @@ func TestResolveMessageScopeUsesSavedSessionAgentIdentity(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotAgent, err := resolveMessageScope("mysession")
+	gotDir, gotAgent, err := resolveMessageScope(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolveMessageScope() error = %v", err)
 	}
@@ -898,7 +992,7 @@ func TestResolveMessageScopeUsesSavedSessionAgentWhenInferringSession(t *testing
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotAgent, err := resolveMessageScope("")
+	gotDir, gotAgent, err := resolveMessageScope(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveMessageScope() error = %v", err)
 	}
@@ -950,7 +1044,7 @@ func TestResolveMessageScopeUsesCurrentPaneRegistryIdentity(t *testing.T) {
 	saveSessionAgentRegistryForTest(t, session, projectDir, "", panes[0].ID, "GreenCastle")
 	t.Setenv("TMUX_PANE", panes[0].ID)
 
-	gotDir, gotAgent, err := resolveMessageScope(session)
+	gotDir, gotAgent, err := resolveMessageScope(t.Context(), session)
 	if err != nil {
 		t.Fatalf("resolveMessageScope() error = %v", err)
 	}
@@ -963,7 +1057,7 @@ func TestResolveMessageScopeUsesCurrentPaneRegistryIdentity(t *testing.T) {
 }
 
 func TestResolveMessageScopeRejectsInvalidSessionName(t *testing.T) {
-	_, _, err := resolveMessageScope("../escape")
+	_, _, err := resolveMessageScope(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -990,7 +1084,7 @@ func TestResolvePipelineProjectDirForSessionUsesSessionProjectDir(t *testing.T) 
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, err := resolvePipelineProjectDirForSession("mysession")
+	gotDir, err := resolvePipelineProjectDirForSession(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolvePipelineProjectDirForSession() error = %v", err)
 	}
@@ -1014,7 +1108,7 @@ func TestResolvePipelineProjectDirForSessionRejectsWorkspaceFallbackForExplicitS
 	}
 	defer os.Chdir(oldWd)
 
-	_, err := resolvePipelineProjectDirForSession("mysession")
+	_, err := resolvePipelineProjectDirForSession(t.Context(), "mysession")
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -1032,7 +1126,7 @@ func TestResolvePipelineProjectDirForSessionFallsBackToProjectRoot(t *testing.T)
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, err := resolvePipelineProjectDirForSession("")
+	gotDir, err := resolvePipelineProjectDirForSession(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolvePipelineProjectDirForSession() error = %v", err)
 	}
@@ -1042,7 +1136,7 @@ func TestResolvePipelineProjectDirForSessionFallsBackToProjectRoot(t *testing.T)
 }
 
 func TestResolvePipelineProjectDirForSessionRejectsInvalidSessionName(t *testing.T) {
-	_, err := resolvePipelineProjectDirForSession("../escape")
+	_, err := resolvePipelineProjectDirForSession(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1174,7 +1268,7 @@ func TestResolveRobotSessionProjectScopeNormalizesExplicitPrefix(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	gotSession, gotDir, err := resolveRobotSessionProjectScope("robotroot")
+	gotSession, gotDir, err := resolveRobotSessionProjectScope(t.Context(), "robotroot")
 	if err != nil {
 		t.Fatalf("resolveRobotSessionProjectScope() error = %v", err)
 	}
@@ -1201,7 +1295,7 @@ func TestResolveRobotSessionProjectScopeRejectsWorkspaceFallbackForExplicitSessi
 	}
 	defer os.Chdir(oldWd)
 
-	gotSession, gotDir, err := resolveRobotSessionProjectScope("robotmissing")
+	gotSession, gotDir, err := resolveRobotSessionProjectScope(t.Context(), "robotmissing")
 	if err == nil {
 		t.Fatalf("expected missing session project error, got session=%q dir=%q", gotSession, gotDir)
 	}
@@ -1211,7 +1305,7 @@ func TestResolveRobotSessionProjectScopeRejectsWorkspaceFallbackForExplicitSessi
 }
 
 func TestResolveRobotSessionProjectScopeRejectsInvalidSessionName(t *testing.T) {
-	_, _, err := resolveRobotSessionProjectScope("../escape")
+	_, _, err := resolveRobotSessionProjectScope(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1236,7 +1330,7 @@ func TestResolveRobotLiveSessionNormalizesExplicitPrefix(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tmux.KillSession(fullSession) })
 
-	got, err := resolveRobotLiveSession("robotlive")
+	got, err := resolveRobotLiveSession(t.Context(), "robotlive")
 	if err != nil {
 		t.Fatalf("resolveRobotLiveSession() error = %v", err)
 	}
@@ -1257,7 +1351,7 @@ func TestResolveRobotLiveSessionPreservesMissingSession(t *testing.T) {
 		t.Skipf("session %q unexpectedly exists", missing)
 	}
 
-	got, err := resolveRobotLiveSession(missing)
+	got, err := resolveRobotLiveSession(t.Context(), missing)
 	if err != nil {
 		t.Fatalf("resolveRobotLiveSession() error = %v", err)
 	}
@@ -1267,7 +1361,7 @@ func TestResolveRobotLiveSessionPreservesMissingSession(t *testing.T) {
 }
 
 func TestResolveRobotLiveSessionRejectsInvalidSessionName(t *testing.T) {
-	_, err := resolveRobotLiveSession("../escape")
+	_, err := resolveRobotLiveSession(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1276,8 +1370,25 @@ func TestResolveRobotLiveSessionRejectsInvalidSessionName(t *testing.T) {
 	}
 }
 
+func TestResolveRobotLiveSessionHonorsPreCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := resolveRobotLiveSession(ctx, "robotlive")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveRobotLiveSession(canceled) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestResolveRobotLiveSessionRequiresContext(t *testing.T) {
+	_, err := resolveRobotLiveSession(nil, "robotlive")
+	if err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("resolveRobotLiveSession(nil) error = %v, want required-context error", err)
+	}
+}
+
 func TestResolveOptionalRobotLiveSessionAllowsEmpty(t *testing.T) {
-	got, err := resolveOptionalRobotLiveSession("")
+	got, err := resolveOptionalRobotLiveSession(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveOptionalRobotLiveSession() error = %v", err)
 	}
@@ -1301,7 +1412,7 @@ func TestResolveRobotOfflineCapableSessionNormalizesConfiguredProjectPrefix(t *t
 	cfg = &config.Config{ProjectsBase: projectsBase}
 	jsonOutput = false
 
-	got, err := resolveRobotOfflineCapableSession("robotpro")
+	got, err := resolveRobotOfflineCapableSession(t.Context(), "robotpro")
 	if err != nil {
 		t.Fatalf("resolveRobotOfflineCapableSession() error = %v", err)
 	}
@@ -1311,7 +1422,7 @@ func TestResolveRobotOfflineCapableSessionNormalizesConfiguredProjectPrefix(t *t
 }
 
 func TestResolveRobotOfflineCapableSessionRejectsInvalidSessionName(t *testing.T) {
-	_, err := resolveRobotOfflineCapableSession("../escape")
+	_, err := resolveRobotOfflineCapableSession(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1336,7 +1447,7 @@ func TestResolveRobotSessionFilterNormalizesExplicitPrefix(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tmux.KillSession(fullSession) })
 
-	got, err := resolveRobotSessionFilter("robotfilter")
+	got, err := resolveRobotSessionFilter(t.Context(), "robotfilter")
 	if err != nil {
 		t.Fatalf("resolveRobotSessionFilter() error = %v", err)
 	}
@@ -1346,7 +1457,7 @@ func TestResolveRobotSessionFilterNormalizesExplicitPrefix(t *testing.T) {
 }
 
 func TestResolveOptionalRobotSessionFilterAllowsEmpty(t *testing.T) {
-	got, err := resolveOptionalRobotSessionFilter("")
+	got, err := resolveOptionalRobotSessionFilter(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveOptionalRobotSessionFilter() error = %v", err)
 	}
@@ -1373,7 +1484,7 @@ func TestResolveWorktreeScopeUsesSessionProjectDir(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotSession, err := resolveWorktreeScope("mysession")
+	gotDir, gotSession, err := resolveWorktreeScope(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolveWorktreeScope() error = %v", err)
 	}
@@ -1400,7 +1511,7 @@ func TestResolveWorktreeScopeRejectsWorkspaceFallbackForExplicitSession(t *testi
 	}
 	defer os.Chdir(oldWd)
 
-	_, _, err := resolveWorktreeScope("mysession")
+	_, _, err := resolveWorktreeScope(t.Context(), "mysession")
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -1418,7 +1529,7 @@ func TestResolveWorktreeScopeFallsBackToProjectRoot(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotSession, err := resolveWorktreeScope("")
+	gotDir, gotSession, err := resolveWorktreeScope(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveWorktreeScope() error = %v", err)
 	}
@@ -1456,7 +1567,7 @@ func TestResolveWorktreeScopeInfersLabeledSessionFromCurrentProject(t *testing.T
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotSession, err := resolveWorktreeScope("")
+	gotDir, gotSession, err := resolveWorktreeScope(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveWorktreeScope() error = %v", err)
 	}
@@ -1469,7 +1580,7 @@ func TestResolveWorktreeScopeInfersLabeledSessionFromCurrentProject(t *testing.T
 }
 
 func TestResolveWorktreeScopeRejectsInvalidSessionName(t *testing.T) {
-	_, _, err := resolveWorktreeScope("../escape")
+	_, _, err := resolveWorktreeScope(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1496,7 +1607,7 @@ func TestResolveContextBuildScopeUsesCurrentSessionProjectDir(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotSession, err := resolveContextBuildScope("mysession")
+	gotDir, gotSession, err := resolveContextBuildScope(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolveContextBuildScope() error = %v", err)
 	}
@@ -1523,7 +1634,7 @@ func TestResolveContextBuildScopeRejectsWorkspaceFallbackForExplicitSession(t *t
 	}
 	defer os.Chdir(oldWd)
 
-	_, _, err := resolveContextBuildScope("mysession")
+	_, _, err := resolveContextBuildScope(t.Context(), "mysession")
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -1541,7 +1652,7 @@ func TestResolveContextBuildScopeFallsBackToProjectRoot(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotSession, err := resolveContextBuildScope("")
+	gotDir, gotSession, err := resolveContextBuildScope(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveContextBuildScope() error = %v", err)
 	}
@@ -1579,7 +1690,7 @@ func TestResolveContextBuildScopeInfersLabeledSessionFromCurrentProject(t *testi
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, gotSession, err := resolveContextBuildScope("")
+	gotDir, gotSession, err := resolveContextBuildScope(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveContextBuildScope() error = %v", err)
 	}
@@ -1592,7 +1703,7 @@ func TestResolveContextBuildScopeInfersLabeledSessionFromCurrentProject(t *testi
 }
 
 func TestResolveContextBuildScopeRejectsInvalidSessionName(t *testing.T) {
-	_, _, err := resolveContextBuildScope("../escape")
+	_, _, err := resolveContextBuildScope(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1627,7 +1738,7 @@ func TestResolveContextBuildScopeUsesSavedSessionAgentProjectKey(t *testing.T) {
 	}
 	saveSessionAgentForTest(t, "mysession", actualProject, "GreenCastle")
 
-	gotDir, gotSession, err := resolveContextBuildScope("mysession")
+	gotDir, gotSession, err := resolveContextBuildScope(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolveContextBuildScope() error = %v", err)
 	}
@@ -1657,7 +1768,7 @@ func TestResolveEnsembleProjectDirForSessionUsesSessionProjectDir(t *testing.T) 
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, err := resolveEnsembleProjectDirForSession("mysession")
+	gotDir, err := resolveEnsembleProjectDirForSession(t.Context(), "mysession")
 	if err != nil {
 		t.Fatalf("resolveEnsembleProjectDirForSession() error = %v", err)
 	}
@@ -1681,7 +1792,7 @@ func TestResolveEnsembleProjectDirForSessionRejectsWorkspaceFallbackForExplicitS
 	}
 	defer os.Chdir(oldWd)
 
-	_, err := resolveEnsembleProjectDirForSession("mysession")
+	_, err := resolveEnsembleProjectDirForSession(t.Context(), "mysession")
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -1708,7 +1819,7 @@ func TestResolveEnsembleProjectDirForSessionResolvesProjectScopedPrefix(t *testi
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, err := resolveEnsembleProjectDirForSession("mypro")
+	gotDir, err := resolveEnsembleProjectDirForSession(t.Context(), "mypro")
 	if err != nil {
 		t.Fatalf("resolveEnsembleProjectDirForSession() error = %v", err)
 	}
@@ -1718,7 +1829,7 @@ func TestResolveEnsembleProjectDirForSessionResolvesProjectScopedPrefix(t *testi
 }
 
 func TestResolveEnsembleProjectDirForSessionRejectsInvalidSessionName(t *testing.T) {
-	_, err := resolveEnsembleProjectDirForSession("../escape")
+	_, err := resolveEnsembleProjectDirForSession(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1746,7 +1857,7 @@ func TestResolveEnsembleProjectDirForSessionFallsBackToProjectRoot(t *testing.T)
 	}
 	defer os.Chdir(oldWd)
 
-	gotDir, err := resolveEnsembleProjectDirForSession("")
+	gotDir, err := resolveEnsembleProjectDirForSession(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolveEnsembleProjectDirForSession() error = %v", err)
 	}
@@ -1756,7 +1867,7 @@ func TestResolveEnsembleProjectDirForSessionFallsBackToProjectRoot(t *testing.T)
 }
 
 func TestResolveGitProjectDirRejectsInvalidSessionName(t *testing.T) {
-	_, _, err := resolveGitProjectDir("../escape")
+	_, _, err := resolveGitProjectDir(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1766,7 +1877,7 @@ func TestResolveGitProjectDirRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestResolveProfileSwitchProjectDirRejectsInvalidSessionName(t *testing.T) {
-	_, err := resolveProfileSwitchProjectDir("../escape")
+	_, err := resolveProfileSwitchProjectDirContext(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -1965,7 +2076,7 @@ func TestRunEnsembleSynthesize_UsesSavedOutputsWhenSessionOffline(t *testing.T) 
 	}
 
 	var buf bytes.Buffer
-	if err := runEnsembleSynthesize(&buf, state.SessionName, synthesizeOptions{Format: "json"}); err != nil {
+	if err := runEnsembleSynthesize(t.Context(), &buf, state.SessionName, synthesizeOptions{Format: "json"}); err != nil {
 		t.Fatalf("runEnsembleSynthesize error: %v", err)
 	}
 	if !strings.Contains(buf.String(), "\"summary\"") {
@@ -1975,7 +2086,7 @@ func TestRunEnsembleSynthesize_UsesSavedOutputsWhenSessionOffline(t *testing.T) 
 
 func TestRunEnsembleSynthesize_RejectsResumeWithoutStream(t *testing.T) {
 	var buf bytes.Buffer
-	err := runEnsembleSynthesize(&buf, "missing-session", synthesizeOptions{
+	err := runEnsembleSynthesize(t.Context(), &buf, "missing-session", synthesizeOptions{
 		Resume: true,
 	})
 	if err == nil {
@@ -1988,7 +2099,7 @@ func TestRunEnsembleSynthesize_RejectsResumeWithoutStream(t *testing.T) {
 
 func TestRunEnsembleSynthesize_RejectsResumeWithoutRunID(t *testing.T) {
 	var buf bytes.Buffer
-	err := runEnsembleSynthesize(&buf, "missing-session", synthesizeOptions{
+	err := runEnsembleSynthesize(t.Context(), &buf, "missing-session", synthesizeOptions{
 		Stream: true,
 		Resume: true,
 	})
@@ -2002,7 +2113,7 @@ func TestRunEnsembleSynthesize_RejectsResumeWithoutRunID(t *testing.T) {
 
 func TestRunEnsembleSynthesize_RejectsRunIDWithoutStream(t *testing.T) {
 	var buf bytes.Buffer
-	err := runEnsembleSynthesize(&buf, "missing-session", synthesizeOptions{
+	err := runEnsembleSynthesize(t.Context(), &buf, "missing-session", synthesizeOptions{
 		RunID: "checkpoint-run",
 	})
 	if err == nil {
@@ -2232,7 +2343,7 @@ func TestResolvePipelineProjectDirForSessionFallsBackToProjectRootFromNestedDir(
 	}
 	defer os.Chdir(oldWd)
 
-	got, err := resolvePipelineProjectDirForSession("")
+	got, err := resolvePipelineProjectDirForSession(t.Context(), "")
 	if err != nil {
 		t.Fatalf("resolvePipelineProjectDirForSession() error = %v", err)
 	}
@@ -2259,7 +2370,7 @@ func TestResolvePipelineProjectDirForSessionResolvesProjectScopedPrefix(t *testi
 	}
 	defer os.Chdir(oldWd)
 
-	got, err := resolvePipelineProjectDirForSession("mypro")
+	got, err := resolvePipelineProjectDirForSession(t.Context(), "mypro")
 	if err != nil {
 		t.Fatalf("resolvePipelineProjectDirForSession() error = %v", err)
 	}
@@ -2296,7 +2407,7 @@ func TestResolveResumeScopeUsesSessionProjectDir(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	session, got, err := resolveResumeScope("mysession", true)
+	session, got, err := resolveResumeScope(t.Context(), "mysession", true)
 	if err != nil {
 		t.Fatalf("resolveResumeScope() error = %v", err)
 	}
@@ -2323,7 +2434,7 @@ func TestResolveResumeScopeRejectsWorkspaceFallbackForExplicitSession(t *testing
 	}
 	defer os.Chdir(oldWd)
 
-	_, _, err := resolveResumeScope("mysession", true)
+	_, _, err := resolveResumeScope(t.Context(), "mysession", true)
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -2351,7 +2462,7 @@ func TestResolveResumeScopeUsesCurrentWorkspaceOnlyForStoredHandoff(t *testing.T
 	}
 	defer os.Chdir(oldWd)
 
-	session, gotDir, err := resolveResumeScope("mysession", true)
+	session, gotDir, err := resolveResumeScope(t.Context(), "mysession", true)
 	if err != nil {
 		t.Fatalf("resolveResumeScope() error = %v", err)
 	}
@@ -2382,7 +2493,7 @@ func TestResolveResumeScopeUsesProjectRootStoredHandoffFromNestedDirectory(t *te
 	}
 	defer os.Chdir(oldWd)
 
-	session, gotDir, err := resolveResumeScope("mysession--front", true)
+	session, gotDir, err := resolveResumeScope(t.Context(), "mysession--front", true)
 	if err != nil {
 		t.Fatalf("resolveResumeScope() error = %v", err)
 	}
@@ -2395,7 +2506,7 @@ func TestResolveResumeScopeUsesProjectRootStoredHandoffFromNestedDirectory(t *te
 }
 
 func TestResolveResumeScopeRejectsInvalidSessionName(t *testing.T) {
-	_, _, err := resolveResumeScope("../escape", true)
+	_, _, err := resolveResumeScope(t.Context(), "../escape", true)
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -2423,7 +2534,7 @@ func TestResolveResumeScopeResolvesStoredHandoffSessionPrefix(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	session, gotDir, err := resolveResumeScope("myse--front", true)
+	session, gotDir, err := resolveResumeScope(t.Context(), "myse--front", true)
 	if err != nil {
 		t.Fatalf("resolveResumeScope() error = %v", err)
 	}
@@ -2455,7 +2566,7 @@ func TestResolveResumeSourceProjectDirUsesHandoffSourceProject(t *testing.T) {
 	cfg = &config.Config{ProjectsBase: projectsBase}
 	t.Cleanup(func() { cfg = oldCfg })
 
-	projectDir, err := resolveResumeSourceProjectDir("newsession", "sourcesession", handoffPath, true)
+	projectDir, err := resolveResumeSourceProjectDir(t.Context(), "newsession", "sourcesession", handoffPath, true)
 	if err != nil {
 		t.Fatalf("resolveResumeSourceProjectDir() error = %v", err)
 	}
@@ -2763,7 +2874,7 @@ func TestRunChangesNormalizesExplicitPrefix(t *testing.T) {
 		},
 	})
 
-	out, err := captureStdout(t, func() error { return runChanges("changep") })
+	out, err := captureStdout(t, func() error { return runChanges(t.Context(), "changep") })
 	if err != nil {
 		t.Fatalf("runChanges() error = %v", err)
 	}
@@ -2816,7 +2927,7 @@ func TestRunConflictsNormalizesExplicitPrefix(t *testing.T) {
 		},
 	})
 
-	out, err := captureStdout(t, func() error { return runConflicts("conflictp", "24h", 10) })
+	out, err := captureStdout(t, func() error { return runConflicts(t.Context(), "conflictp", "24h", 10) })
 	if err != nil {
 		t.Fatalf("runConflicts() error = %v", err)
 	}
@@ -2864,7 +2975,7 @@ func TestRunContextRotationPendingNormalizesExplicitPrefix(t *testing.T) {
 		t.Fatalf("AddPendingRotation() error = %v", err)
 	}
 
-	out, err := captureStdout(t, func() error { return runContextRotationPending("rotationp") })
+	out, err := captureStdout(t, func() error { return runContextRotationPending(t.Context(), "rotationp") })
 	if err != nil {
 		t.Fatalf("runContextRotationPending() error = %v", err)
 	}
@@ -2915,7 +3026,7 @@ func TestCheckpointSaveCmdRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestBuildAttachResponseRejectsInvalidSessionName(t *testing.T) {
-	_, err := buildAttachResponse("../escape")
+	_, err := buildAttachResponse(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -2925,7 +3036,7 @@ func TestBuildAttachResponseRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestBuildStatusResponseRejectsInvalidSessionName(t *testing.T) {
-	_, err := buildStatusResponse("../escape", statusOptions{})
+	_, err := buildStatusResponse(t.Context(), "../escape", statusOptions{})
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -2935,7 +3046,7 @@ func TestBuildStatusResponseRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestBuildInterruptResponseRejectsInvalidSessionName(t *testing.T) {
-	_, err := buildInterruptResponse("../escape", nil)
+	_, err := buildInterruptResponse(t.Context(), "../escape", nil)
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -2945,7 +3056,7 @@ func TestBuildInterruptResponseRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestBuildKillResponseRejectsInvalidSessionName(t *testing.T) {
-	_, err := buildKillResponse("../escape", true, nil, true, false)
+	_, err := buildKillResponse(t.Context(), "../escape", true, nil, true, false)
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -2955,7 +3066,7 @@ func TestBuildKillResponseRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestBuildViewResponseRejectsInvalidSessionName(t *testing.T) {
-	_, err := buildViewResponse("../escape")
+	_, err := buildViewResponse(t.Context(), "../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -2965,7 +3076,7 @@ func TestBuildViewResponseRejectsInvalidSessionName(t *testing.T) {
 }
 
 func TestBuildZoomResponseRejectsInvalidSessionName(t *testing.T) {
-	_, err := buildZoomResponse("../escape", 1)
+	_, err := buildZoomResponse(t.Context(), "../escape", 1)
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -3264,10 +3375,24 @@ func TestConfigShowCmdExecutes(t *testing.T) {
 
 func TestConfigShowJSONIncludesSafetyProfile(t *testing.T) {
 	resetFlags()
-	cfg = config.Default()
+	t.Setenv("NTM_CONFIG", "")
+	previousCfg := cfg
+	previousCfgFile := cfgFile
+	t.Cleanup(func() {
+		cfg = previousCfg
+		cfgFile = previousCfgFile
+		startup.ResetConfig()
+	})
+
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(configPath, []byte("[assign]\noperator_gated_labels = [\"security-review\"]\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(config) failed: %v", err)
+	}
+	cfg = nil
+	startup.ResetConfig()
 
 	output, err := captureStdout(t, func() error {
-		rootCmd.SetArgs([]string{"--json", "config", "show"})
+		rootCmd.SetArgs([]string{"--json", "--config", configPath, "config", "show"})
 		return rootCmd.Execute()
 	})
 	if err != nil {
@@ -3302,6 +3427,27 @@ func TestConfigShowJSONIncludesSafetyProfile(t *testing.T) {
 	}
 	if enabled, ok := preflight["enabled"].(bool); !ok || !enabled {
 		t.Fatalf("expected safety.preflight.enabled=true, got %v", preflight["enabled"])
+	}
+
+	if _, exists := parsed["health"]; exists {
+		t.Fatal("config show JSON still exposes the removed top-level health object")
+	}
+	resilience, ok := parsed["resilience"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected resilience object, got %T", parsed["resilience"])
+	}
+	for _, key := range []string{"auto_restart", "max_restarts", "health_check_seconds"} {
+		if _, exists := resilience[key]; !exists {
+			t.Fatalf("resilience JSON omitted %q: %#v", key, resilience)
+		}
+	}
+	assign, ok := parsed["assign"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected assign object, got %T", parsed["assign"])
+	}
+	labels, ok := assign["operator_gated_labels"].([]any)
+	if !ok || len(labels) != 1 || labels[0] != "security-review" {
+		t.Fatalf("assign.operator_gated_labels = %#v", assign["operator_gated_labels"])
 	}
 }
 
@@ -3923,7 +4069,7 @@ func TestResolveAddSetupScopeResolvesProjectScopedPrefix(t *testing.T) {
 		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
 	}
 
-	resolvedSession, dir, err := resolveAddSetupScope("de")
+	resolvedSession, dir, err := resolveAddSetupScope(t.Context(), "de")
 	if err == nil {
 		if resolvedSession != "demo" {
 			t.Fatalf("resolved session = %q, want %q", resolvedSession, "demo")
@@ -3954,7 +4100,7 @@ func TestResolveAddSetupScopeRejectsWorkspaceFallbackForExplicitSession(t *testi
 		t.Fatalf("Chdir(workspace nested) failed: %v", err)
 	}
 
-	_, _, err := resolveAddSetupScope("demo")
+	_, _, err := resolveAddSetupScope(t.Context(), "demo")
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -3992,7 +4138,7 @@ func TestResolveAddSetupScopeRejectsAmbiguousProjectScopedPrefix(t *testing.T) {
 		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
 	}
 
-	_, _, err := resolveAddSetupScope("de")
+	_, _, err := resolveAddSetupScope(t.Context(), "de")
 	if err == nil {
 		t.Fatal("expected ambiguous prefix error")
 	}
@@ -4453,7 +4599,7 @@ func TestPaletteConfigContextDirPrefersExplicitSessionProject(t *testing.T) {
 		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
 	}
 
-	got, err := paletteConfigContextDir(sessionName, true)
+	got, err := paletteConfigContextDir(t.Context(), sessionName, true)
 	if err != nil {
 		t.Fatalf("paletteConfigContextDir() error = %v", err)
 	}
@@ -4495,7 +4641,7 @@ func TestPaletteConfigContextDirResolvesProjectScopedPrefix(t *testing.T) {
 		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
 	}
 
-	got, err := paletteConfigContextDir("de", true)
+	got, err := paletteConfigContextDir(t.Context(), "de", true)
 	if err != nil {
 		t.Fatalf("paletteConfigContextDir() error = %v", err)
 	}
@@ -4525,7 +4671,7 @@ func TestPaletteConfigContextDirRejectsWorkspaceFallbackForExplicitSession(t *te
 		t.Fatalf("Chdir(workspace nested) failed: %v", err)
 	}
 
-	_, err := paletteConfigContextDir("demo", true)
+	_, err := paletteConfigContextDir(t.Context(), "demo", true)
 	if err == nil {
 		t.Fatal("expected missing session project error")
 	}
@@ -4590,7 +4736,7 @@ Use project palette.
 		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
 	}
 
-	loaded, err := loadPaletteRuntimeConfig(sessionName, true)
+	loaded, err := loadPaletteRuntimeConfig(t.Context(), sessionName, true)
 	if err != nil {
 		t.Fatalf("loadPaletteRuntimeConfig() failed: %v", err)
 	}
@@ -4648,7 +4794,7 @@ func TestLoadPaletteRuntimeConfigRejectsAmbiguousExplicitSessionPrefix(t *testin
 		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
 	}
 
-	_, err := loadPaletteRuntimeConfig("de", true)
+	_, err := loadPaletteRuntimeConfig(t.Context(), "de", true)
 	if err == nil {
 		t.Fatal("expected ambiguous explicit session prefix error")
 	}
@@ -5903,7 +6049,11 @@ func TestRobotProcessErrorContract(t *testing.T) {
 		{name: "invalid robot format", args: []string{"--robot-status", "--robot-format=xml"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
 		{name: "invalid robot verbosity", args: []string{"--robot-status", "--robot-verbosity=noisy"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
 		{name: "invalid robot redaction", args: []string{"--robot-status", "--redact=erase"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
-		{name: "invalid robot config", args: []string{"--config", invalidConfig, "--robot-status"}, errorCode: robot.ErrCodeInternalError, expectedExit: 1},
+		{name: "invalid robot config", args: []string{"--config", invalidConfig, "--robot-status"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "unknown coordinator toggle", args: []string{"--json", "coordinator", "enable", "not-a-feature"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "invalid coordinator interval", args: []string{"--json", "coordinator", "enable", "digest", "--interval=later"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "coordinator interval below minimum", args: []string{"--json", "coordinator", "enable", "digest", "--interval=1s"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "coordinator interval on wrong feature", args: []string{"--json", "coordinator", "enable", "auto-assign", "--interval=30m"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
 		{name: "format before bulk metadata", args: []string{"--robot-format=json", "--robot-bulk-assign=proj", "--not-a-real-flag"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1, expectedCommand: "robot-bulk-assign"},
 		{name: "default ensemble spawn stub", args: []string{"--robot-ensemble-spawn=contract", "--robot-format=toon"}, errorCode: robot.ErrCodeNotImplemented, expectedExit: 2},
 		{name: "unavailable feature", args: []string{"__robot_contract_unavailable__"}, errorCode: robot.ErrCodeNotImplemented, expectedExit: 2},
@@ -6155,6 +6305,117 @@ func TestConfigPathFromArgs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfigureStartupConfigPathPreservesExplicitSelection(t *testing.T) {
+	originalCfgFile := cfgFile
+	originalArgs := os.Args
+	originalEnvPath, hadOriginalEnvPath := os.LookupEnv("NTM_CONFIG")
+	t.Cleanup(func() {
+		cfgFile = originalCfgFile
+		os.Args = originalArgs
+		if hadOriginalEnvPath {
+			startup.SetConfigPath(originalEnvPath)
+		} else {
+			startup.SetConfigPath("")
+		}
+	})
+
+	t.Run("implicit XDG default stays implicit", func(t *testing.T) {
+		cfgFile = ""
+		os.Args = []string{"ntm", "status"}
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+		t.Setenv("NTM_CONFIG", "")
+
+		configureStartupConfigPath()
+
+		if value, ok := os.LookupEnv("NTM_CONFIG"); ok {
+			t.Fatalf("NTM_CONFIG = %q, want unset for implicit default", value)
+		}
+	})
+
+	t.Run("config flag is propagated", func(t *testing.T) {
+		cfgFile = filepath.Join(t.TempDir(), "selected.toml")
+		os.Args = []string{"ntm", "status"}
+		t.Setenv("NTM_CONFIG", "")
+
+		configureStartupConfigPath()
+
+		if got := os.Getenv("NTM_CONFIG"); got != cfgFile {
+			t.Fatalf("NTM_CONFIG = %q, want explicit flag path %q", got, cfgFile)
+		}
+	})
+
+	t.Run("environment selection is preserved", func(t *testing.T) {
+		cfgFile = ""
+		os.Args = []string{"ntm", "status"}
+		envPath := filepath.Join(t.TempDir(), "selected.toml")
+		t.Setenv("NTM_CONFIG", envPath)
+
+		configureStartupConfigPath()
+
+		if got := os.Getenv("NTM_CONFIG"); got != envPath {
+			t.Fatalf("NTM_CONFIG = %q, want explicit environment path %q", got, envPath)
+		}
+	})
+}
+
+func TestSelectedConfigAllowsProjectionRefresh(t *testing.T) {
+	originalCfgFile := cfgFile
+	originalArgs := os.Args
+	t.Cleanup(func() {
+		cfgFile = originalCfgFile
+		os.Args = originalArgs
+	})
+
+	t.Run("implicit default", func(t *testing.T) {
+		cfgFile = ""
+		os.Args = []string{"ntm", "status"}
+		t.Setenv("NTM_CONFIG", "")
+		if !selectedConfigAllowsProjectionRefresh() {
+			t.Fatal("implicit default config unexpectedly blocked projection refresh")
+		}
+	})
+
+	t.Run("explicit regular file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "selected.toml")
+		if err := os.WriteFile(path, []byte("[assign]\n"), 0o600); err != nil {
+			t.Fatalf("write selected config: %v", err)
+		}
+		cfgFile = path
+		os.Args = []string{"ntm", "status"}
+		t.Setenv("NTM_CONFIG", "")
+		if !selectedConfigAllowsProjectionRefresh() {
+			t.Fatal("regular explicit config blocked projection refresh")
+		}
+	})
+
+	t.Run("explicit missing file", func(t *testing.T) {
+		cfgFile = filepath.Join(t.TempDir(), "missing.toml")
+		os.Args = []string{"ntm", "status"}
+		t.Setenv("NTM_CONFIG", "")
+		if selectedConfigAllowsProjectionRefresh() {
+			t.Fatal("missing explicit config allowed projection refresh")
+		}
+	})
+
+	t.Run("explicit non-regular path", func(t *testing.T) {
+		cfgFile = t.TempDir()
+		os.Args = []string{"ntm", "status"}
+		t.Setenv("NTM_CONFIG", "")
+		if selectedConfigAllowsProjectionRefresh() {
+			t.Fatal("non-regular explicit config allowed projection refresh")
+		}
+	})
+
+	t.Run("missing environment selection", func(t *testing.T) {
+		cfgFile = ""
+		os.Args = []string{"ntm", "status"}
+		t.Setenv("NTM_CONFIG", filepath.Join(t.TempDir(), "missing-from-env.toml"))
+		if selectedConfigAllowsProjectionRefresh() {
+			t.Fatal("missing NTM_CONFIG selection allowed projection refresh")
+		}
+	})
 }
 
 func TestPluginsListUsesGlobalConfigFlag(t *testing.T) {

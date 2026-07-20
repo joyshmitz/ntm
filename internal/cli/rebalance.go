@@ -77,6 +77,12 @@ const (
 	rebalanceRecoveryReason     = "recover_pending_dispatch"
 )
 
+var (
+	resolveRebalanceProjectDir   = resolveAssignProjectDir
+	loadRebalanceAssignmentStore = assignment.LoadStoreStrict
+	getRebalancePanes            = tmux.GetPanesContext
+)
+
 type rebalanceCommandError struct {
 	code string
 	err  error
@@ -169,6 +175,21 @@ func runRebalance(ctx context.Context, session string, dryRun, apply bool, filte
 		}
 		return err
 	}
+	projectDir, err := resolveRebalanceProjectDir(ctx, session)
+	if err != nil {
+		err = fmt.Errorf("resolve rebalance project: %w", err)
+		if isJSON {
+			return outputRebalanceError(session, err)
+		}
+		return err
+	}
+	if err := configureAuthoritativeAssignmentPolicy(projectDir); err != nil {
+		err = newRebalanceCommandError(robot.ErrCodeInvalidFlag, err)
+		if isJSON {
+			return outputRebalanceError(session, err)
+		}
+		return err
+	}
 	normalizedFilter, err := normalizeAgentTypeFilter(filter)
 	if err != nil {
 		err = newRebalanceCommandError(robot.ErrCodeInvalidFlag, err)
@@ -179,7 +200,7 @@ func runRebalance(ctx context.Context, session string, dryRun, apply bool, filte
 	}
 
 	// Load assignment store
-	store, err := assignment.LoadStoreStrict(session)
+	store, err := loadRebalanceAssignmentStore(session)
 	if err != nil {
 		err = fmt.Errorf("failed to load assignments: %w", err)
 		if isJSON {
@@ -189,7 +210,7 @@ func runRebalance(ctx context.Context, session string, dryRun, apply bool, filte
 	}
 
 	// Get pane information
-	panes, err := tmux.GetPanesContext(ctx, session)
+	panes, err := getRebalancePanes(ctx, session)
 	if err != nil {
 		err = fmt.Errorf("failed to list panes: %w", err)
 		if isJSON {
@@ -267,7 +288,7 @@ func runRebalance(ctx context.Context, session string, dryRun, apply bool, filte
 	}
 
 	if apply && len(transfers) > 0 && !dryRun && isJSON {
-		if err := applyRebalanceTransfers(ctx, session, store, transfers); err != nil {
+		if err := applyRebalanceTransfers(ctx, session, projectDir, store, transfers); err != nil {
 			return outputRebalanceError(session, fmt.Errorf("failed to apply transfers: %w", err))
 		}
 		resp.Applied = true
@@ -295,7 +316,7 @@ func runRebalance(ctx context.Context, session string, dryRun, apply bool, filte
 			return fmt.Errorf("confirmation dialog: %w", err)
 		}
 		if confirmed {
-			if err := applyRebalanceTransfers(ctx, session, store, transfers); err != nil {
+			if err := applyRebalanceTransfers(ctx, session, projectDir, store, transfers); err != nil {
 				return fmt.Errorf("failed to apply transfers: %w", err)
 			}
 			th := theme.Current()
@@ -704,7 +725,7 @@ type rebalanceAtomicExecutor interface {
 	Execute(context.Context, assignment.AtomicRequest) (assignment.AtomicResult, error)
 }
 
-func applyRebalanceTransfers(ctx context.Context, session string, store *assignment.AssignmentStore, transfers []RebalanceTransfer) error {
+func applyRebalanceTransfers(ctx context.Context, session, projectDir string, store *assignment.AssignmentStore, transfers []RebalanceTransfer) error {
 	if len(transfers) == 0 {
 		return nil
 	}
@@ -713,10 +734,6 @@ func applyRebalanceTransfers(ctx context.Context, session string, store *assignm
 	}
 	if err := store.LoadStrict(); err != nil {
 		return fmt.Errorf("refresh assignment store before rebalance: %w", err)
-	}
-	projectDir, err := resolveAssignProjectDir(session)
-	if err != nil {
-		return fmt.Errorf("resolve bead project for atomic rebalance: %w", err)
 	}
 	panes, err := tmux.GetPanesContext(ctx, session)
 	if err != nil {

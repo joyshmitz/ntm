@@ -96,6 +96,8 @@ func sessionPanePresentation(pane tmux.Pane, th theme.Theme, ic icons.IconSet) (
 		// agy (Antigravity) gets the lavender accent (matching the semantic
 		// theme palette); AgentIcon maps antigravity → the Gemini glyph.
 		return string(th.Lavender), ic.AgentIcon(string(agentpkg.AgentTypeAntigravity))
+	case agentpkg.AgentTypeGrok:
+		return string(th.Pink), ic.AgentIcon(string(agentpkg.AgentTypeGrok))
 	case agentpkg.AgentTypeCursor:
 		return string(th.Cursor), ic.AgentIcon(string(agentpkg.AgentTypeCursor))
 	case agentpkg.AgentTypeWindsurf:
@@ -212,7 +214,7 @@ func init() {
 			filterPane:      filterPane,
 			showSummary:     opts.ShowSummary,
 		}
-		return buildStatusResponse(opts.Session, statusOpts)
+		return buildStatusResponse(ctx, opts.Session, statusOpts)
 	})
 
 	kernel.MustRegister(kernel.Command{
@@ -254,7 +256,7 @@ func init() {
 		if strings.TrimSpace(opts.Session) == "" {
 			return nil, fmt.Errorf("session is required")
 		}
-		return buildAttachResponse(opts.Session)
+		return buildAttachResponse(ctx, opts.Session)
 	})
 }
 
@@ -303,7 +305,7 @@ Examples:
 				// No session specified, list sessions
 				return runList(nil)
 			}
-			return runAttach(args[0])
+			return runAttach(cmd.Context(), args[0])
 		},
 	}
 
@@ -312,9 +314,9 @@ Examples:
 	return cmd
 }
 
-func runAttach(session string) error {
+func runAttach(ctx context.Context, session string) error {
 	if IsJSONOutput() {
-		result, err := kernel.Run(context.Background(), "sessions.attach", SessionAttachInput{Session: session})
+		result, err := kernel.Run(ctx, "sessions.attach", SessionAttachInput{Session: session})
 		if err != nil {
 			return emitJSONFailureEnvelopeWithCause(output.NewError(err.Error()), err)
 		}
@@ -331,7 +333,7 @@ func runAttach(session string) error {
 
 	if tmux.SessionExists(session) {
 		// Update Agent Mail activity (non-blocking)
-		updateSessionActivity(session)
+		updateSessionActivity(ctx, session)
 		return tmux.AttachOrSwitch(session)
 	}
 
@@ -343,7 +345,7 @@ func runAttach(session string) error {
 	// Prefix resolution (exact match is preferred inside resolver).
 	if resolved, _, err := sessionPkg.ResolveExplicitSessionName(session, sessionList, true); err == nil {
 		session = resolved
-		updateSessionActivity(session)
+		updateSessionActivity(ctx, session)
 		return tmux.AttachOrSwitch(session)
 	} else {
 		var re *sessionPkg.ResolveExplicitSessionNameError
@@ -660,11 +662,11 @@ func estimatePaneContextUsage(p tmux.Pane) (paneContextUsage, bool) {
 	}, true
 }
 
-func buildStatusResponse(session string, opts statusOptions) (output.StatusResponse, error) {
+func buildStatusResponse(ctx context.Context, session string, opts statusOptions) (output.StatusResponse, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return output.StatusResponse{}, err
 	}
-	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	resolvedSession, err := normalizeExplicitLiveSessionName(ctx, session, true)
 	if err != nil {
 		return output.StatusResponse{}, err
 	}
@@ -694,7 +696,7 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 		panes = filtered
 	}
 
-	dir := resolveCommandProjectDirForSession(session, false)
+	dir := resolveCommandProjectDirForSession(ctx, session, false)
 
 	// Load handoff info (best-effort)
 	var handoffGoal, handoffNow, handoffStatus, handoffPath string
@@ -847,11 +849,11 @@ func coerceSessionResponse(result any) (output.SessionResponse, error) {
 	}
 }
 
-func buildAttachResponse(session string) (output.SessionResponse, error) {
+func buildAttachResponse(ctx context.Context, session string) (output.SessionResponse, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return output.SessionResponse{}, err
 	}
-	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	resolvedSession, err := normalizeExplicitLiveSessionName(ctx, session, true)
 	if err != nil {
 		return output.SessionResponse{}, err
 	}
@@ -924,7 +926,7 @@ Examples:
 				watchMode:       watch,
 				interval:        time.Duration(interval) * time.Millisecond,
 			}
-			return runStatus(cmd.OutOrStdout(), args[0], opts)
+			return runStatus(cmd.Context(), cmd.OutOrStdout(), args[0], opts)
 		},
 	}
 	cmd.Flags().StringSliceVar(&tags, "tag", nil, "filter panes by tag")
@@ -939,14 +941,14 @@ Examples:
 	return cmd
 }
 
-func runStatus(w io.Writer, session string, opts statusOptions) error {
+func runStatus(ctx context.Context, w io.Writer, session string, opts statusOptions) error {
 	if opts.watchMode {
-		return runStatusWatch(w, session, opts)
+		return runStatusWatch(ctx, w, session, opts)
 	}
-	return runStatusOnce(w, session, opts)
+	return runStatusOnce(ctx, w, session, opts)
 }
 
-func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
+func runStatusOnce(ctx context.Context, w io.Writer, session string, opts statusOptions) error {
 	// Helper for JSON error output
 	outputError := func(err error) error {
 		if IsJSONOutput() {
@@ -960,7 +962,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 		if opts.filterPane >= 0 {
 			filterPane = &opts.filterPane
 		}
-		result, err := kernel.Run(context.Background(), "sessions.status", SessionStatusInput{
+		result, err := kernel.Run(ctx, "sessions.status", SessionStatusInput{
 			Session:         session,
 			Tags:            opts.tags,
 			ShowAssignments: opts.showAssignments,
@@ -1007,7 +1009,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
-	statusCtx, cancelStatus := context.WithTimeout(context.Background(), 6*time.Second)
+	statusCtx, cancelStatus := context.WithTimeout(ctx, 6*time.Second)
 	observation, err := status.NewSessionObserver(status.NewDetector()).Observe(statusCtx, session)
 	cancelStatus()
 	if err != nil {
@@ -1031,7 +1033,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 		panes = filtered
 	}
 
-	dir := resolveCommandProjectDirForSession(session, sessionInferred)
+	dir := resolveCommandProjectDirForSession(ctx, session, sessionInferred)
 
 	// Load handoff info (best-effort)
 	var handoffGoal, handoffNow, handoffStatus string
@@ -1063,6 +1065,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	codCount := counts.Codex
 	gmiCount := counts.Gemini
 	agyCount := counts.Antigravity
+	grokCount := counts.Grok
 	ollamaCount := counts.Ollama
 	cursorCount := counts.Cursor
 	windsurfCount := counts.Windsurf
@@ -1351,6 +1354,10 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 		agyColorKey, agyIcon := sessionPanePresentation(tmux.Pane{Type: tmux.AgentAntigravity}, t, ic)
 		fmt.Fprintf(w, "    %s%s Antigravity%s %s%d instance(s)%s\n", color(agyColorKey), agyIcon, reset, text, agyCount, reset)
 	}
+	if grokCount > 0 {
+		grokColorKey, grokIcon := sessionPanePresentation(tmux.Pane{Type: tmux.AgentGrok}, t, ic)
+		fmt.Fprintf(w, "    %s%s Grok%s    %s%d instance(s)%s\n", color(grokColorKey), grokIcon, reset, text, grokCount, reset)
+	}
 	if ollamaCount > 0 {
 		fmt.Fprintf(w, "    %s%s Ollama%s %s%d instance(s)%s\n", ollama, ic.Ollama, reset, text, ollamaCount, reset)
 	}
@@ -1375,7 +1382,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 		fmt.Fprintf(w, "    %s%s Other%s   %s%d pane(s)%s\n", color(otherColorKey), otherIcon, reset, text, otherCount, reset)
 	}
 
-	totalAgents := ccCount + codCount + gmiCount + agyCount + ollamaCount + cursorCount + windsurfCount + aiderCount + otherCount
+	totalAgents := ccCount + codCount + gmiCount + agyCount + grokCount + ollamaCount + cursorCount + windsurfCount + aiderCount + otherCount
 	if totalAgents == 0 {
 		fmt.Fprintf(w, "    %sNo agents running%s\n", overlay, reset)
 	}
@@ -1559,13 +1566,13 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	return nil
 }
 
-func runStatusWatch(w io.Writer, session string, opts statusOptions) error {
+func runStatusWatch(parent context.Context, w io.Writer, session string, opts statusOptions) error {
 	if opts.interval <= 0 {
 		opts.interval = 2 * time.Second
 	}
 	opts.watchMode = false
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	// Handle Ctrl+C
@@ -1607,7 +1614,7 @@ func runStatusWatch(w io.Writer, session string, opts statusOptions) error {
 			fmt.Print("\033[H\033[J")
 		}
 
-		if err := runStatusOnce(w, session, opts); err != nil {
+		if err := runStatusOnce(ctx, w, session, opts); err != nil {
 			fmt.Fprintf(w, "Error: %v\n", err)
 		}
 
@@ -1617,8 +1624,8 @@ func runStatusWatch(w io.Writer, session string, opts statusOptions) error {
 
 // updateSessionActivity updates the Agent Mail activity for a session.
 // This is non-blocking and silently ignores errors.
-func updateSessionActivity(sessionName string) {
-	projectKey, err := resolveExplicitProjectDirForSession(sessionName)
+func updateSessionActivity(parent context.Context, sessionName string) {
+	projectKey, err := resolveExplicitProjectDirForSessionContext(parent, sessionName)
 	if err != nil {
 		return
 	}
@@ -1628,7 +1635,7 @@ func updateSessionActivity(sessionName string) {
 	}
 
 	client := newAgentMailClient(projectKey)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 
 	_ = client.UpdateSessionActivity(ctx, sessionName, projectKey)
@@ -1727,6 +1734,10 @@ func modelNameForPane(p tmux.Pane) string {
 			if cfg.Models.DefaultGemini != "" {
 				return cfg.Models.DefaultGemini
 			}
+		case tmux.AgentGrok:
+			if cfg.Models.DefaultGrok != "" {
+				return cfg.Models.DefaultGrok
+			}
 		case tmux.AgentOllama:
 			if cfg.Models.DefaultOllama != "" {
 				return cfg.Models.DefaultOllama
@@ -1743,6 +1754,8 @@ func modelNameForPane(p tmux.Pane) string {
 		return defaults.DefaultCodex
 	case tmux.AgentGemini, tmux.AgentAntigravity:
 		return defaults.DefaultGemini
+	case tmux.AgentGrok:
+		return defaults.DefaultGrok
 	case tmux.AgentOllama:
 		return defaults.DefaultOllama
 	default:

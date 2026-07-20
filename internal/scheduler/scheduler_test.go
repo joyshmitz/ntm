@@ -310,18 +310,21 @@ func TestScheduler_SubmitAndExecute(t *testing.T) {
 	cfg.MaxConcurrent = 2
 	cfg.GlobalRateLimit.Rate = 100 // Fast for testing
 	cfg.GlobalRateLimit.MinInterval = 0
+	cfg.Headroom.Enabled = false // This test covers queue execution, not host resource policy.
 
 	scheduler := New(cfg)
 
 	var executed int64
 	var mu sync.Mutex
 	executedIDs := make(map[string]bool)
+	executedCh := make(chan struct{}, 5)
 
 	scheduler.SetExecutor(func(ctx context.Context, job *SpawnJob) error {
-		atomic.AddInt64(&executed, 1)
 		mu.Lock()
 		executedIDs[job.ID] = true
 		mu.Unlock()
+		atomic.AddInt64(&executed, 1)
+		executedCh <- struct{}{}
 		return nil
 	})
 
@@ -340,14 +343,24 @@ func TestScheduler_SubmitAndExecute(t *testing.T) {
 		}
 	}
 
-	// Wait for execution
-	deadline := time.Now().Add(5 * time.Second)
-	for atomic.LoadInt64(&executed) < 5 && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	for i := 0; i < 5; i++ {
+		select {
+		case <-executedCh:
+		case <-timer.C:
+			t.Fatalf("expected 5 executed, got %d before deadline", atomic.LoadInt64(&executed))
+		}
 	}
 
 	if atomic.LoadInt64(&executed) != 5 {
 		t.Errorf("expected 5 executed, got %d", atomic.LoadInt64(&executed))
+	}
+	mu.Lock()
+	executedIDCount := len(executedIDs)
+	mu.Unlock()
+	if executedIDCount != 5 {
+		t.Errorf("expected 5 distinct executed job IDs, got %d", executedIDCount)
 	}
 }
 

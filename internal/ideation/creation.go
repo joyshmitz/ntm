@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const defaultBeadCreationTimeout = 30 * time.Second
+
 type BeadCreationOptions struct {
 	ProjectDir      string
 	PlanVersion     string
@@ -207,7 +209,7 @@ func normalizeBeadCreationOptions(opts BeadCreationOptions, plan RoadmapPlan) Be
 		opts.PlanVersion = plan.PlanID
 	}
 	if opts.CommandTimeout <= 0 {
-		opts.CommandTimeout = defaultCollectorTimeout
+		opts.CommandTimeout = defaultBeadCreationTimeout
 	}
 	return opts
 }

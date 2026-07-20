@@ -108,11 +108,17 @@ func skipSlowRobotShortIntegrationTest(t *testing.T, reason string) {
 }
 
 func TestMain(m *testing.M) {
-	if err := testutil.IsolateTmuxTestProcess(); err != nil {
+	cleanupTmux, err := testutil.IsolateTmuxTestProcess()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "isolate robot tmux tests: %v\n", err)
 		os.Exit(1)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	if err := cleanupTmux(); err != nil {
+		fmt.Fprintf(os.Stderr, "clean up isolated robot tmux: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 func TestDetectAgentType(t *testing.T) {
@@ -1005,7 +1011,7 @@ func TestPrintHelp_UsesCurrentSharedModifierDescriptions(t *testing.T) {
 
 	for _, want := range []string{
 		"--since=VALUE   Time filter for commands that support it (history, diff, and summary accept duration or RFC3339; snapshot requires RFC3339; mail-check uses YYYY-MM-DD)",
-		"--type=TYPE     Agent type filter for commands that support it (claude, codex, gemini, cursor, windsurf, aider)",
+		"--type=TYPE     Agent type filter for commands that support it (claude, codex, antigravity, grok, gemini, cursor, windsurf, aider)",
 		"--timeout=VALUE Shared timeout for wait/ack/interrupt and spawn --spawn-wait",
 		"--strategy=NAME Strategy override for assign, route, and spawn --spawn-assign-work",
 		"--msg=TEXT      Shared message payload for send, ack echo detection, and interrupt retasks",
@@ -1871,6 +1877,7 @@ func TestAgentTypeString(t *testing.T) {
 		{tmux.AgentClaude, "claude"},
 		{tmux.AgentCodex, "codex"},
 		{tmux.AgentGemini, "gemini"},
+		{tmux.AgentGrok, "grok"},
 		{tmux.AgentCursor, "cursor"},
 		{tmux.AgentWindsurf, "windsurf"},
 		{tmux.AgentAider, "aider"},
@@ -1916,6 +1923,22 @@ func TestModelNameForPane(t *testing.T) {
 			cfg:  nil,
 			want: "llama3",
 		},
+		{
+			name: "grok alias config default",
+			pane: tmux.Pane{Type: tmux.AgentType("xai-grok-build")},
+			cfg: &config.Config{
+				Models: config.ModelsConfig{DefaultGrok: "account/grok-status"},
+			},
+			want: "account/grok-status",
+		},
+		{
+			name: "grok variant wins",
+			pane: tmux.Pane{Type: tmux.AgentGrok, Variant: "account/grok-override"},
+			cfg: &config.Config{
+				Models: config.ModelsConfig{DefaultGrok: "account/grok-status"},
+			},
+			want: "account/grok-override",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1957,6 +1980,12 @@ func TestResolveAgentType(t *testing.T) {
 		{"gemini-cli", "gemini"},
 		{"GEMINI", "gemini"},
 		{"GMI", "gemini"},
+
+		// Grok Build aliases
+		{"grok", "grok"},
+		{"grok-build", "grok"},
+		{"xai_grok_build", "grok"},
+		{"GROK", "grok"},
 
 		// Other known types
 		{"cursor", "cursor"},
@@ -4709,8 +4738,8 @@ func TestParseAgentTypes(t *testing.T) {
 		{"gemini gmi", "gmi", []string{"gemini"}},
 		{"gemini full", "gemini", []string{"gemini"}},
 		{"multiple", "cc,cod,gmi", []string{"claude", "codex", "gemini"}},
-		{"all agents", "all", []string{"claude", "codex", "gemini"}},
-		{"agents keyword", "agents", []string{"claude", "codex", "gemini"}},
+		{"all agents", "all", []string{"claude", "codex", "gemini", "grok"}},
+		{"agents keyword", "agents", []string{"claude", "codex", "gemini", "grok"}},
 		{"cursor", "cursor", []string{"cursor"}},
 		{"windsurf", "windsurf", []string{"windsurf"}},
 		{"windsurf short alias", "ws", []string{"windsurf"}},

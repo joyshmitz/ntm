@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,9 +43,14 @@ func TestAgentConfig_Total(t *testing.T) {
 			want:   3,
 		},
 		{
+			name:   "grok only",
+			config: AgentConfig{Grok: 3},
+			want:   3,
+		},
+		{
 			name:   "all types",
-			config: AgentConfig{Claude: 2, Codex: 1, Gemini: 1, User: 1},
-			want:   5,
+			config: AgentConfig{Claude: 2, Codex: 1, Gemini: 1, Grok: 2, User: 1},
+			want:   7,
 		},
 		{
 			name:   "typical setup",
@@ -88,6 +94,40 @@ func TestPaneStateHasFreshSessionBindingFailsClosed(t *testing.T) {
 				t.Fatalf("HasFreshSessionBinding = %v, want %v for %+v", got, test.wantUsable, test.pane)
 			}
 		})
+	}
+}
+
+func TestValidateAutomatedRelaunchRejectsGrokSavedBatch(t *testing.T) {
+	for _, state := range []*SessionState{
+		{Panes: []PaneState{{Index: 1, AgentType: "grok"}}},
+		{Panes: []PaneState{{Index: 1, AgentType: "cc"}, {Index: 2, AgentType: "grok-build"}}},
+	} {
+		if err := ValidateAutomatedRelaunch(state); !errors.Is(err, ErrAutomatedRelaunchNotImplemented) {
+			t.Fatalf("ValidateAutomatedRelaunch() error = %v, want Grok relaunch sentinel", err)
+		}
+	}
+
+	if err := ValidateAutomatedRelaunch(&SessionState{Panes: []PaneState{{AgentType: "cc"}, {AgentType: "cod"}}}); err != nil {
+		t.Fatalf("ValidateAutomatedRelaunch() supported batch error = %v", err)
+	}
+}
+
+func TestAutomatedRelaunchDefensesRejectGrokBeforeTmuxMutation(t *testing.T) {
+	state := &SessionState{
+		Name:    "invalid/session/name",
+		WorkDir: t.TempDir(),
+		Panes: []PaneState{{
+			Index:     1,
+			AgentType: "grok",
+			Command:   "claude",
+		}},
+	}
+
+	if err := RestoreAgents(state.Name, state, AgentCommands{Claude: "claude"}); !errors.Is(err, ErrAutomatedRelaunchNotImplemented) {
+		t.Fatalf("RestoreAgents() error = %v, want Grok relaunch sentinel before pane lookup", err)
+	}
+	if result, err := Resume(state, AgentCommands{Claude: "claude"}, ResumeOptions{Force: true}); !errors.Is(err, ErrAutomatedRelaunchNotImplemented) || result != nil {
+		t.Fatalf("Resume() = (%+v, %v), want nil and Grok relaunch sentinel before topology restore", result, err)
 	}
 }
 
@@ -808,6 +848,7 @@ func TestCountAgents(t *testing.T) {
 			{Type: tmux.AgentClaude},
 			{Type: tmux.AgentCodex},
 			{Type: tmux.AgentGemini},
+			{Type: tmux.AgentGrok},
 			{Type: tmux.AgentCursor},
 			{Type: tmux.AgentWindsurf},
 			{Type: tmux.AgentAider},
@@ -823,6 +864,9 @@ func TestCountAgents(t *testing.T) {
 		if cfg.Gemini != 1 {
 			t.Errorf("Gemini = %d, want 1", cfg.Gemini)
 		}
+		if cfg.Grok != 1 {
+			t.Errorf("Grok = %d, want 1", cfg.Grok)
+		}
 		if cfg.Cursor != 1 {
 			t.Errorf("Cursor = %d, want 1", cfg.Cursor)
 		}
@@ -835,8 +879,8 @@ func TestCountAgents(t *testing.T) {
 		if cfg.User != 1 {
 			t.Errorf("User = %d, want 1", cfg.User)
 		}
-		if cfg.Total() != 7 {
-			t.Errorf("Total() = %d, want 7", cfg.Total())
+		if cfg.Total() != 8 {
+			t.Errorf("Total() = %d, want 8", cfg.Total())
 		}
 	})
 
@@ -1161,7 +1205,8 @@ func TestSessionState_WindowsRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	orig := &SessionState{
-		Name: "demo",
+		Name:   "demo",
+		Agents: AgentConfig{Claude: 1, Grok: 2},
 		Panes: []PaneState{
 			{Index: 0, WindowIndex: 0, AgentType: "cc", Model: "opus", Command: "claude --model opus", Active: true},
 		},
@@ -1191,5 +1236,11 @@ func TestSessionState_WindowsRoundTrip(t *testing.T) {
 	}
 	if got.Panes[0].Command != "claude --model opus" {
 		t.Errorf("pane Command lost in round-trip: %q", got.Panes[0].Command)
+	}
+	if got.Agents.Grok != 2 || got.Agents.Total() != 3 {
+		t.Errorf("Grok agent counts lost in round-trip: %+v", got.Agents)
+	}
+	if !strings.Contains(string(data), `"grok":2`) {
+		t.Errorf("serialized session missing Grok count: %s", data)
 	}
 }

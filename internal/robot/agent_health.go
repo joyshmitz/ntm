@@ -224,7 +224,7 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 		Verbose:       opts.Verbose,
 	}
 
-	isWorkingResult, err := GetIsWorking(isWorkingOpts)
+	isWorkingResult, err := GetIsWorking(context.Background(), isWorkingOpts)
 	if err != nil {
 		return output, err
 	}
