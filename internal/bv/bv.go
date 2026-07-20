@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -955,6 +956,66 @@ func waitForBeadsRetry(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+// beadsDBCorruptionSignatures are the SQLite corruption signatures that br
+// itself recognizes and auto-repairs by rebuilding the database from the
+// authoritative JSONL (beads_rust routes them through
+// retry_mutation_with_jsonl_recovery). NTM's guarded CAS-claim paths bypass
+// br's CLI wrapper with direct SQL, so they must trigger the same recovery
+// themselves instead of stalling the self-feeder on every scan (#227).
+var beadsDBCorruptionSignatures = []string{
+	"database disk image is malformed",
+	"malformed database schema",
+	"file is not a database",
+	"database corruption",
+}
+
+// isBeadsDBCorruptionError reports whether err carries a recognized SQLite
+// corruption signature anywhere in its chain's message.
+func isBeadsDBCorruptionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, signature := range beadsDBCorruptionSignatures {
+		if strings.Contains(message, signature) {
+			return true
+		}
+	}
+	return false
+}
+
+// recoverCorruptBeadsDatabase runs br's supported JSONL-authoritative repair
+// (`br sync --rebuild`), which recreates the SQLite index from JSONL and
+// removes orphaned DB entries.
+func recoverCorruptBeadsDatabase(ctx context.Context, normalizedDir string) error {
+	_, err := runBdContext(ctx, normalizedDir, false, "sync", "--rebuild", "--json")
+	return err
+}
+
+// withBeadsCorruptionRecovery executes op and, when it fails with a
+// recognized corruption signature, rebuilds the Beads database from JSONL
+// once and retries op exactly once. Any other error, and any error from the
+// bounded retry itself, is returned unchanged so callers keep their existing
+// failure semantics. This mirrors br's own recovery for direct CLI mutations
+// and keeps a transient index corruption from becoming a persistent
+// assignment-factory stall (#227).
+func withBeadsCorruptionRecovery[T any](ctx context.Context, normalizedDir string, op func() (T, error)) (T, error) {
+	result, err := op()
+	if err == nil || !isBeadsDBCorruptionError(err) {
+		return result, err
+	}
+	slog.Warn("beads database corruption detected during guarded mutation; rebuilding from JSONL",
+		"dir", normalizedDir, "error", err)
+	if rebuildErr := recoverCorruptBeadsDatabase(ctx, normalizedDir); rebuildErr != nil {
+		var zero T
+		return zero, fmt.Errorf(
+			"beads database corruption detected (%v); rebuild-from-JSONL recovery failed: %w", err, rebuildErr)
+	}
+	slog.Info("beads database rebuilt from JSONL after corruption; retrying guarded mutation once",
+		"dir", normalizedDir)
+	return op()
+}
+
 var ErrBeadAlreadyClaimed = errors.New("bead is already claimed")
 
 // ErrBeadTerminal means a guarded terminal-generation claim observed a closed
@@ -1213,6 +1274,15 @@ func ClaimBeadForAssignmentWithOperatorGatedLabels(ctx context.Context, dir, bea
 	if err != nil {
 		return BeadClaimResult{}, err
 	}
+	return withBeadsCorruptionRecovery(ctx, normalizedDir, func() (BeadClaimResult, error) {
+		return claimBeadForAssignmentAttempt(ctx, normalizedDir, beadID, actor, gatedLabels)
+	})
+}
+
+// claimBeadForAssignmentAttempt is a single guarded assignment-claim attempt;
+// ClaimBeadForAssignmentWithOperatorGatedLabels wraps it with the bounded
+// corruption rebuild-and-retry (#227).
+func claimBeadForAssignmentAttempt(ctx context.Context, normalizedDir, beadID, actor string, gatedLabels []string) (BeadClaimResult, error) {
 	infoOutput, err := runBdContext(ctx, normalizedDir, false, "info", "--json", "--no-auto-import", "--no-auto-flush")
 	if err != nil {
 		return BeadClaimResult{}, fmt.Errorf("resolve Beads database for assignment claim: %w", err)
@@ -1274,6 +1344,15 @@ func ReleaseBeadClaim(ctx context.Context, dir, beadID, actor string) (bool, err
 	if err != nil {
 		return false, err
 	}
+	return withBeadsCorruptionRecovery(ctx, normalizedDir, func() (bool, error) {
+		return releaseBeadClaimAttempt(ctx, normalizedDir, beadID, actor)
+	})
+}
+
+// releaseBeadClaimAttempt is a single guarded claim-release attempt;
+// ReleaseBeadClaim wraps it with the bounded corruption rebuild-and-retry
+// (#227).
+func releaseBeadClaimAttempt(ctx context.Context, normalizedDir, beadID, actor string) (bool, error) {
 	infoOutput, err := runBdContext(ctx, normalizedDir, false, "info", "--json", "--no-auto-import", "--no-auto-flush")
 	if err != nil {
 		return false, fmt.Errorf("resolve Beads database for claim release: %w", err)
@@ -1421,6 +1500,15 @@ func claimBeadNonTerminalMode(ctx context.Context, dir, beadID, actor string, ex
 	if err != nil {
 		return BeadClaimResult{}, err
 	}
+	return withBeadsCorruptionRecovery(ctx, normalizedDir, func() (BeadClaimResult, error) {
+		return claimBeadNonTerminalAttempt(ctx, normalizedDir, beadID, actor, expectedStaleUpdatedAt, gatedLabels)
+	})
+}
+
+// claimBeadNonTerminalAttempt is a single guarded non-terminal claim attempt;
+// claimBeadNonTerminalMode wraps it with the bounded corruption
+// rebuild-and-retry (#227).
+func claimBeadNonTerminalAttempt(ctx context.Context, normalizedDir, beadID, actor string, expectedStaleUpdatedAt time.Time, gatedLabels []string) (BeadClaimResult, error) {
 	infoOutput, err := runBdContext(ctx, normalizedDir, false, "info", "--json", "--no-auto-import", "--no-auto-flush")
 	if err != nil {
 		return BeadClaimResult{}, fmt.Errorf("resolve Beads database for guarded claim: %w", err)

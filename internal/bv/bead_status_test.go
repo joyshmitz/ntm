@@ -1,6 +1,7 @@
 package bv
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1048,6 +1049,112 @@ func TestReleaseBeadClaimLeavesDifferentOwnerAndPreservesTerminalStatus(t *testi
 	assertRealBRStatusAndAssignee(t, dir, terminalID, "closed", "")
 	if released, err := ReleaseBeadClaim(t.Context(), dir, terminalID, actor); err != nil || released {
 		t.Fatalf("terminal idempotent release=%v error=%v", released, err)
+	}
+}
+
+// corruptRealBRIssuesRootPage overwrites the issues table's b-tree root page
+// with a bogus interior-page header so the next UPDATE against issues fails
+// with SQLITE_CORRUPT ("database disk image is malformed (11)") — the exact
+// live signature from #227 — while leaving the file header readable.
+func corruptRealBRIssuesRootPage(t *testing.T, databasePath string) {
+	t.Helper()
+	database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)"))
+	if err != nil {
+		t.Fatalf("open Beads database for corruption setup: %v", err)
+	}
+	var rootPage int64
+	var pageSize int64
+	if err := database.QueryRow("SELECT rootpage FROM sqlite_master WHERE name = 'issues'").Scan(&rootPage); err != nil {
+		database.Close()
+		t.Fatalf("resolve issues root page: %v", err)
+	}
+	if err := database.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+		database.Close()
+		t.Fatalf("resolve page size: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close database before corruption: %v", err)
+	}
+	file, err := os.OpenFile(databasePath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open database file for corruption: %v", err)
+	}
+	defer file.Close()
+	garbage := append([]byte{0x05}, bytes.Repeat([]byte{0xFF}, 100)...)
+	if _, err := file.WriteAt(garbage, (rootPage-1)*pageSize); err != nil {
+		t.Fatalf("corrupt issues root page: %v", err)
+	}
+}
+
+// TestGuardedClaimRebuildsAndRetriesOnCorruption is the #227 regression
+// guard: a corrupted beads SQLite index used to surface from the guarded
+// CAS-claim as a permanent "database disk image is malformed (11)" assignment
+// failure, stalling the self-feeder until a human ran `br sync --rebuild`.
+// The claim paths now trigger that rebuild themselves and retry once.
+func TestGuardedClaimRebuildsAndRetriesOnCorruption(t *testing.T) {
+	requireRealBR(t)
+
+	t.Run("assignment claim recovers", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		beadID := createRealBRBead(t, dir, "claim across corruption")
+		databasePath := realBRDatabasePath(t, dir)
+		corruptRealBRIssuesRootPage(t, databasePath)
+
+		claim, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "RecoveryActor")
+		if err != nil {
+			t.Fatalf("claim across corruption: %v", err)
+		}
+		if claim.ID != beadID || claim.Status != "in_progress" || claim.Actor != "RecoveryActor" {
+			t.Fatalf("claim=%+v, want %s in_progress by RecoveryActor", claim, beadID)
+		}
+		assertRealBRStatusAndAssignee(t, dir, beadID, "in_progress", "RecoveryActor")
+	})
+
+	t.Run("claim release recovers", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		beadID := createRealBRBead(t, dir, "release across corruption")
+		if _, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "RecoveryActor"); err != nil {
+			t.Fatalf("initial claim: %v", err)
+		}
+		databasePath := realBRDatabasePath(t, dir)
+		corruptRealBRIssuesRootPage(t, databasePath)
+
+		released, err := ReleaseBeadClaim(t.Context(), dir, beadID, "RecoveryActor")
+		if err != nil {
+			t.Fatalf("release across corruption: %v", err)
+		}
+		if !released {
+			t.Fatal("release across corruption returned released=false")
+		}
+		assertRealBRStatusAndAssignee(t, dir, beadID, "open", "")
+	})
+}
+
+func TestIsBeadsDBCorruptionError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"malformed image", fmt.Errorf("compare-and-set guarded Beads claim: database disk image is malformed (11)"), true},
+		{"wrapped malformed schema", fmt.Errorf("outer: %w", errors.New("malformed database schema (users)")), true},
+		{"not a database", errors.New("file is not a database"), true},
+		{"free-page corruption class", errors.New("database corruption detected by pager"), true},
+		{"already claimed", ErrBeadAlreadyClaimed, false},
+		{"generic busy", errors.New("database is locked"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isBeadsDBCorruptionError(tc.err); got != tc.want {
+				t.Fatalf("isBeadsDBCorruptionError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 
