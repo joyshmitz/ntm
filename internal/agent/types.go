@@ -4,6 +4,7 @@
 package agent
 
 import (
+	"errors"
 	"strings"
 	"time"
 )
@@ -25,6 +26,23 @@ const (
 	AgentTypeUser        AgentType = "user"     // User/Shell pane
 	AgentTypeUnknown     AgentType = "unknown"  // Unable to determine agent type
 )
+
+// GrokPhaseOneCapabilityHint describes the intentionally narrow Grok Build
+// integration boundary. Keep robot and saved-session errors aligned with this
+// capability contract.
+const GrokPhaseOneCapabilityHint = "phase-one Grok Build supports launch, model and effort selection, discovery, counts, and topology-only restore; automated prompt delivery, restart, and restore-time relaunch are not implemented"
+
+// GrokPromptDeliveryCapabilityHint is the actionable message returned by
+// prompt-delivery surfaces when a Grok Build pane is in the target batch.
+const GrokPromptDeliveryCapabilityHint = "automated Grok Build prompt delivery is not implemented in phase one"
+
+// ErrAutomatedRelaunchNotImplemented is returned whenever an operation would
+// automatically stop, restart, restore, or resume a Grok Build process.
+var ErrAutomatedRelaunchNotImplemented = errors.New(GrokPhaseOneCapabilityHint)
+
+// ErrAutomatedPromptDeliveryNotImplemented is returned before any automated
+// input is written to a Grok Build pane.
+var ErrAutomatedPromptDeliveryNotImplemented = errors.New(GrokPromptDeliveryCapabilityHint)
 
 // String returns the agent type as a string.
 func (t AgentType) String() string {
@@ -138,6 +156,26 @@ func (t AgentType) IsValid() bool {
 	default:
 		return false
 	}
+}
+
+// ValidateAutomatedRelaunch fails closed for agent types whose interactive
+// lifecycle protocol is not implemented. Callers must run this preflight for
+// an entire target batch before mutating any pane or session.
+func (t AgentType) ValidateAutomatedRelaunch() error {
+	if t.Canonical() == AgentTypeGrok {
+		return ErrAutomatedRelaunchNotImplemented
+	}
+	return nil
+}
+
+// ValidateAutomatedPromptDelivery fails closed for agent types whose
+// interactive input protocol is not implemented. Callers must preflight the
+// complete target batch before writing input to any pane.
+func (t AgentType) ValidateAutomatedPromptDelivery() error {
+	if t.Canonical() == AgentTypeGrok {
+		return ErrAutomatedPromptDeliveryNotImplemented
+	}
+	return nil
 }
 
 // NeedsDoubleEnter returns true if the agent type typically requires a double-Enter

@@ -3,6 +3,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,33 @@ var (
 	worktreeGitCommandTimeout   = 5 * time.Second
 	worktreeGitCommandWaitDelay = 500 * time.Millisecond
 )
+
+func validateWorktreeContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("worktree operation requires a command context")
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("worktree operation canceled: %w", err)
+	}
+	return nil
+}
+
+func newWorktreeGitCommandContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, nil, err
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, worktreeGitCommandTimeout)
+	return commandCtx, cancel, nil
+}
+
+func worktreeCommandError(ctx context.Context, commandErr error) error {
+	if ctx != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+	}
+	return commandErr
+}
 
 func isAlreadySafeWorktreeKey(value string) bool {
 	if value == "" || value == "." || value == ".." {
@@ -220,10 +248,14 @@ type WorktreeManager struct {
 	baseRepo   string
 }
 
-// NewWorktreeManager creates a new worktree manager for a project
-func NewWorktreeManager(projectDir string) (*WorktreeManager, error) {
+// NewWorktreeManager creates a new worktree manager for a project.
+func NewWorktreeManager(ctx context.Context, projectDir string) (*WorktreeManager, error) {
 	// Verify this is a git repository
-	if !IsGitRepository(projectDir) {
+	isRepository, err := IsGitRepository(ctx, projectDir)
+	if err != nil {
+		return nil, fmt.Errorf("check git repository: %w", err)
+	}
+	if !isRepository {
 		return nil, fmt.Errorf("directory is not a git repository: %s", projectDir)
 	}
 
@@ -245,6 +277,10 @@ type WorktreeInfo struct {
 
 // ProvisionWorktree creates an isolated worktree for an agent
 func (wm *WorktreeManager) ProvisionWorktree(ctx context.Context, agentName, sessionID string) (*WorktreeInfo, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
+	}
+
 	agentKey := canonicalAgentKey(agentName)
 	sessionKey := canonicalSessionKey(sessionID)
 
@@ -253,18 +289,18 @@ func (wm *WorktreeManager) ProvisionWorktree(ctx context.Context, agentName, ses
 	workingDir := filepath.Join(wm.baseRepo, "..", worktreeName)
 
 	// Check if worktree already exists
-	if exists, err := wm.worktreeExists(worktreeName); err != nil {
+	if exists, err := wm.worktreeExists(ctx, worktreeName); err != nil {
 		return nil, fmt.Errorf("failed to check worktree existence: %w", err)
 	} else if exists {
 		// Return existing worktree info
-		return wm.getWorktreeInfo(worktreeName)
+		return wm.getWorktreeInfo(ctx, worktreeName)
 	}
 
 	// Create a new branch for this agent
 	branchName := fmt.Sprintf("agent/%s/%s", agentKey, sessionKey)
 
 	// Get current branch and commit for base
-	currentBranch, err := wm.getCurrentBranch()
+	currentBranch, err := wm.getCurrentBranch(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current branch: %w", err)
 	}
@@ -273,13 +309,26 @@ func (wm *WorktreeManager) ProvisionWorktree(ctx context.Context, agentName, ses
 	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "-b", branchName, workingDir, currentBranch)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = wm.baseRepo
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, commandErr := cmd.CombinedOutput()
+	if err := worktreeCommandError(ctx, commandErr); err != nil {
+		if retained := retainedProvisionedWorktreeInfo(workingDir, branchName, agentKey); retained != nil {
+			return retained, fmt.Errorf(
+				"failed to create worktree; checkout retained at %s on branch %s: %w\nOutput: %s",
+				retained.Path, retained.Branch, err, string(output),
+			)
+		}
 		return nil, fmt.Errorf("failed to create worktree: %w\nOutput: %s", err, string(output))
 	}
 
 	// Get commit hash
-	commit, err := wm.getCommitHash(workingDir)
+	commit, err := wm.getCommitHash(ctx, workingDir)
 	if err != nil {
+		if retained := retainedProvisionedWorktreeInfo(workingDir, branchName, agentKey); retained != nil {
+			return retained, fmt.Errorf(
+				"failed to get commit hash; checkout retained at %s on branch %s: %w",
+				retained.Path, retained.Branch, err,
+			)
+		}
 		return nil, fmt.Errorf("failed to get commit hash: %w", err)
 	}
 
@@ -297,19 +346,34 @@ func (wm *WorktreeManager) ProvisionWorktree(ctx context.Context, agentName, ses
 
 // ListWorktrees returns all worktrees associated with agents
 func (wm *WorktreeManager) ListWorktrees(ctx context.Context) ([]*WorktreeInfo, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
+	}
+
 	cmd := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain")
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = wm.baseRepo
-	output, err := cmd.CombinedOutput()
-	if err != nil {
+	output, commandErr := cmd.CombinedOutput()
+	if err := worktreeCommandError(ctx, commandErr); err != nil {
 		return nil, fmt.Errorf("failed to list worktrees: %w", err)
 	}
 
-	return wm.parseWorktreeList(string(output))
+	worktrees, err := wm.parseWorktreeList(string(output))
+	if err != nil {
+		return nil, err
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, fmt.Errorf("worktree listing canceled: %w", err)
+	}
+	return worktrees, nil
 }
 
 // RemoveWorktree removes a worktree and its associated branch
 func (wm *WorktreeManager) RemoveWorktree(ctx context.Context, agentName, sessionID string) error {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return err
+	}
+
 	agentKey := canonicalAgentKey(agentName)
 	sessionKey := canonicalSessionKey(sessionID)
 	worktreeName := worktreeNameForKeys(agentKey, sessionKey)
@@ -320,15 +384,25 @@ func (wm *WorktreeManager) RemoveWorktree(ctx context.Context, agentName, sessio
 }
 
 func (wm *WorktreeManager) removeWorktreePathAndBranch(ctx context.Context, workingDir, branchName string) error {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return err
+	}
+
 	// Remove the worktree
 	cmd := exec.CommandContext(ctx, "git", "worktree", "remove", workingDir)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = wm.baseRepo
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, commandErr := cmd.CombinedOutput(); commandErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("failed to remove worktree: %w\nOutput: %s", ctxErr, string(output))
+		}
 		// If worktree doesn't exist, that's OK
 		if !strings.Contains(string(output), "not a working tree") {
-			return fmt.Errorf("failed to remove worktree: %w\nOutput: %s", err, string(output))
+			return fmt.Errorf("failed to remove worktree: %w\nOutput: %s", commandErr, string(output))
 		}
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return fmt.Errorf("worktree removal canceled before branch cleanup: %w", err)
 	}
 
 	// Remove the branch
@@ -336,12 +410,18 @@ func (wm *WorktreeManager) removeWorktreePathAndBranch(ctx context.Context, work
 		cmd = exec.CommandContext(ctx, "git", "branch", "-D", branchName)
 		cmd.WaitDelay = 2 * time.Second
 		cmd.Dir = wm.baseRepo
-		if output, err := cmd.CombinedOutput(); err != nil {
+		if output, commandErr := cmd.CombinedOutput(); commandErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("failed to remove branch: %w\nOutput: %s", ctxErr, string(output))
+			}
 			// If branch doesn't exist, that's OK
 			if !strings.Contains(string(output), "not found") {
-				return fmt.Errorf("failed to remove branch: %w\nOutput: %s", err, string(output))
+				return fmt.Errorf("failed to remove branch: %w\nOutput: %s", commandErr, string(output))
 			}
 		}
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return fmt.Errorf("worktree removal canceled: %w", err)
 	}
 
 	return nil
@@ -349,6 +429,10 @@ func (wm *WorktreeManager) removeWorktreePathAndBranch(ctx context.Context, work
 
 // CleanupStaleWorktrees removes worktrees that haven't been used recently
 func (wm *WorktreeManager) CleanupStaleWorktrees(ctx context.Context, maxAge time.Duration) error {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return err
+	}
+
 	worktrees, err := wm.ListWorktrees(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list worktrees: %w", err)
@@ -357,16 +441,25 @@ func (wm *WorktreeManager) CleanupStaleWorktrees(ctx context.Context, maxAge tim
 	cutoff := time.Now().Add(-maxAge)
 
 	for _, wt := range worktrees {
+		if err := validateWorktreeContext(ctx); err != nil {
+			return fmt.Errorf("stale worktree cleanup canceled: %w", err)
+		}
 		if wt.LastUsed.Before(cutoff) && strings.HasPrefix(wt.Branch, "agent/") {
 			// Extract agent and session info from branch name
 			parts := strings.Split(wt.Branch, "/")
 			if len(parts) >= 3 {
 				if err := wm.removeWorktreePathAndBranch(ctx, wt.Path, wt.Branch); err != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return fmt.Errorf("stale worktree cleanup canceled: %w", ctxErr)
+					}
 					// Log error but continue cleanup
 					fmt.Printf("Warning: failed to remove stale worktree for %s: %v\n", wt.Path, err)
 				}
 			}
 		}
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return fmt.Errorf("stale worktree cleanup canceled: %w", err)
 	}
 
 	return nil
@@ -374,12 +467,20 @@ func (wm *WorktreeManager) CleanupStaleWorktrees(ctx context.Context, maxAge tim
 
 // SyncWorktree ensures a worktree is up-to-date with its base branch
 func (wm *WorktreeManager) SyncWorktree(ctx context.Context, worktreePath string) error {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return err
+	}
+
 	// Fetch latest changes
 	cmd := exec.CommandContext(ctx, "git", "fetch", "origin")
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = worktreePath
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, commandErr := cmd.CombinedOutput()
+	if err := worktreeCommandError(ctx, commandErr); err != nil {
 		return fmt.Errorf("failed to fetch: %w\nOutput: %s", err, string(output))
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return fmt.Errorf("worktree sync canceled before merge: %w", err)
 	}
 
 	// Get the base branch (what this agent branch was created from)
@@ -387,7 +488,8 @@ func (wm *WorktreeManager) SyncWorktree(ctx context.Context, worktreePath string
 	cmd = exec.CommandContext(ctx, "git", "merge", "origin/main")
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = worktreePath
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, commandErr = cmd.CombinedOutput()
+	if err := worktreeCommandError(ctx, commandErr); err != nil {
 		return fmt.Errorf("failed to merge base branch: %w\nOutput: %s", err, string(output))
 	}
 
@@ -396,24 +498,60 @@ func (wm *WorktreeManager) SyncWorktree(ctx context.Context, worktreePath string
 
 // Helper methods
 
-// IsGitRepository checks if a directory is a git repository.
-// Returns false for empty dir to prevent false positives from CWD.
-func IsGitRepository(dir string) bool {
-	if dir == "" {
-		return false
+// IsGitRepository checks if a directory is a git repository. It returns false
+// for an empty directory instead of accidentally inspecting the process CWD.
+func IsGitRepository(ctx context.Context, dir string) (bool, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return false, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if dir == "" {
+		return false, nil
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect repository directory: %w", err)
+	}
+	if !dirInfo.IsDir() {
+		return false, nil
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return false, err
+	}
+	commandCtx, cancel, err := newWorktreeGitCommandContext(ctx)
+	if err != nil {
+		return false, err
+	}
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	cmd := exec.CommandContext(commandCtx, "git", "rev-parse", "--git-dir")
+	cmd.WaitDelay = worktreeGitCommandWaitDelay
 	cmd.Dir = dir
-	err := cmd.Run()
-	return err == nil
+	commandErr := cmd.Run()
+	if err := worktreeCommandError(commandCtx, commandErr); err != nil {
+		if commandCtx.Err() != nil {
+			return false, err
+		}
+		var exitErr *exec.ExitError
+		if errors.As(commandErr, &exitErr) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // worktreeExists checks if a worktree with the given name exists
-func (wm *WorktreeManager) worktreeExists(name string) (bool, error) {
+func (wm *WorktreeManager) worktreeExists(ctx context.Context, name string) (bool, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return false, err
+	}
 	worktreePath := filepath.Join(wm.baseRepo, ".git", "worktrees", name)
 	_, err := os.Stat(worktreePath)
+	if ctxErr := validateWorktreeContext(ctx); ctxErr != nil {
+		return false, ctxErr
+	}
 	if err == nil {
 		return true, nil
 	}
@@ -423,52 +561,84 @@ func (wm *WorktreeManager) worktreeExists(name string) (bool, error) {
 	return false, err
 }
 
+func retainedProvisionedWorktreeInfo(workingDir, branchName, agentName string) *WorktreeInfo {
+	pathInfo, err := os.Stat(workingDir)
+	if err != nil || !pathInfo.IsDir() {
+		return nil
+	}
+	gitInfo, err := os.Stat(filepath.Join(workingDir, ".git"))
+	if err != nil || gitInfo.IsDir() {
+		return nil
+	}
+	now := time.Now()
+	return &WorktreeInfo{
+		Path:      workingDir,
+		Branch:    branchName,
+		Agent:     agentName,
+		CreatedAt: now,
+		LastUsed:  pathInfo.ModTime(),
+	}
+}
+
 // getCurrentBranch returns the current branch name
-func (wm *WorktreeManager) getCurrentBranch() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitCommandTimeout)
+func (wm *WorktreeManager) getCurrentBranch(ctx context.Context) (string, error) {
+	commandCtx, cancel, err := newWorktreeGitCommandContext(ctx)
+	if err != nil {
+		return "", err
+	}
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd := exec.CommandContext(commandCtx, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.WaitDelay = worktreeGitCommandWaitDelay
 	cmd.Dir = wm.baseRepo
-	output, err := cmd.Output()
-	if err != nil {
+	output, commandErr := cmd.Output()
+	if err := worktreeCommandError(commandCtx, commandErr); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
 }
 
 // getCommitHash returns the current commit hash for a worktree
-func (wm *WorktreeManager) getCommitHash(worktreePath string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitCommandTimeout)
+func (wm *WorktreeManager) getCommitHash(ctx context.Context, worktreePath string) (string, error) {
+	commandCtx, cancel, err := newWorktreeGitCommandContext(ctx)
+	if err != nil {
+		return "", err
+	}
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd := exec.CommandContext(commandCtx, "git", "rev-parse", "HEAD")
 	cmd.WaitDelay = worktreeGitCommandWaitDelay
 	cmd.Dir = worktreePath
-	output, err := cmd.Output()
-	if err != nil {
+	output, commandErr := cmd.Output()
+	if err := worktreeCommandError(commandCtx, commandErr); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
 }
 
 // getWorktreeInfo retrieves information about an existing worktree
-func (wm *WorktreeManager) getWorktreeInfo(name string) (*WorktreeInfo, error) {
+func (wm *WorktreeManager) getWorktreeInfo(ctx context.Context, name string) (*WorktreeInfo, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
+	}
 	workingDir := filepath.Join(wm.baseRepo, "..", name)
 
 	// Get branch name
-	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitCommandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	commandCtx, cancel, err := newWorktreeGitCommandContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(commandCtx, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.WaitDelay = worktreeGitCommandWaitDelay
 	cmd.Dir = workingDir
-	branchOutput, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get branch: %w", err)
+	branchOutput, commandErr := cmd.Output()
+	commandErr = worktreeCommandError(commandCtx, commandErr)
+	cancel()
+	if commandErr != nil {
+		return nil, fmt.Errorf("failed to get branch: %w", commandErr)
 	}
 	branch := strings.TrimSpace(string(branchOutput))
 
 	// Get commit hash
-	commit, err := wm.getCommitHash(workingDir)
+	commit, err := wm.getCommitHash(ctx, workingDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit: %w", err)
 	}
@@ -489,6 +659,9 @@ func (wm *WorktreeManager) getWorktreeInfo(name string) (*WorktreeInfo, error) {
 	lastUsed := time.Now()
 	if err == nil {
 		lastUsed = stat.ModTime()
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
 	}
 
 	return &WorktreeInfo{

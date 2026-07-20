@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,21 +12,49 @@ import (
 	"time"
 )
 
+const worktreeIntegrationTestTimeout = 2 * time.Minute
+
+func runGitTestCommand(t *testing.T, dir string, args ...string) ([]byte, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), worktreeIntegrationTestTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Dir = dir
+	return cmd.CombinedOutput()
+}
+
+// sequentialWorktreeIntegrationContext raises the production helper timeout
+// only while a non-parallel integration test is running. Top-level sequential
+// tests never overlap package parallel tests, so the scoped override is
+// race-free and is restored before any parallel test resumes.
+func sequentialWorktreeIntegrationContext(t *testing.T) context.Context {
+	t.Helper()
+	originalCommandTimeout := worktreeGitCommandTimeout
+	worktreeGitCommandTimeout = worktreeIntegrationTestTimeout
+	t.Cleanup(func() {
+		worktreeGitCommandTimeout = originalCommandTimeout
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), worktreeIntegrationTestTimeout)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 // setupGitRepo creates a temporary git repo with an initial commit.
 func setupGitRepo(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
 
 	cmds := [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test"},
-		{"git", "commit", "--allow-empty", "-m", "init"},
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+		{"commit", "--allow-empty", "-m", "init"},
 	}
 	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = tmp
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := runGitTestCommand(t, tmp, args...); err != nil {
 			t.Skipf("%v failed: %v\n%s", args, err, out)
 		}
 	}
@@ -50,18 +79,75 @@ func TestIsGitRepository(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	if IsGitRepository(tmp) {
+	missing := filepath.Join(tmp, "missing")
+	if isRepository, err := IsGitRepository(t.Context(), missing); err != nil {
+		t.Fatalf("IsGitRepository missing dir: %v", err)
+	} else if isRepository {
+		t.Fatal("expected missing dir to not be a git repo")
+	}
+
+	if isRepository, err := IsGitRepository(t.Context(), tmp); err != nil {
+		t.Fatalf("IsGitRepository temp dir: %v", err)
+	} else if isRepository {
 		t.Fatal("expected temp dir to not be a git repo")
 	}
 
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmp
-	if err := cmd.Run(); err != nil {
-		t.Skipf("git init failed, skipping test: %v", err)
+	if out, err := runGitTestCommand(t, tmp, "init"); err != nil {
+		t.Skipf("git init failed, skipping test: %v\n%s", err, out)
 	}
 
-	if !IsGitRepository(tmp) {
+	if isRepository, err := IsGitRepository(t.Context(), tmp); err != nil {
+		t.Fatalf("IsGitRepository initialized repo: %v", err)
+	} else if !isRepository {
 		t.Fatal("expected directory to be detected as git repo after init")
+	}
+}
+
+func TestIsGitRepositoryRequiresAndPropagatesCallerContext(t *testing.T) {
+	tmp := t.TempDir()
+	if isRepository, err := IsGitRepository(nil, tmp); isRepository || err == nil || !strings.Contains(err.Error(), "requires a command context") {
+		t.Fatalf("nil context result=(%t, %v)", isRepository, err)
+	}
+	canceledCtx, cancelCanceled := context.WithCancel(t.Context())
+	cancelCanceled()
+	if isRepository, err := IsGitRepository(canceledCtx, tmp); isRepository || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled context result=(%t, %v), want context.Canceled", isRepository, err)
+	}
+
+	stateDir := t.TempDir()
+	started := filepath.Join(stateDir, "started")
+	fakeGit := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+: > "$WORKTREE_TEST_GIT_STARTED"
+exec sleep 30
+`
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
+		t.Fatalf("write repository-detection git: %v", err)
+	}
+	t.Setenv("WORKTREE_TEST_GIT_STARTED", started)
+	t.Setenv("PATH", filepath.Dir(fakeGit)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	type repositoryResult struct {
+		isRepository bool
+		err          error
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan repositoryResult, 1)
+	go func() {
+		isRepository, err := IsGitRepository(ctx, tmp)
+		result <- repositoryResult{isRepository: isRepository, err: err}
+	}()
+	waitForWorktreeTestPath(t, started)
+	cancel()
+
+	select {
+	case got := <-result:
+		if got.isRepository || !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("in-flight cancellation result=(%t, %v), want context.Canceled", got.isRepository, got.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("IsGitRepository did not join canceled git command")
 	}
 }
 
@@ -134,12 +220,14 @@ func TestCanonicalAgentKey(t *testing.T) {
 
 func TestWorktreeManager_ProvisionWorktreeSanitizesAgentName(t *testing.T) {
 	repo := setupGitRepo(t)
-	wm, err := NewWorktreeManager(repo)
+	wm, err := NewWorktreeManager(t.Context(), repo)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
 
-	info, err := wm.ProvisionWorktree(context.Background(), "../evil/type", "sess/one")
+	ctx := sequentialWorktreeIntegrationContext(t)
+	registerWorktreeCleanup(t, wm, "../evil/type", "sess/one")
+	info, err := wm.ProvisionWorktree(ctx, "../evil/type", "sess/one")
 	if err != nil {
 		t.Fatalf("ProvisionWorktree: %v", err)
 	}
@@ -153,12 +241,14 @@ func TestWorktreeManager_ProvisionWorktreeSanitizesAgentName(t *testing.T) {
 // and ".lock" remain git-invalid and must be normalized before branch creation.
 func TestWorktreeManager_ProvisionWorktreeNormalizesInvalidRefComponentPatterns(t *testing.T) {
 	repo := setupGitRepo(t)
-	wm, err := NewWorktreeManager(repo)
+	wm, err := NewWorktreeManager(t.Context(), repo)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
 
-	info, err := wm.ProvisionWorktree(context.Background(), "alpha..team.lock", "sess..one.lock")
+	ctx := sequentialWorktreeIntegrationContext(t)
+	registerWorktreeCleanup(t, wm, "alpha..team.lock", "sess..one.lock")
+	info, err := wm.ProvisionWorktree(ctx, "alpha..team.lock", "sess..one.lock")
 	if err != nil {
 		t.Fatalf("ProvisionWorktree: %v", err)
 	}
@@ -170,16 +260,19 @@ func TestWorktreeManager_ProvisionWorktreeNormalizesInvalidRefComponentPatterns(
 
 func TestWorktreeManager_ProvisionWorktreeDistinctSafeAgentKeysDoNotAlias(t *testing.T) {
 	repo := setupGitRepo(t)
-	wm, err := NewWorktreeManager(repo)
+	wm, err := NewWorktreeManager(t.Context(), repo)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
 
-	first, err := wm.ProvisionWorktree(context.Background(), "alpha--team", "sess/one")
+	ctx := sequentialWorktreeIntegrationContext(t)
+	registerWorktreeCleanup(t, wm, "alpha--team", "sess/one")
+	first, err := wm.ProvisionWorktree(ctx, "alpha--team", "sess/one")
 	if err != nil {
 		t.Fatalf("ProvisionWorktree first: %v", err)
 	}
-	second, err := wm.ProvisionWorktree(context.Background(), "alpha-team", "sess/one")
+	registerWorktreeCleanup(t, wm, "alpha-team", "sess/one")
+	second, err := wm.ProvisionWorktree(ctx, "alpha-team", "sess/one")
 	if err != nil {
 		t.Fatalf("ProvisionWorktree second: %v", err)
 	}
@@ -193,16 +286,23 @@ func TestWorktreeManager_ProvisionWorktreeDistinctSafeAgentKeysDoNotAlias(t *tes
 
 func TestWorktreeManager_ProvisionWorktreeSeparatesAgentAndSessionBoundaries(t *testing.T) {
 	repo := setupGitRepo(t)
-	wm, err := NewWorktreeManager(repo)
+	wm, err := NewWorktreeManager(t.Context(), repo)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
 
-	first, err := wm.ProvisionWorktree(context.Background(), "a-b", "c")
+	// The race suite can heavily delay short-lived git subprocesses. Keep this
+	// real integration test sequential and give every command a generous,
+	// still-bounded fixture deadline.
+	ctx := sequentialWorktreeIntegrationContext(t)
+	registerWorktreeCleanup(t, wm, "a-b", "c")
+	first, err := wm.ProvisionWorktree(ctx, "a-b", "c")
 	if err != nil {
 		t.Fatalf("ProvisionWorktree first: %v", err)
 	}
-	second, err := wm.ProvisionWorktree(context.Background(), "a", "b-c")
+
+	registerWorktreeCleanup(t, wm, "a", "b-c")
+	second, err := wm.ProvisionWorktree(ctx, "a", "b-c")
 	if err != nil {
 		t.Fatalf("ProvisionWorktree second: %v", err)
 	}
@@ -213,7 +313,7 @@ func TestWorktreeManager_ProvisionWorktreeSeparatesAgentAndSessionBoundaries(t *
 	assertStringNotEqual(t, first.Branch, second.Branch)
 	assertStringNotEqual(t, first.Agent, second.Agent)
 
-	worktrees, err := wm.ListWorktrees(context.Background())
+	worktrees, err := wm.ListWorktrees(ctx)
 	if err != nil {
 		t.Fatalf("ListWorktrees: %v", err)
 	}
@@ -222,20 +322,33 @@ func TestWorktreeManager_ProvisionWorktreeSeparatesAgentAndSessionBoundaries(t *
 	}
 }
 
+func registerWorktreeCleanup(t *testing.T, wm *WorktreeManager, agentName, sessionID string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), worktreeIntegrationTestTimeout)
+		defer cancel()
+		if err := wm.RemoveWorktree(ctx, agentName, sessionID); err != nil {
+			t.Errorf("cleanup worktree %s/%s: %v", agentName, sessionID, err)
+		}
+	})
+}
+
 func TestWorktreeManager_ProvisionAndList_PreservesSanitizedHyphenatedAgent(t *testing.T) {
 	repo := setupGitRepo(t)
-	wm, err := NewWorktreeManager(repo)
+	wm, err := NewWorktreeManager(t.Context(), repo)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
 
-	info, err := wm.ProvisionWorktree(context.Background(), "../evil/type", "sess/one")
+	ctx := sequentialWorktreeIntegrationContext(t)
+	registerWorktreeCleanup(t, wm, "../evil/type", "sess/one")
+	info, err := wm.ProvisionWorktree(ctx, "../evil/type", "sess/one")
 	if err != nil {
 		t.Fatalf("ProvisionWorktree: %v", err)
 	}
 	assertStringEqual(t, info.Agent, "evil-type")
 
-	worktrees, err := wm.ListWorktrees(context.Background())
+	worktrees, err := wm.ListWorktrees(ctx)
 	if err != nil {
 		t.Fatalf("ListWorktrees: %v", err)
 	}
@@ -256,7 +369,7 @@ func TestWorktreeManager_worktreeExists(t *testing.T) {
 		t.Fatalf("mkdir worktree path: %v", err)
 	}
 
-	exists, err := wm.worktreeExists("agent-cc-123")
+	exists, err := wm.worktreeExists(t.Context(), "agent-cc-123")
 	if err != nil {
 		t.Fatalf("worktreeExists error: %v", err)
 	}
@@ -264,7 +377,7 @@ func TestWorktreeManager_worktreeExists(t *testing.T) {
 		t.Fatal("expected worktree to exist")
 	}
 
-	exists, err = wm.worktreeExists("missing")
+	exists, err = wm.worktreeExists(t.Context(), "missing")
 	if err != nil {
 		t.Fatalf("worktreeExists error: %v", err)
 	}
@@ -285,9 +398,9 @@ func TestWorktreeManager_getWorktreeInfo_UsesCommandContextForBranchLookup(t *te
 
 	fakeDir := t.TempDir()
 	fakeGit := filepath.Join(fakeDir, "git")
-	// Simulate a long-running git call; CommandContext should bound it via
-	// worktreeGitCommandTimeout without mutating shared timeout globals.
-	script := "#!/bin/sh\nsleep 30\n"
+	// Simulate a long-running git call; the caller's shorter deadline must win
+	// over the manager's command timeout.
+	script := "#!/bin/sh\nexec sleep 30\n"
 	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake git: %v", err)
 	}
@@ -295,19 +408,310 @@ func TestWorktreeManager_getWorktreeInfo_UsesCommandContextForBranchLookup(t *te
 	oldPath := os.Getenv("PATH")
 	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+oldPath)
 
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
 	start := time.Now()
-	_, err := wm.getWorktreeInfo(worktreeName)
+	_, err := wm.getWorktreeInfo(ctx, worktreeName)
 	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("expected timeout error from getWorktreeInfo")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("getWorktreeInfo error = %v, want context deadline", err)
 	}
 	if !strings.Contains(err.Error(), "failed to get branch") {
 		t.Fatalf("error = %q, want branch lookup failure", err.Error())
 	}
-	maxExpected := worktreeGitCommandTimeout + 2*time.Second
+	maxExpected := 2 * time.Second
 	if elapsed > maxExpected {
 		t.Fatalf("getWorktreeInfo elapsed %v, expected timeout-bounded return within %v", elapsed, maxExpected)
 	}
+}
+
+func TestWorktreeManagerOperationsRejectNilAndCanceledContextsBeforeGit(t *testing.T) {
+	baseRepo := t.TempDir()
+	wm := &WorktreeManager{projectDir: baseRepo, baseRepo: baseRepo}
+	gitLog := filepath.Join(t.TempDir(), "git.log")
+	fakeGit := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$WORKTREE_TEST_GIT_LOG"
+exit 91
+`
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fail-if-called git: %v", err)
+	}
+	t.Setenv("WORKTREE_TEST_GIT_LOG", gitLog)
+	t.Setenv("PATH", filepath.Dir(fakeGit)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	operations := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{
+			name: "provision",
+			run: func(ctx context.Context) error {
+				_, err := wm.ProvisionWorktree(ctx, "cc", "cancel-before-provision")
+				return err
+			},
+		},
+		{
+			name: "list",
+			run: func(ctx context.Context) error {
+				_, err := wm.ListWorktrees(ctx)
+				return err
+			},
+		},
+		{name: "remove", run: func(ctx context.Context) error {
+			return wm.RemoveWorktree(ctx, "cc", "cancel-before-remove")
+		}},
+		{name: "cleanup", run: func(ctx context.Context) error {
+			return wm.CleanupStaleWorktrees(ctx, 0)
+		}},
+		{name: "sync", run: func(ctx context.Context) error {
+			return wm.SyncWorktree(ctx, baseRepo)
+		}},
+	}
+
+	for _, operation := range operations {
+		t.Run(operation.name+" nil", func(t *testing.T) {
+			err := operation.run(nil)
+			if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+				t.Fatalf("nil context error = %v", err)
+			}
+		})
+		t.Run(operation.name+" canceled", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			if err := operation.run(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled context error = %v, want context.Canceled", err)
+			}
+		})
+	}
+
+	if data, err := os.ReadFile(gitLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected contexts invoked git: err=%v log=%s", err, data)
+	}
+}
+
+func TestWorktreeManagerProvisionCancellationStopsBeforeMutation(t *testing.T) {
+	baseRepo := t.TempDir()
+	wm := &WorktreeManager{projectDir: baseRepo, baseRepo: baseRepo}
+	stateDir := t.TempDir()
+	gitLog := filepath.Join(stateDir, "git.log")
+	started := filepath.Join(stateDir, "started")
+	mutation := filepath.Join(stateDir, "mutation")
+	fakeGit := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$WORKTREE_TEST_GIT_LOG"
+if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "--abbrev-ref" ]; then
+  : > "$WORKTREE_TEST_GIT_STARTED"
+  exec sleep 30
+fi
+: > "$WORKTREE_TEST_GIT_MUTATION"
+exit 92
+`
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
+		t.Fatalf("write blocking git: %v", err)
+	}
+	t.Setenv("WORKTREE_TEST_GIT_LOG", gitLog)
+	t.Setenv("WORKTREE_TEST_GIT_STARTED", started)
+	t.Setenv("WORKTREE_TEST_GIT_MUTATION", mutation)
+	t.Setenv("PATH", filepath.Dir(fakeGit)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := wm.ProvisionWorktree(ctx, "cc", "blocking-provision")
+		result <- err
+	}()
+	waitForWorktreeTestPath(t, started)
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ProvisionWorktree error = %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ProvisionWorktree did not join canceled git command")
+	}
+
+	data, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatalf("read git log: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "rev-parse --abbrev-ref HEAD" {
+		t.Fatalf("git calls = %q, want only blocking branch lookup", got)
+	}
+	if _, err := os.Stat(mutation); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provision cancellation reached git mutation: %v", err)
+	}
+	workingDir := filepath.Join(baseRepo, "..", worktreeNameForKeys("cc", "blocking-provision"))
+	if _, err := os.Stat(workingDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provision cancellation created worktree path: %v", err)
+	}
+}
+
+func TestWorktreeManagerProvisionCancellationReportsRetainedCheckout(t *testing.T) {
+	baseRepo := setupGitRepo(t)
+	wm := &WorktreeManager{projectDir: baseRepo, baseRepo: baseRepo}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("resolve real git: %v", err)
+	}
+	stateDir := t.TempDir()
+	gitLog := filepath.Join(stateDir, "git.log")
+	addCompleted := filepath.Join(stateDir, "add-completed")
+	fakeGit := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$WORKTREE_TEST_GIT_LOG"
+if [ "${1:-}" = "worktree" ] && [ "${2:-}" = "add" ]; then
+  "$WORKTREE_TEST_REAL_GIT" "$@"
+  status=$?
+  if [ "$status" -ne 0 ]; then exit "$status"; fi
+  : > "$WORKTREE_TEST_ADD_COMPLETED"
+  exec sleep 30
+fi
+exec "$WORKTREE_TEST_REAL_GIT" "$@"
+`
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
+		t.Fatalf("write add-then-block git: %v", err)
+	}
+	t.Setenv("WORKTREE_TEST_GIT_LOG", gitLog)
+	t.Setenv("WORKTREE_TEST_REAL_GIT", realGit)
+	t.Setenv("WORKTREE_TEST_ADD_COMPLETED", addCompleted)
+	t.Setenv("PATH", filepath.Dir(fakeGit)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	type provisionResult struct {
+		info *WorktreeInfo
+		err  error
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan provisionResult, 1)
+	go func() {
+		info, provisionErr := wm.ProvisionWorktree(ctx, "cc", "retained-after-cancel")
+		result <- provisionResult{info: info, err: provisionErr}
+	}()
+	waitForWorktreeTestPath(t, addCompleted)
+	cancel()
+
+	var got provisionResult
+	select {
+	case got = <-result:
+	case <-time.After(4 * time.Second):
+		t.Fatal("ProvisionWorktree did not join add-then-block git command")
+	}
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("ProvisionWorktree error = %v, want context.Canceled", got.err)
+	}
+	wantPath := filepath.Join(baseRepo, "..", worktreeNameForKeys("cc", "retained-after-cancel"))
+	wantBranch := "agent/cc/retained-after-cancel"
+	if got.info == nil || got.info.Path != wantPath || got.info.Branch != wantBranch || got.info.Agent != "cc" {
+		t.Fatalf("retained worktree info = %+v, want path=%s branch=%s agent=cc", got.info, wantPath, wantBranch)
+	}
+	if !strings.Contains(got.err.Error(), "checkout retained at "+wantPath) || !strings.Contains(got.err.Error(), "branch "+wantBranch) {
+		t.Fatalf("retained worktree error omits path/branch evidence: %v", got.err)
+	}
+	if stat, err := os.Stat(wantPath); err != nil || !stat.IsDir() {
+		t.Fatalf("retained worktree path missing: stat=%v err=%v", stat, err)
+	}
+	if stat, err := os.Stat(filepath.Join(wantPath, ".git")); err != nil || stat.IsDir() {
+		t.Fatalf("retained checkout .git marker invalid: stat=%v err=%v", stat, err)
+	}
+
+	data, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatalf("read retained checkout git log: %v", err)
+	}
+	logText := string(data)
+	if strings.Count(logText, "worktree add") != 1 || strings.Contains(logText, "rev-parse HEAD") {
+		t.Fatalf("retained checkout crossed post-add cancellation boundary: %q", logText)
+	}
+}
+
+func TestWorktreeManagerCleanupCancellationStopsFallbackAndNextRemoval(t *testing.T) {
+	baseRepo := t.TempDir()
+	wm := &WorktreeManager{projectDir: baseRepo, baseRepo: baseRepo}
+	stateDir := t.TempDir()
+	firstPath := filepath.Join(stateDir, "agent-first")
+	secondPath := filepath.Join(stateDir, "agent-second")
+	for _, path := range []string{firstPath, secondPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("create listed worktree %s: %v", path, err)
+		}
+		old := time.Now().Add(-48 * time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("age listed worktree %s: %v", path, err)
+		}
+	}
+
+	gitLog := filepath.Join(stateDir, "git.log")
+	started := filepath.Join(stateDir, "started")
+	fallbackMutation := filepath.Join(stateDir, "fallback-mutation")
+	fakeGit := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$WORKTREE_TEST_GIT_LOG"
+if [ "${1:-}" = "worktree" ] && [ "${2:-}" = "list" ]; then
+  printf 'worktree %s\nHEAD aaa111\nbranch refs/heads/agent/cc/first\n\n' "$WORKTREE_TEST_FIRST_PATH"
+  printf 'worktree %s\nHEAD bbb222\nbranch refs/heads/agent/cod/second\n' "$WORKTREE_TEST_SECOND_PATH"
+  exit 0
+fi
+if [ "${1:-}" = "worktree" ] && [ "${2:-}" = "remove" ]; then
+  : > "$WORKTREE_TEST_GIT_STARTED"
+  printf 'not a working tree\n' >&2
+  exec sleep 30
+fi
+: > "$WORKTREE_TEST_GIT_FALLBACK_MUTATION"
+exit 93
+`
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
+		t.Fatalf("write cleanup git: %v", err)
+	}
+	t.Setenv("WORKTREE_TEST_GIT_LOG", gitLog)
+	t.Setenv("WORKTREE_TEST_GIT_STARTED", started)
+	t.Setenv("WORKTREE_TEST_GIT_FALLBACK_MUTATION", fallbackMutation)
+	t.Setenv("WORKTREE_TEST_FIRST_PATH", firstPath)
+	t.Setenv("WORKTREE_TEST_SECOND_PATH", secondPath)
+	t.Setenv("PATH", filepath.Dir(fakeGit)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- wm.CleanupStaleWorktrees(ctx, 0) }()
+	waitForWorktreeTestPath(t, started)
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("CleanupStaleWorktrees error = %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("CleanupStaleWorktrees did not join canceled git command")
+	}
+
+	data, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatalf("read cleanup git log: %v", err)
+	}
+	logText := string(data)
+	if strings.Count(logText, "worktree remove") != 1 || !strings.Contains(logText, firstPath) || strings.Contains(logText, secondPath+"\n") {
+		t.Fatalf("cleanup git calls crossed cancellation boundary: %q", logText)
+	}
+	if _, err := os.Stat(fallbackMutation); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup cancellation reached branch fallback or later mutation: %v", err)
+	}
+}
+
+func waitForWorktreeTestPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
 }
 
 func TestWorktreeManager_parseWorktreeList(t *testing.T) {
@@ -365,11 +769,27 @@ func TestWorktreeManager_parseWorktreeList(t *testing.T) {
 func TestNewWorktreeManager(t *testing.T) {
 	t.Parallel()
 
+	t.Run("nil context", func(t *testing.T) {
+		_, err := NewWorktreeManager(nil, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "requires a command context") {
+			t.Fatalf("NewWorktreeManager nil context error = %v", err)
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := NewWorktreeManager(ctx, t.TempDir())
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("NewWorktreeManager canceled context error = %v", err)
+		}
+	})
+
 	t.Run("valid git repo", func(t *testing.T) {
 		t.Parallel()
 		tmp := setupGitRepo(t)
 
-		wm, err := NewWorktreeManager(tmp)
+		wm, err := NewWorktreeManager(t.Context(), tmp)
 		if err != nil {
 			t.Fatalf("NewWorktreeManager: %v", err)
 		}
@@ -385,7 +805,7 @@ func TestNewWorktreeManager(t *testing.T) {
 		t.Parallel()
 		tmp := t.TempDir()
 
-		_, err := NewWorktreeManager(tmp)
+		_, err := NewWorktreeManager(t.Context(), tmp)
 		if err == nil {
 			t.Fatal("expected error for non-git directory")
 		}
@@ -660,7 +1080,7 @@ func TestWorktreeManager_ProvisionAndList(t *testing.T) {
 
 	tmp := setupGitRepo(t)
 
-	wm, err := NewWorktreeManager(tmp)
+	wm, err := NewWorktreeManager(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
@@ -709,7 +1129,7 @@ func TestWorktreeManager_ProvisionExisting(t *testing.T) {
 
 	tmp := setupGitRepo(t)
 
-	wm, err := NewWorktreeManager(tmp)
+	wm, err := NewWorktreeManager(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
@@ -738,7 +1158,7 @@ func TestWorktreeManager_RemoveWorktree(t *testing.T) {
 
 	tmp := setupGitRepo(t)
 
-	wm, err := NewWorktreeManager(tmp)
+	wm, err := NewWorktreeManager(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
@@ -776,7 +1196,7 @@ func TestWorktreeManager_RemoveWorktree_NonExistent(t *testing.T) {
 
 	tmp := setupGitRepo(t)
 
-	wm, err := NewWorktreeManager(tmp)
+	wm, err := NewWorktreeManager(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
@@ -793,7 +1213,7 @@ func TestWorktreeManager_MultipleProvisions(t *testing.T) {
 
 	tmp := setupGitRepo(t)
 
-	wm, err := NewWorktreeManager(tmp)
+	wm, err := NewWorktreeManager(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
@@ -833,7 +1253,7 @@ func TestWorktreeManager_CleanupStaleWorktrees(t *testing.T) {
 
 	tmp := setupGitRepo(t)
 
-	wm, err := NewWorktreeManager(tmp)
+	wm, err := NewWorktreeManager(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
@@ -865,16 +1285,14 @@ func TestWorktreeManager_CleanupStaleWorktrees_RemovesListedLegacyPath(t *testin
 	t.Parallel()
 
 	tmp := setupGitRepo(t)
-	wm, err := NewWorktreeManager(tmp)
+	wm, err := NewWorktreeManager(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
 
 	ctx := context.Background()
 	legacyPath := filepath.Join(tmp, "..", "agent-a-b-c")
-	cmd := exec.Command("git", "worktree", "add", "-b", "agent/a-b/c", legacyPath)
-	cmd.Dir = tmp
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := runGitTestCommand(t, tmp, "worktree", "add", "-b", "agent/a-b/c", legacyPath); err != nil {
 		t.Fatalf("legacy git worktree add failed: %v\n%s", err, out)
 	}
 
@@ -899,7 +1317,7 @@ func TestWorktreeManager_CleanupStaleWorktrees_RecentKept(t *testing.T) {
 
 	tmp := setupGitRepo(t)
 
-	wm, err := NewWorktreeManager(tmp)
+	wm, err := NewWorktreeManager(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}

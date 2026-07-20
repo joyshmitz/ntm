@@ -1,11 +1,14 @@
 package worktrees
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewManager(t *testing.T) {
@@ -25,7 +28,7 @@ func TestWorktreeInfo(t *testing.T) {
 	manager := NewManager(projectDir, "test-session")
 
 	// Test GetWorktreeForAgent with non-existent worktree
-	info, err := manager.GetWorktreeForAgent("test-agent")
+	info, err := manager.GetWorktreeForAgent(t.Context(), "test-agent")
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -52,7 +55,7 @@ func TestCreateForAgent_ExistingWorktreeSkipsGit(t *testing.T) {
 	projectDir := setupWorktreeGitRepo(t)
 	manager := NewManager(projectDir, "test-session")
 
-	created, err := manager.CreateForAgent("agent-1")
+	created, err := manager.CreateForAgent(t.Context(), "agent-1")
 	if err != nil {
 		t.Fatalf("failed to create initial worktree: %v", err)
 	}
@@ -60,7 +63,7 @@ func TestCreateForAgent_ExistingWorktreeSkipsGit(t *testing.T) {
 		t.Fatal("expected initial worktree creation to report Created=true")
 	}
 
-	info, err := manager.CreateForAgent("agent-1")
+	info, err := manager.CreateForAgent(t.Context(), "agent-1")
 	if err != nil {
 		t.Fatalf("unexpected error for existing valid worktree: %v", err)
 	}
@@ -93,12 +96,315 @@ func TestCreateForAgent_ExistingInvalidDirectoryReturnsError(t *testing.T) {
 		t.Fatalf("failed to create stale worktree dir: %v", err)
 	}
 
-	info, err := manager.CreateForAgent("agent-1")
+	info, err := manager.CreateForAgent(t.Context(), "agent-1")
 	if err == nil {
 		t.Fatal("expected error for stale pre-existing directory")
 	}
 	if info == nil || info.Error != "invalid or stale worktree" {
 		t.Fatalf("expected stale worktree error, got info=%+v err=%v", info, err)
+	}
+}
+
+func TestPreflightForAgentRejectsUnsafeAndConflictingTargets(t *testing.T) {
+	t.Run("unsafe agent name", func(t *testing.T) {
+		manager := NewManager(setupWorktreeGitRepo(t), "test-session")
+		err := manager.PreflightForAgent(t.Context(), "../escaped")
+		if err == nil || !strings.Contains(err.Error(), "path separators") {
+			t.Fatalf("PreflightForAgent() error = %v", err)
+		}
+	})
+
+	t.Run("stale target directory", func(t *testing.T) {
+		manager := NewManager(setupWorktreeGitRepo(t), "test-session")
+		if err := os.MkdirAll(manager.worktreePath("agent-1"), 0o755); err != nil {
+			t.Fatalf("create stale worktree path: %v", err)
+		}
+		err := manager.PreflightForAgent(t.Context(), "agent-1")
+		if err == nil || !strings.Contains(err.Error(), "not a valid git worktree") {
+			t.Fatalf("PreflightForAgent() error = %v", err)
+		}
+	})
+
+	t.Run("target path is a file", func(t *testing.T) {
+		manager := NewManager(setupWorktreeGitRepo(t), "test-session")
+		path := manager.worktreePath("agent-1")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create worktree parent: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("collision\n"), 0o600); err != nil {
+			t.Fatalf("create worktree path file: %v", err)
+		}
+		err := manager.PreflightForAgent(t.Context(), "agent-1")
+		if err == nil || !strings.Contains(err.Error(), "not a directory") {
+			t.Fatalf("PreflightForAgent() error = %v", err)
+		}
+	})
+
+	t.Run("branch exists without target path", func(t *testing.T) {
+		repo := setupWorktreeGitRepo(t)
+		manager := NewManager(repo, "test-session")
+		cmd := exec.Command("git", "branch", "ntm/test-session/agent-1")
+		cmd.Dir = repo
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create conflicting branch: %v: %s", err, output)
+		}
+		err := manager.PreflightForAgent(t.Context(), "agent-1")
+		if err == nil || !strings.Contains(err.Error(), "already exists without its expected worktree path") {
+			t.Fatalf("PreflightForAgent() error = %v", err)
+		}
+	})
+
+	t.Run("existing worktree on different branch", func(t *testing.T) {
+		repo := setupWorktreeGitRepo(t)
+		manager := NewManager(repo, "test-session")
+		path := manager.worktreePath("agent-1")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create worktree parent: %v", err)
+		}
+		cmd := exec.Command("git", "worktree", "add", "-b", "different-branch", path)
+		cmd.Dir = repo
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create conflicting worktree: %v: %s", err, output)
+		}
+		err := manager.PreflightForAgent(t.Context(), "agent-1")
+		if err == nil || !strings.Contains(err.Error(), "would collide") {
+			t.Fatalf("PreflightForAgent() error = %v", err)
+		}
+		info, err := manager.CreateForAgent(t.Context(), "agent-1")
+		if err == nil || info == nil || !strings.Contains(info.Error, "would collide") {
+			t.Fatalf("CreateForAgent() info=%+v error=%v, want branch collision", info, err)
+		}
+		info, err = manager.GetWorktreeForAgent(t.Context(), "agent-1")
+		if err != nil || info == nil || !strings.Contains(info.Error, "expected") {
+			t.Fatalf("GetWorktreeForAgent() info=%+v error=%v, want wrong-branch rejection", info, err)
+		}
+	})
+
+	t.Run("existing worktree with detached head", func(t *testing.T) {
+		repo := setupWorktreeGitRepo(t)
+		manager := NewManager(repo, "test-session")
+		info, err := manager.CreateForAgent(t.Context(), "agent-1")
+		if err != nil {
+			t.Fatalf("CreateForAgent() initial error = %v", err)
+		}
+		cmd := exec.CommandContext(t.Context(), "git", "checkout", "--detach", "--quiet")
+		cmd.Dir = info.Path
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("detach worktree HEAD: %v: %s", err, output)
+		}
+		if err := manager.PreflightForAgent(t.Context(), "agent-1"); err == nil || !strings.Contains(err.Error(), "detached HEAD") {
+			t.Fatalf("PreflightForAgent() detached error = %v", err)
+		}
+		info, err = manager.CreateForAgent(t.Context(), "agent-1")
+		if err == nil || info == nil || !strings.Contains(info.Error, "detached HEAD") {
+			t.Fatalf("CreateForAgent() info=%+v error=%v, want detached rejection", info, err)
+		}
+		info, err = manager.GetWorktreeForAgent(t.Context(), "agent-1")
+		if err != nil || info == nil || !strings.Contains(info.Error, "detached HEAD") {
+			t.Fatalf("GetWorktreeForAgent() info=%+v error=%v, want detached rejection", info, err)
+		}
+	})
+}
+
+func TestWorktreeManagerContextCancellation(t *testing.T) {
+	t.Run("nil contexts are rejected", func(t *testing.T) {
+		manager := NewManager(t.TempDir(), "test-session")
+		if err := manager.PreflightForAgent(nil, "agent-1"); err == nil {
+			t.Fatal("PreflightForAgent(nil) succeeded")
+		}
+		if _, err := manager.CreateForAgent(nil, "agent-1"); err == nil {
+			t.Fatal("CreateForAgent(nil) succeeded")
+		}
+		if _, err := manager.GetWorktreeForAgent(nil, "agent-1"); err == nil {
+			t.Fatal("GetWorktreeForAgent(nil) succeeded")
+		}
+		if _, err := manager.ListWorktrees(nil); err == nil {
+			t.Fatal("ListWorktrees(nil) succeeded")
+		}
+		if err := manager.Cleanup(nil); err == nil {
+			t.Fatal("Cleanup(nil) succeeded")
+		}
+		if err := manager.MergeBack(nil, "agent-1"); err == nil {
+			t.Fatal("MergeBack(nil) succeeded")
+		}
+		if err := manager.RemoveWorktree(nil, "agent-1"); err == nil {
+			t.Fatal("RemoveWorktree(nil) succeeded")
+		}
+	})
+
+	t.Run("merge preserves cancellation during git", func(t *testing.T) {
+		fakeBin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+			t.Fatalf("write blocking git: %v", err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		err := NewManager(t.TempDir(), "test-session").MergeBack(ctx, "agent-1")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("MergeBack() error = %v, want context deadline", err)
+		}
+	})
+
+	t.Run("remove cancellation does not fall back to filesystem deletion", func(t *testing.T) {
+		projectDir := t.TempDir()
+		manager := NewManager(projectDir, "test-session")
+		worktreePath := manager.worktreePath("agent-1")
+		if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+			t.Fatalf("create worktree fixture: %v", err)
+		}
+		marker := filepath.Join(worktreePath, "must-remain")
+		if err := os.WriteFile(marker, []byte("retained\n"), 0o600); err != nil {
+			t.Fatalf("write retained marker: %v", err)
+		}
+		fakeBin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+			t.Fatalf("write blocking git: %v", err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		err := manager.RemoveWorktree(ctx, "agent-1")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("RemoveWorktree() error = %v, want context deadline", err)
+		}
+		if _, statErr := os.Stat(marker); statErr != nil {
+			t.Fatalf("canceled removal deleted retained marker: %v", statErr)
+		}
+	})
+
+	t.Run("listing rejects an already canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := NewManager(t.TempDir(), "test-session").ListWorktrees(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ListWorktrees() error = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("preflight preserves cancellation during git", func(t *testing.T) {
+		fakeBin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+			t.Fatalf("write blocking git: %v", err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		err := NewManager(t.TempDir(), "test-session").PreflightForAgent(ctx, "agent-1")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("PreflightForAgent() error = %v, want context deadline", err)
+		}
+	})
+
+	t.Run("creation preserves cancellation during provisioning", func(t *testing.T) {
+		fakeBin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+			t.Fatalf("write blocking git: %v", err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		manager := NewManager(t.TempDir(), "test-session")
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		info, err := manager.CreateForAgent(ctx, "agent-1")
+		if !errors.Is(err, context.DeadlineExceeded) || info == nil || info.Created {
+			t.Fatalf("CreateForAgent() info=%+v error=%v, want canceled uncreated worktree", info, err)
+		}
+		if _, statErr := os.Stat(manager.worktreePath("agent-1")); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("canceled creation left worktree path: %v", statErr)
+		}
+	})
+
+	t.Run("creation reports checkout retained before cancellation", func(t *testing.T) {
+		repo := setupWorktreeGitRepo(t)
+		realGit, err := exec.LookPath("git")
+		if err != nil {
+			t.Fatalf("resolve real git: %v", err)
+		}
+		fakeBin := t.TempDir()
+		started := filepath.Join(t.TempDir(), "worktree-added")
+		wrapper := `#!/bin/sh
+if [ "${1:-}" = "worktree" ] && [ "${2:-}" = "add" ]; then
+  "$NTM_TEST_REAL_GIT" "$@" || exit $?
+  : > "$NTM_TEST_WORKTREE_STARTED"
+  exec sleep 10
+fi
+exec "$NTM_TEST_REAL_GIT" "$@"
+`
+		if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte(wrapper), 0o700); err != nil {
+			t.Fatalf("write post-provision blocking git: %v", err)
+		}
+		t.Setenv("NTM_TEST_REAL_GIT", realGit)
+		t.Setenv("NTM_TEST_WORKTREE_STARTED", started)
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		manager := NewManager(repo, "test-session")
+		ctx, cancel := context.WithCancel(context.Background())
+		type creationResult struct {
+			info *WorktreeInfo
+			err  error
+		}
+		resultCh := make(chan creationResult, 1)
+		go func() {
+			info, createErr := manager.CreateForAgent(ctx, "agent-1")
+			resultCh <- creationResult{info: info, err: createErr}
+		}()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(started); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				cancel()
+				t.Fatal("wrapper did not complete real worktree add before timeout")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+		var result creationResult
+		select {
+		case result = <-resultCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("CreateForAgent did not return after cancellation")
+		}
+		if !errors.Is(result.err, context.Canceled) || result.info == nil || !result.info.Created {
+			t.Fatalf("CreateForAgent() info=%+v error=%v, want canceled retained worktree", result.info, result.err)
+		}
+		validated, err := manager.GetWorktreeForAgent(t.Context(), "agent-1")
+		if err != nil || validated == nil || !validated.Created || validated.Error != "" {
+			t.Fatalf("retained worktree validation info=%+v error=%v", validated, err)
+		}
+	})
+
+	t.Run("lookup preserves cancellation during git", func(t *testing.T) {
+		repo := setupWorktreeGitRepo(t)
+		manager := NewManager(repo, "test-session")
+		if _, err := manager.CreateForAgent(t.Context(), "agent-1"); err != nil {
+			t.Fatalf("CreateForAgent() error = %v", err)
+		}
+		fakeBin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+			t.Fatalf("write blocking git: %v", err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_, err := manager.GetWorktreeForAgent(ctx, "agent-1")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("GetWorktreeForAgent() error = %v, want context deadline", err)
+		}
+	})
+}
+
+func TestPreflightForAgentAcceptsMissingAndMatchingTargets(t *testing.T) {
+	repo := setupWorktreeGitRepo(t)
+	manager := NewManager(repo, "test-session")
+	if err := manager.PreflightForAgent(t.Context(), "agent-1"); err != nil {
+		t.Fatalf("PreflightForAgent() missing target error = %v", err)
+	}
+	if _, err := manager.CreateForAgent(t.Context(), "agent-1"); err != nil {
+		t.Fatalf("CreateForAgent() error = %v", err)
+	}
+	if err := manager.PreflightForAgent(t.Context(), "agent-1"); err != nil {
+		t.Fatalf("PreflightForAgent() matching target error = %v", err)
 	}
 }
 
@@ -116,7 +422,7 @@ func TestCreateForAgent_MkdirAllFailure(t *testing.T) {
 		t.Fatalf("failed to create worktrees file: %v", err)
 	}
 
-	info, err := manager.CreateForAgent("agent-2")
+	info, err := manager.CreateForAgent(t.Context(), "agent-2")
 	if err == nil {
 		t.Fatal("expected error when worktrees path is a file, got nil")
 	}
@@ -132,7 +438,7 @@ func TestCreateForAgent_RejectsUnsafeAgentName(t *testing.T) {
 	manager := NewManager(projectDir, "test-session")
 	escapedPath := filepath.Join(projectDir, ".ntm", "escaped")
 
-	info, err := manager.CreateForAgent("../escaped")
+	info, err := manager.CreateForAgent(t.Context(), "../escaped")
 	if err == nil {
 		t.Fatal("expected error for unsafe agent name")
 	}
@@ -149,7 +455,7 @@ func TestListWorktrees_MissingDirReturnsEmpty(t *testing.T) {
 	projectDir := t.TempDir()
 	manager := NewManager(projectDir, "test-session")
 
-	worktrees, err := manager.ListWorktrees()
+	worktrees, err := manager.ListWorktrees(t.Context())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -168,7 +474,7 @@ func TestListWorktrees_EmptyDirReturnsEmpty(t *testing.T) {
 		t.Fatalf("failed to create worktrees dir: %v", err)
 	}
 
-	worktrees, err := manager.ListWorktrees()
+	worktrees, err := manager.ListWorktrees(t.Context())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,7 +493,7 @@ func TestCleanup_RemovesEmptyWorktreesDir(t *testing.T) {
 		t.Fatalf("failed to create worktrees dir: %v", err)
 	}
 
-	if err := manager.Cleanup(); err != nil {
+	if err := manager.Cleanup(t.Context()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -235,7 +541,7 @@ func TestListWorktrees_WithDirectoriesAndFiles(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	worktrees, err := manager.ListWorktrees()
+	worktrees, err := manager.ListWorktrees(t.Context())
 	if err != nil {
 		t.Fatalf("ListWorktrees: %v", err)
 	}
@@ -281,7 +587,7 @@ func TestGetWorktreeForAgent_ExistingWorktree(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	info, err := manager.GetWorktreeForAgent("agent-cc")
+	info, err := manager.GetWorktreeForAgent(t.Context(), "agent-cc")
 	if err != nil {
 		t.Fatalf("GetWorktreeForAgent: %v", err)
 	}
@@ -315,8 +621,8 @@ func TestGetWorktreeForAgent_MultipleSessions(t *testing.T) {
 	m1 := NewManager(projectDir, "session-alpha")
 	m2 := NewManager(projectDir, "session-beta")
 
-	info1, _ := m1.GetWorktreeForAgent("agent-1")
-	info2, _ := m2.GetWorktreeForAgent("agent-1")
+	info1, _ := m1.GetWorktreeForAgent(t.Context(), "agent-1")
+	info2, _ := m2.GetWorktreeForAgent(t.Context(), "agent-1")
 
 	if info1.BranchName == info2.BranchName {
 		t.Error("expected different branch names for different sessions")
@@ -352,7 +658,7 @@ func TestListWorktrees_IsolatedBySession(t *testing.T) {
 		t.Fatalf("mkdir beta worktree: %v", err)
 	}
 
-	alphaWorktrees, err := alpha.ListWorktrees()
+	alphaWorktrees, err := alpha.ListWorktrees(t.Context())
 	if err != nil {
 		t.Fatalf("alpha ListWorktrees: %v", err)
 	}
@@ -363,7 +669,7 @@ func TestListWorktrees_IsolatedBySession(t *testing.T) {
 		t.Fatalf("alpha path = %q, want %q", alphaWorktrees[0].Path, alpha.worktreePath("agent-1"))
 	}
 
-	betaWorktrees, err := beta.ListWorktrees()
+	betaWorktrees, err := beta.ListWorktrees(t.Context())
 	if err != nil {
 		t.Fatalf("beta ListWorktrees: %v", err)
 	}
@@ -389,14 +695,14 @@ func TestCleanup_DoesNotRemoveOtherSessionWorktrees(t *testing.T) {
 		t.Fatalf("mkdir beta worktree: %v", err)
 	}
 
-	if err := alpha.Cleanup(); err != nil && !strings.Contains(err.Error(), "cleanup errors") {
+	if err := alpha.Cleanup(t.Context()); err != nil && !strings.Contains(err.Error(), "cleanup errors") {
 		t.Fatalf("alpha Cleanup: %v", err)
 	}
 	if _, err := os.Stat(beta.worktreePath("agent-1")); err != nil {
 		t.Fatalf("beta worktree should remain after alpha cleanup: %v", err)
 	}
 
-	betaWorktrees, err := beta.ListWorktrees()
+	betaWorktrees, err := beta.ListWorktrees(t.Context())
 	if err != nil {
 		t.Fatalf("beta ListWorktrees after alpha cleanup: %v", err)
 	}
@@ -445,7 +751,7 @@ func TestCreateForAgent_RealGitRepo(t *testing.T) {
 	tmp := setupWorktreeGitRepo(t)
 	manager := NewManager(tmp, "test-sess")
 
-	info, err := manager.CreateForAgent("cc-1")
+	info, err := manager.CreateForAgent(t.Context(), "cc-1")
 	if err != nil {
 		t.Fatalf("CreateForAgent: %v", err)
 	}
@@ -475,16 +781,16 @@ func TestListWorktrees_RealGitRepo(t *testing.T) {
 	manager := NewManager(tmp, "test-sess")
 
 	// Create two worktrees
-	_, err := manager.CreateForAgent("cc-1")
+	_, err := manager.CreateForAgent(t.Context(), "cc-1")
 	if err != nil {
 		t.Fatalf("CreateForAgent cc-1: %v", err)
 	}
-	_, err = manager.CreateForAgent("cod-2")
+	_, err = manager.CreateForAgent(t.Context(), "cod-2")
 	if err != nil {
 		t.Fatalf("CreateForAgent cod-2: %v", err)
 	}
 
-	worktrees, err := manager.ListWorktrees()
+	worktrees, err := manager.ListWorktrees(t.Context())
 	if err != nil {
 		t.Fatalf("ListWorktrees: %v", err)
 	}
@@ -509,7 +815,7 @@ func TestRemoveWorktree_RealGitRepo(t *testing.T) {
 	manager := NewManager(tmp, "test-sess")
 
 	// Create
-	info, err := manager.CreateForAgent("rm-agent")
+	info, err := manager.CreateForAgent(t.Context(), "rm-agent")
 	if err != nil {
 		t.Fatalf("CreateForAgent: %v", err)
 	}
@@ -518,12 +824,12 @@ func TestRemoveWorktree_RealGitRepo(t *testing.T) {
 	}
 
 	// Remove
-	if err := manager.RemoveWorktree("rm-agent"); err != nil {
+	if err := manager.RemoveWorktree(t.Context(), "rm-agent"); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 
 	// Verify removed
-	worktrees, err := manager.ListWorktrees()
+	worktrees, err := manager.ListWorktrees(t.Context())
 	if err != nil {
 		t.Fatalf("ListWorktrees: %v", err)
 	}
@@ -542,23 +848,23 @@ func TestCleanup_RealGitRepo(t *testing.T) {
 
 	// Create multiple worktrees
 	for _, name := range []string{"a1", "a2", "a3"} {
-		if _, err := manager.CreateForAgent(name); err != nil {
+		if _, err := manager.CreateForAgent(t.Context(), name); err != nil {
 			t.Fatalf("CreateForAgent %s: %v", name, err)
 		}
 	}
 
-	worktrees, _ := manager.ListWorktrees()
+	worktrees, _ := manager.ListWorktrees(t.Context())
 	if len(worktrees) != 3 {
 		t.Fatalf("expected 3 worktrees before cleanup, got %d", len(worktrees))
 	}
 
 	// Cleanup
-	if err := manager.Cleanup(); err != nil {
+	if err := manager.Cleanup(t.Context()); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 
 	// Verify all removed
-	worktrees, _ = manager.ListWorktrees()
+	worktrees, _ = manager.ListWorktrees(t.Context())
 	if len(worktrees) != 0 {
 		t.Errorf("expected 0 worktrees after cleanup, got %d", len(worktrees))
 	}
@@ -579,7 +885,7 @@ func TestCleanup_ErrorAggregation(t *testing.T) {
 		}
 	}
 
-	err := manager.Cleanup()
+	err := manager.Cleanup(t.Context())
 	// Cleanup may fail since these aren't real git worktrees,
 	// but it should aggregate errors, not panic
 	if err != nil && !strings.Contains(err.Error(), "cleanup errors") {
@@ -593,7 +899,7 @@ func TestMergeBack_NonGitRepo(t *testing.T) {
 	projectDir := t.TempDir()
 	manager := NewManager(projectDir, "sess")
 
-	err := manager.MergeBack("agent-1")
+	err := manager.MergeBack(t.Context(), "agent-1")
 	if err == nil {
 		t.Fatal("expected error for MergeBack in non-git directory")
 	}
@@ -606,7 +912,7 @@ func TestRemoveWorktree_NonExistent(t *testing.T) {
 	manager := NewManager(tmp, "test-sess")
 
 	// Remove non-existent worktree should not error fatally
-	err := manager.RemoveWorktree("nonexistent")
+	err := manager.RemoveWorktree(t.Context(), "nonexistent")
 	if err != nil {
 		t.Fatalf("RemoveWorktree (non-existent) should not error: %v", err)
 	}
@@ -622,7 +928,7 @@ func TestRemoveWorktree_RejectsUnsafeAgentNameWithoutDeletingSiblingPath(t *test
 		t.Fatalf("mkdir sibling path: %v", err)
 	}
 
-	err := manager.RemoveWorktree("../keep")
+	err := manager.RemoveWorktree(t.Context(), "../keep")
 	if err == nil {
 		t.Fatal("expected error for unsafe agent name")
 	}
@@ -649,7 +955,7 @@ func TestIsValidWorktree_NoGitFile(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	info, _ := manager.GetWorktreeForAgent("test-agent")
+	info, _ := manager.GetWorktreeForAgent(t.Context(), "test-agent")
 	if info.Error == "" {
 		t.Error("expected error for invalid worktree without .git file")
 	}
@@ -662,13 +968,13 @@ func TestIsValidWorktree_WithGitFile(t *testing.T) {
 	manager := NewManager(tmp, "test-sess")
 
 	// Create a real worktree
-	info, err := manager.CreateForAgent("valid-agent")
+	info, err := manager.CreateForAgent(t.Context(), "valid-agent")
 	if err != nil {
 		t.Fatalf("CreateForAgent: %v", err)
 	}
 
 	// GetWorktreeForAgent should report it as valid
-	info2, err := manager.GetWorktreeForAgent("valid-agent")
+	info2, err := manager.GetWorktreeForAgent(t.Context(), "valid-agent")
 	if err != nil {
 		t.Fatalf("GetWorktreeForAgent: %v", err)
 	}
@@ -687,7 +993,7 @@ func TestGetWorktreeForAgent_DoesNotTreatPrefixMatchedWorktreeAsValid(t *testing
 	tmp := setupWorktreeGitRepo(t)
 	manager := NewManager(tmp, "test-sess")
 
-	if _, err := manager.CreateForAgent("agent-10"); err != nil {
+	if _, err := manager.CreateForAgent(t.Context(), "agent-10"); err != nil {
 		t.Fatalf("CreateForAgent agent-10: %v", err)
 	}
 
@@ -699,7 +1005,7 @@ func TestGetWorktreeForAgent_DoesNotTreatPrefixMatchedWorktreeAsValid(t *testing
 		t.Fatalf("write fake .git: %v", err)
 	}
 
-	info, err := manager.GetWorktreeForAgent("agent-1")
+	info, err := manager.GetWorktreeForAgent(t.Context(), "agent-1")
 	if err != nil {
 		t.Fatalf("GetWorktreeForAgent: %v", err)
 	}

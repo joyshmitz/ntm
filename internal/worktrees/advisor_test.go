@@ -1,6 +1,8 @@
 package worktrees
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,14 +84,27 @@ func TestInspectRiskInput_DetectsSymlinkedRepo(t *testing.T) {
 		t.Skipf("symlink unsupported: %v", err)
 	}
 
-	input := InspectRiskInput(&WorktreeInfo{
+	input, err := InspectRiskInput(t.Context(), &WorktreeInfo{
 		AgentName:  "cc-1",
 		Path:       link,
 		BranchName: "ntm/test-session/cc-1",
 		SessionID:  "test-session",
 	}, projectDir)
+	if err != nil {
+		t.Fatalf("InspectRiskInput() error = %v", err)
+	}
 	if !input.SymlinkedRepo {
 		t.Fatalf("SymlinkedRepo = false, want true: %+v", input)
+	}
+}
+
+func TestInspectRiskInputRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := InspectRiskInput(ctx, &WorktreeInfo{Path: t.TempDir()}, t.TempDir())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("InspectRiskInput() error = %v, want context.Canceled", err)
 	}
 }
 

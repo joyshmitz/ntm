@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -166,6 +167,48 @@ func TestAgentTypeGrokAliasesAreExact(t *testing.T) {
 	}
 	if got := AgentTypeGrok.ProfileName(); got != "Grok" {
 		t.Errorf("AgentTypeGrok.ProfileName() = %q, want Grok", got)
+	}
+}
+
+func TestAgentTypeValidateAutomatedRelaunch(t *testing.T) {
+	for _, agentType := range []AgentType{AgentTypeGrok, "grok-build", "xai_grok_build"} {
+		if err := agentType.ValidateAutomatedRelaunch(); !errors.Is(err, ErrAutomatedRelaunchNotImplemented) {
+			t.Errorf("AgentType(%q).ValidateAutomatedRelaunch() error = %v, want sentinel", agentType, err)
+		}
+	}
+
+	for _, agentType := range []AgentType{AgentTypeClaudeCode, AgentTypeCodex, AgentTypeGemini, AgentTypeUser, AgentTypeUnknown} {
+		if err := agentType.ValidateAutomatedRelaunch(); err != nil {
+			t.Errorf("AgentType(%q).ValidateAutomatedRelaunch() error = %v, want nil", agentType, err)
+		}
+	}
+}
+
+func TestAgentTypeValidateAutomatedPromptDelivery(t *testing.T) {
+	for _, agentType := range []AgentType{
+		AgentTypeGrok,
+		" Grok-Build ",
+		"GROK_BUILD",
+		"xai-grok-build",
+		"XAI_GROK_BUILD",
+	} {
+		if err := agentType.ValidateAutomatedPromptDelivery(); !errors.Is(err, ErrAutomatedPromptDeliveryNotImplemented) {
+			t.Errorf("AgentType(%q).ValidateAutomatedPromptDelivery() error = %v, want sentinel", agentType, err)
+		}
+	}
+
+	for _, agentType := range []AgentType{
+		AgentTypeClaudeCode,
+		AgentTypeCodex,
+		AgentTypeGemini,
+		AgentTypeAntigravity,
+		AgentTypeUser,
+		AgentTypeUnknown,
+		"grok-cli",
+	} {
+		if err := agentType.ValidateAutomatedPromptDelivery(); err != nil {
+			t.Errorf("AgentType(%q).ValidateAutomatedPromptDelivery() error = %v, want nil", agentType, err)
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -19,6 +20,9 @@ type WorktreeService struct {
 	mu       sync.Mutex
 	managers map[string]*WorktreeManager // project path -> manager
 	config   *config.Config
+
+	detectAgentPanesFn      func(context.Context, string) ([]AgentPane, error)
+	changeDirectoryInPaneFn func(context.Context, string, string) error
 }
 
 // NewWorktreeService creates a new worktree service
@@ -82,14 +86,23 @@ type ProvisionError struct {
 
 // AutoProvisionSession automatically provisions worktrees for all agent panes in a session
 func (ws *WorktreeService) AutoProvisionSession(ctx context.Context, sessionName string) (*AutoProvisionResponse, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
+	}
 	startTime := time.Now()
 
 	// Get project directory for this session
 	projectDir := ws.config.GetProjectDir(sessionName)
 	if projectDir == "" {
 		// Try to detect from current working directory
-		if cwd, err := os.Getwd(); err == nil && IsGitRepository(cwd) {
-			projectDir = cwd
+		if cwd, err := os.Getwd(); err == nil {
+			isRepository, repoErr := IsGitRepository(ctx, cwd)
+			if repoErr != nil {
+				return nil, fmt.Errorf("detect current git repository: %w", repoErr)
+			}
+			if isRepository {
+				projectDir = cwd
+			}
 		}
 	}
 
@@ -101,8 +114,12 @@ func (ws *WorktreeService) AutoProvisionSession(ctx context.Context, sessionName
 		Errors:      []ProvisionError{},
 	}
 
-	// Check if we can provision worktrees for this project
-	if projectDir == "" || !IsGitRepository(projectDir) {
+	// Check if we can provision worktrees for this project.
+	isRepository, repoErr := IsGitRepository(ctx, projectDir)
+	if repoErr != nil {
+		return nil, fmt.Errorf("check worktree project repository: %w", repoErr)
+	}
+	if !isRepository {
 		response.Skipped = append(response.Skipped, SkippedProvision{
 			PaneID:    "session",
 			AgentType: "all",
@@ -113,19 +130,29 @@ func (ws *WorktreeService) AutoProvisionSession(ctx context.Context, sessionName
 	}
 
 	// Get agent panes from the session
-	agentPanes, err := ws.detectAgentPanes(sessionName)
+	agentPanes, err := ws.sessionAgentPanes(ctx, sessionName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to detect agent panes: %w", err)
 	}
+	if err := validateWorktreeProvisionTargets(agentPanes); err != nil {
+		return nil, fmt.Errorf("worktree provisioning preflight failed: %w", err)
+	}
 
 	// Get or create worktree manager for this project
-	manager, err := ws.getManager(projectDir)
+	manager, err := ws.getManager(ctx, projectDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worktree manager: %w", err)
 	}
 
 	// Provision worktrees for each agent pane
 	for _, agentPane := range agentPanes {
+		if err := validateWorktreeContext(ctx); err != nil {
+			response.TotalProvisions = len(agentPanes)
+			response.SuccessCount = len(response.Provisions)
+			response.ProcessingTime = time.Since(startTime).String()
+			return response, fmt.Errorf("automatic worktree provisioning canceled: %w", err)
+		}
+
 		// Generate a session ID that uses the same canonical agent key as
 		// branch/worktree naming so cleanup/status matching remains consistent.
 		sessionID := buildSessionWorktreeID(sessionName, agentPane.AgentType, agentPane.AgentNum)
@@ -133,31 +160,61 @@ func (ws *WorktreeService) AutoProvisionSession(ctx context.Context, sessionName
 		// Provision worktree
 		worktreeInfo, err := manager.ProvisionWorktree(ctx, agentPane.AgentType, sessionID)
 		if err != nil {
+			if worktreeInfo != nil {
+				response.Provisions = append(response.Provisions, worktreeProvisionForPane(agentPane, worktreeInfo))
+			}
 			response.Errors = append(response.Errors, ProvisionError{
 				PaneID:    agentPane.PaneID,
 				AgentType: agentPane.AgentType,
 				Error:     err.Error(),
 			})
+			if ctx.Err() != nil {
+				response.TotalProvisions = len(agentPanes)
+				response.SuccessCount = len(response.Provisions)
+				response.ProcessingTime = time.Since(startTime).String()
+				if worktreeInfo != nil {
+					return response, fmt.Errorf(
+						"provision worktree for pane %s; checkout retained at %s on branch %s: %w",
+						agentPane.PaneID, worktreeInfo.Path, worktreeInfo.Branch, err,
+					)
+				}
+				return response, fmt.Errorf("provision worktree for pane %s: %w", agentPane.PaneID, err)
+			}
 			continue
 		}
 
-		// Generate cd command for the pane
-		changeDirCommand := fmt.Sprintf("cd %s", tmux.ShellQuote(worktreeInfo.Path))
-
-		provision := WorktreeProvision{
-			PaneID:       agentPane.PaneID,
-			AgentType:    agentPane.AgentType,
-			WorktreePath: worktreeInfo.Path,
-			Branch:       worktreeInfo.Branch,
-			Commit:       worktreeInfo.Commit,
-			ChangeDir:    changeDirCommand,
+		response.Provisions = append(response.Provisions, worktreeProvisionForPane(agentPane, worktreeInfo))
+		if err := validateWorktreeContext(ctx); err != nil {
+			response.TotalProvisions = len(agentPanes)
+			response.SuccessCount = len(response.Provisions)
+			response.ProcessingTime = time.Since(startTime).String()
+			return response, fmt.Errorf(
+				"checkout provisioned at %s on branch %s before pane update was canceled: %w",
+				worktreeInfo.Path, worktreeInfo.Branch, err,
+			)
 		}
 
-		response.Provisions = append(response.Provisions, provision)
-
 		// Optionally, automatically change directory in the pane
-		if err := ws.changeDirectoryInPane(agentPane.PaneID, worktreeInfo.Path); err != nil {
+		if err := ws.changePaneDirectory(ctx, agentPane.PaneID, worktreeInfo.Path); err != nil {
+			if ctx.Err() != nil {
+				response.TotalProvisions = len(agentPanes)
+				response.SuccessCount = len(response.Provisions)
+				response.ProcessingTime = time.Since(startTime).String()
+				return response, fmt.Errorf(
+					"checkout provisioned at %s on branch %s before pane update was canceled: %w",
+					worktreeInfo.Path, worktreeInfo.Branch, err,
+				)
+			}
 			log.Printf("Warning: failed to change directory in pane %s: %v", agentPane.PaneID, err)
+		}
+		if err := validateWorktreeContext(ctx); err != nil {
+			response.TotalProvisions = len(agentPanes)
+			response.SuccessCount = len(response.Provisions)
+			response.ProcessingTime = time.Since(startTime).String()
+			return response, fmt.Errorf(
+				"checkout provisioned at %s on branch %s before cancellation: %w",
+				worktreeInfo.Path, worktreeInfo.Branch, err,
+			)
 		}
 	}
 
@@ -172,12 +229,19 @@ func (ws *WorktreeService) AutoProvisionSession(ctx context.Context, sessionName
 // It returns the number of worktrees actually removed so callers can
 // distinguish a real cleanup from a no-op (#151).
 func (ws *WorktreeService) CleanupSessionWorktrees(ctx context.Context, sessionName string) (int, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return 0, err
+	}
 	projectDir := ws.config.GetProjectDir(sessionName)
-	if projectDir == "" || !IsGitRepository(projectDir) {
+	isRepository, repoErr := IsGitRepository(ctx, projectDir)
+	if repoErr != nil {
+		return 0, fmt.Errorf("check cleanup project repository: %w", repoErr)
+	}
+	if !isRepository {
 		return 0, nil // Nothing to clean up
 	}
 
-	manager, err := ws.getManager(projectDir)
+	manager, err := ws.getManager(ctx, projectDir)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create worktree manager: %w", err)
 	}
@@ -190,33 +254,46 @@ func (ws *WorktreeService) CleanupSessionWorktrees(ctx context.Context, sessionN
 
 	removed := 0
 	for _, wt := range worktrees {
+		if err := validateWorktreeContext(ctx); err != nil {
+			return removed, fmt.Errorf("session worktree cleanup canceled: %w", err)
+		}
 		// Check if this worktree is associated with the session
 		// Branch format: agent/<agent-type>/<session-id>
-		if strings.HasPrefix(wt.Branch, "agent/") {
-			parts := strings.SplitN(wt.Branch[6:], "/", 2)
-
-			if len(parts) >= 2 {
-				agentType := parts[0]
-				sessionID := parts[1]
-
-				// bd-y9ndb: sessionID format is <sessionName>-<agentType>-<num>.
-				// HasPrefix(sessionID, sessionName+"-") alone matched
-				// "my-app-claude-1" against sessionName="my", causing cleanup
-				// of "my-app"'s worktree (data loss). Anchor on the known
-				// agentType and require the trailing portion to be all
-				// digits so "my" cannot match a "my-app-..." sessionID.
-				if sessionMatchesWorktree(sessionName, agentType, sessionID) {
-					// This worktree belongs to our session. Remove the exact
-					// path reported by git so cleanup still works for
-					// renamed or older worktree basename schemes.
-					if err := manager.removeWorktreePathAndBranch(ctx, wt.Path, wt.Branch); err != nil {
-						log.Printf("Warning: failed to remove worktree for %s: %v", sessionID, err)
-					} else {
-						removed++
-					}
-				}
-			}
+		if !strings.HasPrefix(wt.Branch, "agent/") {
+			continue
 		}
+
+		parts := strings.SplitN(wt.Branch[6:], "/", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		agentType := parts[0]
+		sessionID := parts[1]
+
+		// bd-y9ndb: sessionID format is <sessionName>-<agentType>-<num>.
+		// HasPrefix(sessionID, sessionName+"-") alone matched
+		// "my-app-claude-1" against sessionName="my", causing cleanup
+		// of "my-app"'s worktree (data loss). Anchor on the known
+		// agentType and require the trailing portion to be all
+		// digits so "my" cannot match a "my-app-..." sessionID.
+		if !sessionMatchesWorktree(sessionName, agentType, sessionID) {
+			continue
+		}
+
+		// This worktree belongs to our session. Remove the exact path
+		// reported by git so cleanup still works for renamed or older
+		// worktree basename schemes.
+		if err := manager.removeWorktreePathAndBranch(ctx, wt.Path, wt.Branch); err != nil {
+			if ctx.Err() != nil {
+				return removed, fmt.Errorf("remove session worktree %s: %w", wt.Path, err)
+			}
+			log.Printf("Warning: failed to remove worktree for %s: %v", sessionID, err)
+			continue
+		}
+		removed++
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return removed, fmt.Errorf("session worktree cleanup canceled: %w", err)
 	}
 
 	return removed, nil
@@ -224,12 +301,19 @@ func (ws *WorktreeService) CleanupSessionWorktrees(ctx context.Context, sessionN
 
 // GetSessionWorktreeStatus returns the status of worktrees for a session
 func (ws *WorktreeService) GetSessionWorktreeStatus(ctx context.Context, sessionName string) (map[string]*WorktreeInfo, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
+	}
 	projectDir := ws.config.GetProjectDir(sessionName)
-	if projectDir == "" || !IsGitRepository(projectDir) {
+	isRepository, repoErr := IsGitRepository(ctx, projectDir)
+	if repoErr != nil {
+		return nil, fmt.Errorf("check status project repository: %w", repoErr)
+	}
+	if !isRepository {
 		return make(map[string]*WorktreeInfo), nil
 	}
 
-	manager, err := ws.getManager(projectDir)
+	manager, err := ws.getManager(ctx, projectDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worktree manager: %w", err)
 	}
@@ -242,6 +326,9 @@ func (ws *WorktreeService) GetSessionWorktreeStatus(ctx context.Context, session
 	sessionWorktrees := make(map[string]*WorktreeInfo)
 
 	for _, wt := range worktrees {
+		if err := validateWorktreeContext(ctx); err != nil {
+			return nil, fmt.Errorf("session worktree status canceled: %w", err)
+		}
 		// Check if this worktree belongs to the session
 		if strings.HasPrefix(wt.Branch, "agent/") {
 			parts := strings.SplitN(wt.Branch[6:], "/", 2)
@@ -256,6 +343,9 @@ func (ws *WorktreeService) GetSessionWorktreeStatus(ctx context.Context, session
 				}
 			}
 		}
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, fmt.Errorf("session worktree status canceled: %w", err)
 	}
 
 	return sessionWorktrees, nil
@@ -314,7 +404,10 @@ func isUserAgentType(agentType tmux.AgentType) bool {
 
 // getManager gets or creates a worktree manager for a project.
 // Thread-safe: protects the managers map with a mutex.
-func (ws *WorktreeService) getManager(projectDir string) (*WorktreeManager, error) {
+func (ws *WorktreeService) getManager(ctx context.Context, projectDir string) (*WorktreeManager, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
+	}
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 
@@ -322,7 +415,7 @@ func (ws *WorktreeService) getManager(projectDir string) (*WorktreeManager, erro
 		return manager, nil
 	}
 
-	manager, err := NewWorktreeManager(projectDir)
+	manager, err := NewWorktreeManager(ctx, projectDir)
 	if err != nil {
 		return nil, err
 	}
@@ -331,13 +424,20 @@ func (ws *WorktreeService) getManager(projectDir string) (*WorktreeManager, erro
 	return manager, nil
 }
 
-// detectAgentPanes detects agent panes in a tmux session
-func (ws *WorktreeService) detectAgentPanes(sessionName string) ([]AgentPane, error) {
-	if !tmux.SessionExists(sessionName) {
+// detectAgentPanes detects agent panes in a tmux session.
+func (ws *WorktreeService) detectAgentPanes(ctx context.Context, sessionName string) ([]AgentPane, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
+	}
+	exists, err := tmux.SessionExistsContext(ctx, sessionName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check session %s: %w", sessionName, err)
+	}
+	if !exists {
 		return nil, fmt.Errorf("session %s does not exist", sessionName)
 	}
 
-	panes, err := tmux.GetPanes(sessionName)
+	panes, err := tmux.GetPanesContext(ctx, sessionName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get panes: %w", err)
 	}
@@ -358,30 +458,98 @@ func (ws *WorktreeService) detectAgentPanes(sessionName string) ([]AgentPane, er
 		})
 	}
 
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, fmt.Errorf("agent pane discovery canceled: %w", err)
+	}
 	return agentPanes, nil
 }
 
+func (ws *WorktreeService) sessionAgentPanes(ctx context.Context, sessionName string) ([]AgentPane, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
+	}
+	if ws.detectAgentPanesFn != nil {
+		return ws.detectAgentPanesFn(ctx, sessionName)
+	}
+	return ws.detectAgentPanes(ctx, sessionName)
+}
+
+func validateWorktreeProvisionTargets(agentPanes []AgentPane) error {
+	for _, pane := range agentPanes {
+		if err := agent.AgentType(pane.AgentType).ValidateAutomatedPromptDelivery(); err != nil {
+			return fmt.Errorf("pane %s (%s): %w", pane.PaneID, agent.AgentType(pane.AgentType).Canonical(), err)
+		}
+	}
+	return nil
+}
+
+func worktreeProvisionForPane(agentPane AgentPane, worktreeInfo *WorktreeInfo) WorktreeProvision {
+	return WorktreeProvision{
+		PaneID:       agentPane.PaneID,
+		AgentType:    agentPane.AgentType,
+		WorktreePath: worktreeInfo.Path,
+		Branch:       worktreeInfo.Branch,
+		Commit:       worktreeInfo.Commit,
+		ChangeDir:    fmt.Sprintf("cd %s", tmux.ShellQuote(worktreeInfo.Path)),
+	}
+}
+
+func (ws *WorktreeService) changePaneDirectory(ctx context.Context, paneID, workingDir string) error {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return err
+	}
+	if ws.changeDirectoryInPaneFn != nil {
+		return ws.changeDirectoryInPaneFn(ctx, paneID, workingDir)
+	}
+	return ws.changeDirectoryInPane(ctx, paneID, workingDir)
+}
+
 // changeDirectoryInPane sends a cd command to a tmux pane
-func (ws *WorktreeService) changeDirectoryInPane(paneID, workingDir string) error {
+func (ws *WorktreeService) changeDirectoryInPane(ctx context.Context, paneID, workingDir string) error {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return err
+	}
 	// Send Ctrl-C first to interrupt any running command
-	if err := tmux.SendKeys(paneID, "C-c", false); err != nil {
+	if err := tmux.DefaultClient.RunSilentContext(ctx, "send-keys", "-t", paneID, "C-c"); err != nil {
 		return fmt.Errorf("failed to send interrupt: %w", err)
 	}
 
 	// Wait a moment for the interrupt to take effect
-	time.Sleep(100 * time.Millisecond)
+	if err := waitForWorktreePaneDelay(ctx, 100*time.Millisecond); err != nil {
+		return fmt.Errorf("pane update canceled after interrupt: %w", err)
+	}
 
 	// Send the cd command
 	cdCommand := fmt.Sprintf("cd %s", tmux.ShellQuote(workingDir))
-	if err := tmux.SendKeys(paneID, cdCommand, true); err != nil {
+	if err := tmux.SendKeysContext(ctx, paneID, cdCommand, true); err != nil {
 		return fmt.Errorf("failed to send cd command: %w", err)
 	}
 
 	return nil
 }
 
+func waitForWorktreePaneDelay(ctx context.Context, delay time.Duration) error {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return err
+	}
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // GetAllWorktrees returns worktrees across all managed projects
 func (ws *WorktreeService) GetAllWorktrees(ctx context.Context) (map[string][]*WorktreeInfo, error) {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, err
+	}
 	ws.mu.Lock()
 	snapshot := make(map[string]*WorktreeManager, len(ws.managers))
 	for k, v := range ws.managers {
@@ -391,11 +559,17 @@ func (ws *WorktreeService) GetAllWorktrees(ctx context.Context) (map[string][]*W
 
 	result := make(map[string][]*WorktreeInfo)
 	for projectDir, manager := range snapshot {
+		if err := validateWorktreeContext(ctx); err != nil {
+			return nil, fmt.Errorf("worktree listing canceled: %w", err)
+		}
 		worktrees, err := manager.ListWorktrees(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to list worktrees for %s: %w", projectDir, err)
 		}
 		result[projectDir] = worktrees
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return nil, fmt.Errorf("worktree listing canceled: %w", err)
 	}
 
 	return result, nil
@@ -403,6 +577,9 @@ func (ws *WorktreeService) GetAllWorktrees(ctx context.Context) (map[string][]*W
 
 // CleanupStaleWorktrees removes stale worktrees across all managed projects
 func (ws *WorktreeService) CleanupStaleWorktrees(ctx context.Context, maxAge time.Duration) error {
+	if err := validateWorktreeContext(ctx); err != nil {
+		return err
+	}
 	ws.mu.Lock()
 	snapshot := make([]*WorktreeManager, 0, len(ws.managers))
 	for _, v := range ws.managers {
@@ -411,9 +588,15 @@ func (ws *WorktreeService) CleanupStaleWorktrees(ctx context.Context, maxAge tim
 	ws.mu.Unlock()
 
 	for _, manager := range snapshot {
+		if err := validateWorktreeContext(ctx); err != nil {
+			return fmt.Errorf("stale worktree cleanup canceled: %w", err)
+		}
 		if err := manager.CleanupStaleWorktrees(ctx, maxAge); err != nil {
 			return err
 		}
+	}
+	if err := validateWorktreeContext(ctx); err != nil {
+		return fmt.Errorf("stale worktree cleanup canceled: %w", err)
 	}
 	return nil
 }

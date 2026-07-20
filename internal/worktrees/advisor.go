@@ -1,6 +1,7 @@
 package worktrees
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,9 +74,15 @@ type WorktreeAdvisorLogRow struct {
 }
 
 // InspectRiskInput enriches WorktreeInfo with read-only filesystem/git checks.
-func InspectRiskInput(info *WorktreeInfo, projectPath string) WorktreeRiskInput {
+func InspectRiskInput(ctx context.Context, info *WorktreeInfo, projectPath string) (WorktreeRiskInput, error) {
+	if ctx == nil {
+		return WorktreeRiskInput{}, fmt.Errorf("inspect worktree risk requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return WorktreeRiskInput{}, err
+	}
 	if info == nil {
-		return WorktreeRiskInput{Error: "missing worktree info", OwnershipConfidence: 0.2}
+		return WorktreeRiskInput{Error: "missing worktree info", OwnershipConfidence: 0.2}, nil
 	}
 	input := WorktreeRiskInput{
 		AgentName:           info.AgentName,
@@ -91,9 +98,17 @@ func InspectRiskInput(info *WorktreeInfo, projectPath string) WorktreeRiskInput 
 		input.LastUsed = stat.ModTime()
 	}
 	if worktreeTextEmpty(info.Error) {
-		input.Dirty = worktreeHasDirtyState(info.Path)
+		dirty, err := worktreeHasDirtyState(ctx, info.Path)
+		if err != nil {
+			if ctx.Err() != nil {
+				return WorktreeRiskInput{}, ctx.Err()
+			}
+			input.Error = fmt.Sprintf("inspect dirty worktree state: %v", err)
+			return input, nil
+		}
+		input.Dirty = dirty
 	}
-	return input
+	return input, nil
 }
 
 // AdviseWorktrees scores worktrees and emits proof-mode actions.
@@ -258,12 +273,21 @@ func pathIsSymlink(p string) bool {
 	return info.Mode()&os.ModeSymlink != 0
 }
 
-func worktreeHasDirtyState(path string) bool {
-	if worktreeTextEmpty(path) {
-		return false
+func worktreeHasDirtyState(ctx context.Context, path string) (bool, error) {
+	if ctx == nil {
+		return false, fmt.Errorf("inspect worktree dirty state requires a context")
 	}
-	out, err := gitOutput(path, "status", "--porcelain")
-	return err == nil && !worktreeTextEmpty(string(out))
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if worktreeTextEmpty(path) {
+		return false, nil
+	}
+	out, err := gitOutput(ctx, path, "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	return !worktreeTextEmpty(string(out)), nil
 }
 
 func worktreeRiskLevel(score int) string {

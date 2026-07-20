@@ -3,6 +3,7 @@ package worktrees
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,34 +15,55 @@ import (
 // gitTimeout is the maximum duration for any git command in the worktrees package.
 const gitTimeout = 30 * time.Second
 
-// gitCombinedOutput runs a git command with the standard timeout and returns combined stdout/stderr.
-func gitCombinedOutput(dir string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+// gitCombinedOutput runs a git command with a timeout derived from the caller.
+func gitCombinedOutput(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("git operation requires a context")
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(commandCtx, "git", args...)
 	cmd.Dir = dir
-	return cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
+	if commandErr := commandCtx.Err(); commandErr != nil {
+		return output, errors.Join(err, commandErr)
+	}
+	return output, err
 }
 
-// gitRun runs a git command with the standard timeout.
-func gitRun(dir string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+// gitRun runs a Git command with a timeout derived from the caller.
+func gitRun(ctx context.Context, dir string, args ...string) error {
+	if ctx == nil {
+		return errors.New("git operation requires a context")
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(commandCtx, "git", args...)
 	cmd.Dir = dir
-	return cmd.Run()
+	err := cmd.Run()
+	if commandErr := commandCtx.Err(); commandErr != nil {
+		return errors.Join(err, commandErr)
+	}
+	return err
 }
 
-// gitOutput runs a git command with the standard timeout and returns stdout.
-func gitOutput(dir string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+// gitOutput runs a git command with a timeout derived from the caller.
+func gitOutput(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("git operation requires a context")
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(commandCtx, "git", args...)
 	cmd.Dir = dir
-	return cmd.Output()
+	output, err := cmd.Output()
+	if commandErr := commandCtx.Err(); commandErr != nil {
+		return output, errors.Join(err, commandErr)
+	}
+	return output, err
 }
 
 // WorktreeManager manages Git worktrees for agent isolation
@@ -115,8 +137,96 @@ func (m *WorktreeManager) buildWorktreeInfo(agentName string) (*WorktreeInfo, er
 	}, nil
 }
 
+// PreflightForAgent validates every deterministic failure that can be checked
+// before provisioning a worktree. CreateForAgent rechecks path state and Git
+// enforces branch conditions at the mutation boundary, so races fail closed.
+func (m *WorktreeManager) PreflightForAgent(ctx context.Context, agentName string) error {
+	if ctx == nil {
+		return errors.New("worktree preflight requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("worktree preflight canceled: %w", err)
+	}
+	info, err := m.buildWorktreeInfo(agentName)
+	if err != nil {
+		return err
+	}
+
+	if output, err := gitCombinedOutput(ctx, m.projectPath, "check-ref-format", "refs/heads/"+info.BranchName); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("worktree preflight canceled: %w", ctxErr)
+		}
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("invalid worktree branch %q: %s: %w", info.BranchName, detail, err)
+	}
+
+	stat, statErr := os.Stat(info.Path)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("worktree preflight canceled: %w", ctxErr)
+	}
+	switch {
+	case statErr == nil:
+		if !stat.IsDir() {
+			return fmt.Errorf("worktree path exists but is not a directory: %s", info.Path)
+		}
+		valid, validErr := m.isValidWorktree(ctx, info.Path)
+		if validErr != nil {
+			return fmt.Errorf("inspect existing worktree registration at %s: %w", info.Path, validErr)
+		}
+		if !valid {
+			return fmt.Errorf("worktree path exists but is not a valid git worktree: %s", info.Path)
+		}
+		currentBranch, branchErr := worktreeCurrentBranch(ctx, info.Path)
+		if branchErr != nil {
+			return fmt.Errorf("inspect existing worktree branch at %s: %w", info.Path, branchErr)
+		}
+		if currentBranch == "" {
+			return fmt.Errorf("worktree path %s has detached HEAD; expected branch %q", info.Path, info.BranchName)
+		}
+		if currentBranch != info.BranchName {
+			return fmt.Errorf(
+				"worktree path %s already exists on branch %q; would collide with the new branch %q (likely cross-contamination; pass --worktree-name to disambiguate)",
+				info.Path, currentBranch, info.BranchName,
+			)
+		}
+		return nil
+	case !errors.Is(statErr, os.ErrNotExist):
+		return fmt.Errorf("stat worktree path %s: %w", info.Path, statErr)
+	}
+
+	ref := "refs/heads/" + info.BranchName
+	output, branchErr := gitCombinedOutput(ctx, m.projectPath, "show-ref", "--verify", "--quiet", ref)
+	if branchErr == nil {
+		return fmt.Errorf("worktree branch %q already exists without its expected worktree path %s", info.BranchName, info.Path)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(branchErr, &exitErr) || exitErr.ExitCode() != 1 {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("worktree preflight canceled: %w", ctxErr)
+		}
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = branchErr.Error()
+		}
+		return fmt.Errorf("inspect worktree branch %q: %s: %w", info.BranchName, detail, branchErr)
+	}
+
+	return nil
+}
+
 // CreateForAgent creates a new worktree for the specified agent
-func (m *WorktreeManager) CreateForAgent(agentName string) (*WorktreeInfo, error) {
+func (m *WorktreeManager) CreateForAgent(ctx context.Context, agentName string) (*WorktreeInfo, error) {
+	if ctx == nil {
+		err := errors.New("worktree creation requires a context")
+		return &WorktreeInfo{AgentName: strings.TrimSpace(agentName), SessionID: strings.TrimSpace(m.session), Error: err.Error()}, err
+	}
+	if err := ctx.Err(); err != nil {
+		wrapped := fmt.Errorf("worktree creation canceled: %w", err)
+		return &WorktreeInfo{AgentName: strings.TrimSpace(agentName), SessionID: strings.TrimSpace(m.session), Error: wrapped.Error()}, wrapped
+	}
 	info, err := m.buildWorktreeInfo(agentName)
 	if err != nil {
 		return &WorktreeInfo{
@@ -133,6 +243,10 @@ func (m *WorktreeManager) CreateForAgent(agentName string) (*WorktreeInfo, error
 		info.Error = fmt.Sprintf("failed to create worktree directory: %v", err)
 		return info, err
 	}
+	if err := ctx.Err(); err != nil {
+		info.Error = fmt.Sprintf("worktree creation canceled: %v", err)
+		return info, fmt.Errorf("worktree creation canceled: %w", err)
+	}
 
 	// Check if worktree already exists
 	if stat, err := os.Stat(worktreePath); err == nil {
@@ -140,7 +254,12 @@ func (m *WorktreeManager) CreateForAgent(agentName string) (*WorktreeInfo, error
 			info.Error = "worktree path exists but is not a directory"
 			return info, fmt.Errorf("worktree path exists but is not a directory: %s", worktreePath)
 		}
-		if !m.isValidWorktree(worktreePath) {
+		valid, validErr := m.isValidWorktree(ctx, worktreePath)
+		if validErr != nil {
+			info.Error = fmt.Sprintf("failed to inspect existing worktree registration: %v", validErr)
+			return info, fmt.Errorf("inspect existing worktree registration at %s: %w", worktreePath, validErr)
+		}
+		if !valid {
 			info.Error = "invalid or stale worktree"
 			return info, fmt.Errorf("worktree path exists but is not a valid git worktree: %s", worktreePath)
 		}
@@ -153,13 +272,21 @@ func (m *WorktreeManager) CreateForAgent(agentName string) (*WorktreeInfo, error
 		// created (`ntm/<session>/<agent>`); on mismatch, refuse loudly
 		// so the caller has to either reuse the same agent name or pick
 		// a non-colliding path. See ntm#145.
-		if currentBranch, branchErr := worktreeCurrentBranch(worktreePath); branchErr == nil &&
-			currentBranch != "" && currentBranch != info.BranchName {
+		currentBranch, branchErr := worktreeCurrentBranch(ctx, worktreePath)
+		if branchErr != nil {
+			info.Error = fmt.Sprintf("failed to inspect existing worktree branch: %v", branchErr)
+			return info, fmt.Errorf("inspect existing worktree branch at %s: %w", worktreePath, branchErr)
+		}
+		if currentBranch == "" {
+			info.Error = fmt.Sprintf("worktree path %s has detached HEAD; expected branch %q", worktreePath, info.BranchName)
+			return info, errors.New(info.Error)
+		}
+		if currentBranch != info.BranchName {
 			info.Error = fmt.Sprintf(
 				"worktree path %s already exists on branch %q; would collide with the new branch %q (likely cross-contamination — see ntm#145; pass --worktree-name to disambiguate)",
 				worktreePath, currentBranch, info.BranchName,
 			)
-			return info, fmt.Errorf("%s", info.Error)
+			return info, errors.New(info.Error)
 		}
 		info.Created = false
 		return info, nil
@@ -169,18 +296,63 @@ func (m *WorktreeManager) CreateForAgent(agentName string) (*WorktreeInfo, error
 	}
 
 	// Create the worktree with new branch
-	output, err := gitCombinedOutput(m.projectPath, "worktree", "add", "-b", info.BranchName, worktreePath)
+	if err := ctx.Err(); err != nil {
+		info.Error = fmt.Sprintf("worktree creation canceled: %v", err)
+		return info, fmt.Errorf("worktree creation canceled: %w", err)
+	}
+	output, err := gitCombinedOutput(ctx, m.projectPath, "worktree", "add", "-b", info.BranchName, worktreePath)
 	if err != nil {
+		// A wrapper can run the real `git worktree add` successfully and then
+		// block until cancellation. Preserve the retained checkout in the
+		// failure result instead of reporting an unmutated filesystem.
+		info.Created = worktreePathProvisioned(worktreePath)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			info.Error = fmt.Sprintf("worktree creation canceled: %v", ctxErr)
+			return info, fmt.Errorf("worktree creation canceled: %w", ctxErr)
+		}
 		info.Error = fmt.Sprintf("git worktree add failed: %v: %s", err, string(output))
+		// Surface git's own diagnostics: a bare "exit status 128" is
+		// undebuggable for the user (#222).
+		if trimmed := strings.TrimSpace(string(output)); trimmed != "" {
+			return info, fmt.Errorf("failed to create worktree: %w: %s", err, trimmed)
+		}
 		return info, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
 	info.Created = true
+	currentBranch, branchErr := worktreeCurrentBranch(ctx, worktreePath)
+	if branchErr != nil {
+		info.Error = fmt.Sprintf("failed to inspect created worktree branch: %v", branchErr)
+		return info, fmt.Errorf("inspect created worktree branch at %s: %w", worktreePath, branchErr)
+	}
+	if currentBranch == "" {
+		info.Error = fmt.Sprintf("created worktree path %s has detached HEAD; expected branch %q", worktreePath, info.BranchName)
+		return info, errors.New(info.Error)
+	}
+	if currentBranch != info.BranchName {
+		info.Error = fmt.Sprintf("created worktree path %s is on branch %q; expected %q", worktreePath, currentBranch, info.BranchName)
+		return info, errors.New(info.Error)
+	}
 	return info, nil
 }
 
-// ListWorktrees returns information about all worktrees for the current session
-func (m *WorktreeManager) ListWorktrees() ([]*WorktreeInfo, error) {
+func worktreePathProvisioned(worktreePath string) bool {
+	info, err := os.Stat(worktreePath)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	gitInfo, err := os.Stat(filepath.Join(worktreePath, ".git"))
+	return err == nil && !gitInfo.IsDir()
+}
+
+// ListWorktrees returns information about all worktrees for the current session.
+func (m *WorktreeManager) ListWorktrees(ctx context.Context) ([]*WorktreeInfo, error) {
+	if ctx == nil {
+		return nil, errors.New("list worktrees requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	sessionName, err := validateWorktreeComponent("session", m.session)
 	if err != nil {
 		return nil, err
@@ -199,6 +371,9 @@ func (m *WorktreeManager) ListWorktrees() ([]*WorktreeInfo, error) {
 
 	var worktrees []*WorktreeInfo
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !entry.IsDir() {
 			continue
 		}
@@ -216,7 +391,11 @@ func (m *WorktreeManager) ListWorktrees() ([]*WorktreeInfo, error) {
 		}
 
 		// Check if the worktree is still valid
-		if !m.isValidWorktree(worktreePath) {
+		valid, validationErr := m.isValidWorktree(ctx, worktreePath)
+		if validationErr != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !valid {
 			info.Error = "invalid or stale worktree"
 		}
 
@@ -226,8 +405,14 @@ func (m *WorktreeManager) ListWorktrees() ([]*WorktreeInfo, error) {
 	return worktrees, nil
 }
 
-// MergeBack merges an agent's worktree changes back to the main branch
-func (m *WorktreeManager) MergeBack(agentName string) error {
+// MergeBack merges an agent's worktree changes back to the main branch.
+func (m *WorktreeManager) MergeBack(ctx context.Context, agentName string) error {
+	if ctx == nil {
+		return errors.New("merge worktree requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	info, err := m.buildWorktreeInfo(agentName)
 	if err != nil {
 		return err
@@ -235,12 +420,13 @@ func (m *WorktreeManager) MergeBack(agentName string) error {
 	branchName := info.BranchName
 
 	// Switch to the canonical main branch in the primary worktree.
-	if err := gitRun(m.projectPath, "checkout", "main"); err != nil {
+	if err := gitRun(ctx, m.projectPath, "checkout", "main"); err != nil {
 		return fmt.Errorf("failed to checkout main branch: %w", err)
 	}
 
 	// Merge the agent's branch
 	output, err := gitCombinedOutput(
+		ctx,
 		m.projectPath,
 		"merge",
 		branchName,
@@ -249,14 +435,20 @@ func (m *WorktreeManager) MergeBack(agentName string) error {
 		fmt.Sprintf("Merge agent %s work from session %s", agentName, m.session),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to merge branch %s: %v: %s", branchName, err, string(output))
+		return fmt.Errorf("failed to merge branch %s: %w: %s", branchName, err, string(output))
 	}
 
 	return nil
 }
 
-// RemoveWorktree removes a specific agent's worktree
-func (m *WorktreeManager) RemoveWorktree(agentName string) error {
+// RemoveWorktree removes a specific agent's worktree.
+func (m *WorktreeManager) RemoveWorktree(ctx context.Context, agentName string) error {
+	if ctx == nil {
+		return errors.New("remove worktree requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	info, err := m.buildWorktreeInfo(agentName)
 	if err != nil {
 		return err
@@ -265,10 +457,16 @@ func (m *WorktreeManager) RemoveWorktree(agentName string) error {
 	branchName := info.BranchName
 
 	// Remove the worktree
-	output, err := gitCombinedOutput(m.projectPath, "worktree", "remove", worktreePath, "--force")
+	output, err := gitCombinedOutput(ctx, m.projectPath, "worktree", "remove", worktreePath, "--force")
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("remove worktree %s canceled: %w", agentName, ctx.Err())
+		}
 		// If removal failed, try to prune and remove manually
-		_ = gitRun(m.projectPath, "worktree", "prune") // Ignore errors for prune
+		_ = gitRun(ctx, m.projectPath, "worktree", "prune") // Ignore non-cancellation errors for prune
+		if ctx.Err() != nil {
+			return fmt.Errorf("remove worktree %s canceled before filesystem cleanup: %w", agentName, ctx.Err())
+		}
 
 		// Try to remove directory manually
 		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
@@ -277,14 +475,16 @@ func (m *WorktreeManager) RemoveWorktree(agentName string) error {
 	}
 
 	// Delete the branch
-	_ = gitRun(m.projectPath, "branch", "-D", branchName) // Ignore errors as branch might not exist
+	if branchErr := gitRun(ctx, m.projectPath, "branch", "-D", branchName); branchErr != nil && ctx.Err() != nil {
+		return fmt.Errorf("remove worktree %s canceled before branch cleanup: %w", agentName, ctx.Err())
+	}
 
 	return nil
 }
 
-// Cleanup removes all worktrees for the current session
-func (m *WorktreeManager) Cleanup() error {
-	worktrees, err := m.ListWorktrees()
+// Cleanup removes all worktrees for the current session.
+func (m *WorktreeManager) Cleanup(ctx context.Context) error {
+	worktrees, err := m.ListWorktrees(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list worktrees for cleanup: %w", err)
 	}
@@ -295,9 +495,18 @@ func (m *WorktreeManager) Cleanup() error {
 
 	var errors []string
 	for _, wt := range worktrees {
-		if err := m.RemoveWorktree(wt.AgentName); err != nil {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("cleanup canceled before removing worktree %s: %w", wt.AgentName, err)
+		}
+		if err := m.RemoveWorktree(ctx, wt.AgentName); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("cleanup canceled while removing worktree %s: %w", wt.AgentName, ctx.Err())
+			}
 			errors = append(errors, fmt.Sprintf("failed to remove worktree %s: %v", wt.AgentName, err))
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("cleanup canceled before directory cleanup: %w", err)
 	}
 
 	// Remove the session directory if empty, then the shared root if it is empty too.
@@ -318,32 +527,44 @@ func (m *WorktreeManager) Cleanup() error {
 }
 
 // isValidWorktree checks if a worktree path is still valid
-func (m *WorktreeManager) isValidWorktree(worktreePath string) bool {
+func (m *WorktreeManager) isValidWorktree(ctx context.Context, worktreePath string) (bool, error) {
+	if ctx == nil {
+		return false, errors.New("worktree validation requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	// Check if .git file exists (worktrees have a .git file pointing to the main repo)
 	gitPath := filepath.Join(worktreePath, ".git")
 	if _, err := os.Stat(gitPath); err != nil {
-		return false
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect worktree git file %s: %w", gitPath, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 
 	// Check if it's recognized by git worktree list
-	output, err := gitOutput(m.projectPath, "worktree", "list", "--porcelain")
+	output, err := gitOutput(ctx, m.projectPath, "worktree", "list", "--porcelain")
 	if err != nil {
-		return false
+		return false, err
 	}
 
-	return worktreeListed(output, worktreePath)
+	return worktreeListed(output, worktreePath), nil
 }
 
 // worktreeCurrentBranch reads the checked-out branch name for the worktree
-// at the given path. Returns "" with no error for detached HEAD or when
-// the path isn't a git worktree. Used by CreateForAgent to detect
-// cross-contamination on path collision (see ntm#145).
-func worktreeCurrentBranch(worktreePath string) (string, error) {
-	output, err := gitOutput(worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+// at the given path. Returns "" with no error only for detached HEAD.
+func worktreeCurrentBranch(ctx context.Context, worktreePath string) (string, error) {
+	output, err := gitOutput(ctx, worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil {
-		// `symbolic-ref --quiet` exits non-zero (without writing) on
-		// detached HEAD; treat as "no branch" rather than an error.
-		if len(strings.TrimSpace(string(output))) == 0 {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(strings.TrimSpace(string(output))) == 0 {
 			return "", nil
 		}
 		return "", err
@@ -407,7 +628,15 @@ func canonicalisePath(p string) string {
 }
 
 // GetWorktreeForAgent returns worktree information for a specific agent
-func (m *WorktreeManager) GetWorktreeForAgent(agentName string) (*WorktreeInfo, error) {
+func (m *WorktreeManager) GetWorktreeForAgent(ctx context.Context, agentName string) (*WorktreeInfo, error) {
+	if ctx == nil {
+		err := errors.New("worktree lookup requires a context")
+		return &WorktreeInfo{AgentName: strings.TrimSpace(agentName), SessionID: strings.TrimSpace(m.session), Error: err.Error()}, err
+	}
+	if err := ctx.Err(); err != nil {
+		wrapped := fmt.Errorf("worktree lookup canceled: %w", err)
+		return &WorktreeInfo{AgentName: strings.TrimSpace(agentName), SessionID: strings.TrimSpace(m.session), Error: wrapped.Error()}, wrapped
+	}
 	info, err := m.buildWorktreeInfo(agentName)
 	if err != nil {
 		return &WorktreeInfo{
@@ -420,6 +649,10 @@ func (m *WorktreeManager) GetWorktreeForAgent(agentName string) (*WorktreeInfo, 
 
 	// Check if worktree exists
 	stat, err := os.Stat(worktreePath)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		info.Error = fmt.Sprintf("worktree lookup canceled: %v", ctxErr)
+		return info, fmt.Errorf("worktree lookup canceled: %w", ctxErr)
+	}
 	if os.IsNotExist(err) {
 		info.Created = false
 		info.Error = "worktree does not exist"
@@ -435,8 +668,26 @@ func (m *WorktreeManager) GetWorktreeForAgent(agentName string) (*WorktreeInfo, 
 		info.Error = "worktree path exists but is not a directory"
 		return info, nil
 	}
-	if !m.isValidWorktree(worktreePath) {
+	valid, validErr := m.isValidWorktree(ctx, worktreePath)
+	if validErr != nil {
+		info.Error = fmt.Sprintf("failed to inspect worktree registration: %v", validErr)
+		return info, fmt.Errorf("inspect worktree registration at %s: %w", worktreePath, validErr)
+	}
+	if !valid {
 		info.Error = "invalid or stale worktree"
+		return info, nil
+	}
+	currentBranch, branchErr := worktreeCurrentBranch(ctx, worktreePath)
+	if branchErr != nil {
+		info.Error = fmt.Sprintf("failed to inspect worktree branch: %v", branchErr)
+		return info, fmt.Errorf("inspect worktree branch at %s: %w", worktreePath, branchErr)
+	}
+	if currentBranch == "" {
+		info.Error = fmt.Sprintf("worktree has detached HEAD; expected branch %q", info.BranchName)
+		return info, nil
+	}
+	if currentBranch != info.BranchName {
+		info.Error = fmt.Sprintf("worktree is on branch %q; expected %q", currentBranch, info.BranchName)
 	}
 
 	return info, nil
