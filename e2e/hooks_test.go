@@ -71,6 +71,12 @@ func NewHooksTestSuite(t *testing.T, scenario string) *HooksTestSuite {
 		t.Fatalf("[E2E-HOOKS] Failed to create temp dir: %v", err)
 	}
 
+	// Isolate git configuration for every child process (git AND ntm): a
+	// developer's global core.hooksPath would otherwise redirect repo-scoped
+	// test hook installs into their real global hooks directory (#225).
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(tempDir, "gitconfig"))
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
 	suite := &HooksTestSuite{
 		t:       t,
 		logger:  logger,

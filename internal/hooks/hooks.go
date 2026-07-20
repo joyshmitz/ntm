@@ -20,6 +20,13 @@ var (
 	ErrHookExists       = errors.New("hook already exists (use --force to overwrite)")
 	ErrHookNotInstalled = errors.New("hook not installed")
 	ErrNTMNotFound      = errors.New("ntm binary not found in PATH")
+	// ErrHooksDirOutsideRepo means `git rev-parse --git-path hooks` resolved
+	// to a directory outside the repository — a core.hooksPath redirect (for
+	// example a global `git config --global core.hooksPath`) is in effect.
+	// NTM-managed hooks are repo-scoped (they bake in REPO_ROOT), so writing
+	// or deleting them through a shared/global hooks directory would execute
+	// wrong-repo tooling machine-wide (#225).
+	ErrHooksDirOutsideRepo = errors.New("git resolves the hooks directory outside this repository (core.hooksPath redirect)")
 )
 
 // HookType represents the type of git hook.
@@ -46,6 +53,10 @@ type HookInfo struct {
 type Manager struct {
 	repoRoot string
 	hooksDir string
+	// externalHooksErr is non-nil when the resolved hooks directory lies
+	// outside the repository (core.hooksPath redirect, #225). Read-only
+	// operations still work; mutating operations return this error.
+	externalHooksErr error
 }
 
 // NewManager creates a new hook manager for the given repository.
@@ -69,14 +80,36 @@ func NewManager(repoPath string) (*Manager, error) {
 		return nil, err
 	}
 
-	return &Manager{
+	m := &Manager{
 		repoRoot: root,
 		hooksDir: hooksDir,
-	}, nil
+	}
+
+	// `git rev-parse --git-path hooks` honors core.hooksPath from ANY config
+	// scope. A global redirect silently retargets a repo-scoped hook install
+	// at a shared hooks directory that every repository on the machine
+	// executes (#225). Detect that here; read-only operations (status/list)
+	// still work, but Install/Uninstall refuse with the redirect named.
+	commonDir, commonErr := findGitCommonDir(root)
+	if commonErr == nil && !pathWithin(hooksDir, root) && !pathWithin(hooksDir, commonDir) {
+		m.externalHooksErr = fmt.Errorf(
+			"%w: git resolves hooks to %s, outside repository %s.\n"+
+				"A core.hooksPath redirect is in effect (check `git config --show-origin --get core.hooksPath`).\n"+
+				"NTM refuses to write repo-scoped hooks into a shared hooks directory.\n"+
+				"Fix: pin this repo's hooks dir with `git -C %s config core.hooksPath .git/hooks`,\n"+
+				"or remove the global setting with `git config --global --unset core.hooksPath`",
+			ErrHooksDirOutsideRepo, hooksDir, root, root,
+		)
+	}
+
+	return m, nil
 }
 
 // Install installs the specified hook type.
 func (m *Manager) Install(hookType HookType, force bool) error {
+	if m.externalHooksErr != nil {
+		return m.externalHooksErr
+	}
 	hookPath := filepath.Join(m.hooksDir, string(hookType))
 	backupPath := hookPath + ".backup"
 
@@ -115,6 +148,9 @@ func (m *Manager) Install(hookType HookType, force bool) error {
 
 // Uninstall removes the specified hook type.
 func (m *Manager) Uninstall(hookType HookType, restore bool) error {
+	if m.externalHooksErr != nil {
+		return m.externalHooksErr
+	}
 	hookPath := filepath.Join(m.hooksDir, string(hookType))
 	backupPath := hookPath + ".backup"
 
@@ -232,6 +268,46 @@ func findGitPath(repoRoot, gitPath string) (string, error) {
 		return filepath.Clean(path), nil
 	}
 	return filepath.Join(repoRoot, path), nil
+}
+
+// findGitCommonDir returns the repository's common .git directory (absolute).
+// For linked worktrees this is the main repository's git dir, so hooks that
+// legitimately live there are not misreported as external.
+func findGitCommonDir(repoRoot string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolving git common dir: %w", err)
+	}
+	path := strings.TrimSpace(string(output))
+	if path == "" {
+		return "", errors.New("resolving git common dir: empty path")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(repoRoot, path)
+	}
+	return filepath.Clean(path), nil
+}
+
+// pathWithin reports whether child is parent or lives underneath parent.
+// Symlinks are resolved when possible so equivalent physical paths (e.g.
+// /var vs /private/var on macOS) compare equal.
+func pathWithin(child, parent string) bool {
+	resolve := func(p string) string {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return resolved
+		}
+		return filepath.Clean(p)
+	}
+	childResolved := resolve(child)
+	parentResolved := resolve(parent)
+	rel, err := filepath.Rel(parentResolved, childResolved)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func writeHookFile(path, content string) error {

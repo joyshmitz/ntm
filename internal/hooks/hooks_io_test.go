@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+// TestMain isolates git configuration for the entire package: these tests run
+// real `git` both directly and through Manager (which shells out with the
+// inherited process environment). Without this, a developer's global
+// `core.hooksPath` would redirect repo-scoped test installs into their REAL
+// global hooks directory (#225). GIT_CONFIG_GLOBAL may point at a missing
+// file — git treats it as empty.
+func TestMain(m *testing.M) {
+	tmp, err := os.MkdirTemp("", "ntm-hooks-gitconfig-")
+	if err != nil {
+		panic("hooks TestMain: isolate git config: " + err.Error())
+	}
+	os.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(tmp, "gitconfig"))
+	os.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	code := m.Run()
+	os.RemoveAll(tmp)
+	os.Exit(code)
+}
+
 // validHookTOML is a minimal valid hooks TOML config.
 const validHookTOML = `
 [[command_hooks]]
@@ -407,6 +425,66 @@ func TestNewManager_NotGitRepo(t *testing.T) {
 	_, err := NewManager(dir)
 	if err == nil {
 		t.Error("expected error for non-git directory")
+	}
+}
+
+// TestManagerRefusesGlobalHooksPathRedirect is the #225 regression: a global
+// core.hooksPath must never let a repo-scoped hook install (or uninstall)
+// write through to a shared machine-wide hooks directory.
+func TestManagerRefusesGlobalHooksPathRedirect(t *testing.T) {
+	// Not parallel: overrides the package-level GIT_CONFIG_GLOBAL isolation.
+	globalHooksDir := t.TempDir()
+	globalCfg := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(globalCfg, []byte("[core]\n\thooksPath = "+globalHooksDir+"\n"), 0o644); err != nil {
+		t.Fatalf("write global git config: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+
+	repo := initTempGitRepoWithCommit(t)
+	m, err := NewManager(repo)
+	if err != nil {
+		t.Fatalf("NewManager: %v (read-only manager creation must still work)", err)
+	}
+
+	if err := m.Install(HookPreCommit, false); err == nil {
+		t.Fatal("Install succeeded through a global core.hooksPath redirect")
+	} else if !strings.Contains(err.Error(), "core.hooksPath") {
+		t.Fatalf("Install error %q does not name the core.hooksPath redirect", err)
+	}
+	if err := m.Uninstall(HookPreCommit, false); err == nil {
+		t.Fatal("Uninstall succeeded through a global core.hooksPath redirect")
+	}
+
+	entries, err := os.ReadDir(globalHooksDir)
+	if err != nil {
+		t.Fatalf("read global hooks dir: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("repo-scoped hooks leaked into the global hooks dir: %v", names)
+	}
+}
+
+// TestManagerAllowsRepoLocalHooksPath: a core.hooksPath that stays inside the
+// repository (e.g. .githooks) is a legitimate layout and must keep working.
+func TestManagerAllowsRepoLocalHooksPath(t *testing.T) {
+	t.Parallel()
+	repo := initTempGitRepoWithCommit(t)
+	runGit(t, repo, "config", "core.hooksPath", ".githooks")
+
+	m, err := NewManager(repo)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m.Install(HookPostCheckout, false); err != nil {
+		t.Fatalf("Install into repo-local core.hooksPath: %v", err)
+	}
+	hookPath := filepath.Join(repo, ".githooks", string(HookPostCheckout))
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Fatalf("hook not written to repo-local hooks dir %s: %v", hookPath, err)
 	}
 }
 
