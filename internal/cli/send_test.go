@@ -1282,6 +1282,51 @@ func TestExtractLikelyCommands(t *testing.T) {
 			input: "git status\nrm -rf /tmp\njust some text",
 			want:  []string{"git status", "rm -rf /tmp"},
 		},
+		{
+			name:  "markdown dash bullet with command chain",
+			input: "  - run br list && git status",
+			want:  []string{"run br list && git status"},
+		},
+		{
+			name:  "asterisk bullet with force flag",
+			input: "* deploy --force",
+			want:  []string{"deploy --force"},
+		},
+		{
+			name:  "plus bullet",
+			input: "+ git push --force origin main",
+			want:  []string{"git push --force origin main"},
+		},
+		{
+			name:  "checkbox bullet",
+			input: "- [ ] make clean && make all",
+			want:  []string{"make clean && make all"},
+		},
+		{
+			name:  "checked checkbox bullet",
+			input: "- [x] cargo build || cargo check",
+			want:  []string{"cargo build || cargo check"},
+		},
+		{
+			name:  "ordered list",
+			input: "1. rm -rf ./build\n2) git status | cat",
+			want:  []string{"rm -rf ./build", "git status | cat"},
+		},
+		{
+			name:  "nested bullet under quote",
+			input: "> - sudo rm -rf /var/tmp",
+			want:  []string{"sudo rm -rf /var/tmp"},
+		},
+		{
+			name:  "leading-dash flag text is not treated as a bullet",
+			input: "-rf is a dangerous flag; grep -- -rf script.sh",
+			want:  []string{"-rf is a dangerous flag; grep -- -rf script.sh"},
+		},
+		{
+			name:  "redirection digits are not an ordered list",
+			input: "2> /dev/null ls | wc -l",
+			want:  []string{"2> /dev/null ls | wc -l"},
+		},
 	}
 
 	for _, tt := range tests {

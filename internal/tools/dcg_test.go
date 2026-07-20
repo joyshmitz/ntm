@@ -1,6 +1,101 @@
 package tools
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// installFakeClapDCG installs a fake `dcg` on PATH that emulates clap's argv
+// contract: any operand before the `--` terminator that begins with `-` and is
+// not a recognized flag is a parse error (exit 2). Operands after `--` are
+// always accepted. The full argv is appended to argvLog for assertions.
+func installFakeClapDCG(t *testing.T, argvLog string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake dcg is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	script := `#!/bin/sh
+printf '%s\n' "$@" >> "` + argvLog + `"
+seen_sep=0
+skip_value=0
+for arg in "$@"; do
+  if [ "$skip_value" = 1 ]; then skip_value=0; continue; fi
+  if [ "$seen_sep" = 1 ]; then continue; fi
+  case "$arg" in
+    --) seen_sep=1 ;;
+    --robot|test) ;;
+    --format) skip_value=1 ;;
+    -*) echo "error: unexpected argument '$arg' found" >&2; exit 2 ;;
+    *) ;;
+  esac
+done
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dcg"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dcg: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestCheckCommandLeadingDashCandidate is the #228 regression guard: an
+// extracted prompt candidate that begins with "-" (markdown bullet debris, a
+// bare "-rf ..." fragment) must reach dcg after the "--" terminator so it is
+// evaluated as the positional COMMAND instead of crashing clap with exit 2 and
+// failing the whole send.
+func TestCheckCommandLeadingDashCandidate(t *testing.T) {
+	argvLog := filepath.Join(t.TempDir(), "argv.log")
+	installFakeClapDCG(t, argvLog)
+
+	adapter := NewDCGAdapter()
+	candidate := "- run br list && git status"
+
+	blocked, err := adapter.CheckCommand(context.Background(), candidate)
+	if err != nil {
+		t.Fatalf("CheckCommand(%q) returned adapter error: %v", candidate, err)
+	}
+	if blocked != nil {
+		t.Fatalf("CheckCommand(%q) reported blocked=%+v, want allowed", candidate, blocked)
+	}
+
+	logged, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("read argv log: %v", err)
+	}
+	if !strings.Contains(string(logged), "--\n"+candidate+"\n") {
+		t.Fatalf("candidate was not passed after the -- terminator; argv:\n%s", logged)
+	}
+}
+
+// TestCheckCommandExtendedLeadingDashCandidate covers the extended path with
+// the same clap contract (#228).
+func TestCheckCommandExtendedLeadingDashCandidate(t *testing.T) {
+	argvLog := filepath.Join(t.TempDir(), "argv.log")
+	installFakeClapDCG(t, argvLog)
+
+	adapter := NewDCGAdapter()
+	candidate := "-rf cleanup notes && echo done"
+
+	result, err := adapter.CheckCommandExtended(context.Background(), candidate, "", t.TempDir())
+	if err != nil {
+		t.Fatalf("CheckCommandExtended(%q) returned adapter error: %v", candidate, err)
+	}
+	if result == nil || result.Blocked {
+		t.Fatalf("CheckCommandExtended(%q) = %+v, want allowed result", candidate, result)
+	}
+
+	logged, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("read argv log: %v", err)
+	}
+	if !strings.Contains(string(logged), "--\n"+candidate+"\n") {
+		t.Fatalf("candidate was not passed after the -- terminator; argv:\n%s", logged)
+	}
+}
 
 func TestInferSeverity(t *testing.T) {
 	t.Parallel()

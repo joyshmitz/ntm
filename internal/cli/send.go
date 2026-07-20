@@ -3368,16 +3368,45 @@ func extractLikelyCommands(prompt string) []string {
 
 func normalizeCommandLine(line string) string {
 	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, "$ ") {
-		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "$ "))
+	// Prompts are markdown-heavy: strip list/quote/prompt decoration until the
+	// line is stable so dcg evaluates the command text, not the bullet (#228).
+	// Decoration handled: "-", "*", "+" bullets (also nested), "[ ]"/"[x]"
+	// checkboxes, "1." / "1)" ordered lists, "$ "/"> "/"# " prompt markers.
+	for {
+		next := stripCommandLineDecoration(trimmed)
+		if next == trimmed {
+			return trimmed
+		}
+		trimmed = next
 	}
-	if strings.HasPrefix(trimmed, "> ") {
-		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "> "))
+}
+
+// stripCommandLineDecoration removes one layer of leading markdown or shell
+// prompt decoration from an already-whitespace-trimmed line. It returns the
+// input unchanged when no known decoration is present.
+func stripCommandLineDecoration(trimmed string) string {
+	for _, prefix := range []string{"- ", "* ", "+ ", "$ ", "> ", "# "} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		}
 	}
-	if strings.HasPrefix(trimmed, "# ") {
-		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
+	// Checkbox once its bullet is gone: "[ ] cmd", "[x] cmd", "[X] cmd".
+	if len(trimmed) > 4 && trimmed[0] == '[' && trimmed[2] == ']' && trimmed[3] == ' ' {
+		if box := trimmed[1]; box == ' ' || box == 'x' || box == 'X' {
+			return strings.TrimSpace(trimmed[4:])
+		}
 	}
-	return strings.TrimSpace(trimmed)
+	// Ordered list markers: "1. cmd", "12) cmd" (bounded to 3 digits so real
+	// commands like "2>err cmd" or version strings are left alone).
+	digits := 0
+	for digits < len(trimmed) && trimmed[digits] >= '0' && trimmed[digits] <= '9' {
+		digits++
+	}
+	if digits > 0 && digits <= 3 && digits+1 < len(trimmed) &&
+		(trimmed[digits] == '.' || trimmed[digits] == ')') && trimmed[digits+1] == ' ' {
+		return strings.TrimSpace(trimmed[digits+2:])
+	}
+	return trimmed
 }
 
 func looksLikeShellCommand(line string) bool {
