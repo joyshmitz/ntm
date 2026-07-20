@@ -19,6 +19,42 @@ import (
 // A genuinely broken global config still returns an error so the caller can
 // surface the real cause.
 func LoadMerged(cwd, globalPath string) (*Config, error) {
+	return loadMerged(cwd, globalPath, false)
+}
+
+// LoadMergedStrict loads global and project configuration like LoadMerged, but
+// treats an invalid project overlay as a fatal error. Safety-sensitive callers
+// use this variant when silently dropping project policy would fail open.
+func LoadMergedStrict(cwd, globalPath string) (*Config, error) {
+	return loadMerged(cwd, globalPath, true)
+}
+
+// LoadAssignmentPolicyStrict loads the global and authoritative project
+// configuration used by automated assignment. An explicitly selected global
+// path must already exist and resolve to a regular file; default-path callers
+// may continue to use the built-in defaults when that file is absent.
+func LoadAssignmentPolicyStrict(projectDir, globalPath string, requireGlobal bool) (*Config, error) {
+	projectDir = strings.TrimSpace(projectDir)
+	if projectDir == "" {
+		return nil, fmt.Errorf("assignment safety policy requires an authoritative project directory")
+	}
+	globalPath = strings.TrimSpace(globalPath)
+	if globalPath == "" {
+		return nil, fmt.Errorf("assignment safety policy requires a global config path")
+	}
+	if requireGlobal {
+		info, err := os.Stat(globalPath)
+		if err != nil {
+			return nil, fmt.Errorf("load explicitly selected config %s: %w", globalPath, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("explicitly selected config %s is not a regular file", globalPath)
+		}
+	}
+	return LoadMergedStrict(projectDir, globalPath)
+}
+
+func loadMerged(cwd, globalPath string, strictProject bool) (*Config, error) {
 	// Load global
 	cfg, err := loadWithCWD(globalPath, cwd)
 	if err != nil {
@@ -32,14 +68,17 @@ func LoadMerged(cwd, globalPath string) (*Config, error) {
 
 	projectDir, projectCfg, err := FindProjectConfig(cwd)
 	if err != nil {
-		// The project overlay is invalid. Keep the global config that loaded
-		// fine and skip only the bad overlay, warning loudly on stderr so the
-		// user sees the real cause (offending file + parse error) instead of
-		// silently reverting to built-in defaults.
 		projectConfigPath := "project .ntm/config.toml"
 		if projectDir != "" {
 			projectConfigPath = filepath.Join(projectDir, ".ntm", "config.toml")
 		}
+		if strictProject {
+			return nil, fmt.Errorf("loading project config %s: %w", projectConfigPath, err)
+		}
+		// The project overlay is invalid. Keep the global config that loaded
+		// fine and skip only the bad overlay, warning loudly on stderr so the
+		// user sees the real cause (offending file + parse error) instead of
+		// silently reverting to built-in defaults.
 		fmt.Fprintf(log.Writer(),
 			"ntm: warning: ignoring invalid project config %s: %v (continuing with global config)\n",
 			projectConfigPath, err)
@@ -73,6 +112,16 @@ func MergeConfig(global *Config, project *ProjectConfig, projectDir string) *Con
 	// Merge Defaults
 	if len(project.Defaults.Agents) > 0 {
 		global.ProjectDefaults = project.Defaults.Agents
+	}
+
+	// Project operator gates extend the global list. Treating the overlay as an
+	// override would let a repository erase the user's safety gates, while an
+	// absent or explicitly empty project list should leave global policy intact.
+	if len(project.Assign.OperatorGatedLabels) > 0 {
+		global.Assign.OperatorGatedLabels = mergeOperatorGatedLabels(
+			project.Assign.OperatorGatedLabels,
+			global.Assign.OperatorGatedLabels,
+		)
 	}
 
 	// Merge project-scoped integration toggles that have direct runtime equivalents.
@@ -166,6 +215,30 @@ func mergeStringListPreferFirst(primary, secondary []string) []string {
 		}
 		seen[v] = true
 		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func mergeOperatorGatedLabels(primary, secondary []string) []string {
+	if len(primary) == 0 && len(secondary) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool, len(primary)+len(secondary))
+	out := make([]string, 0, len(primary)+len(secondary))
+	for _, values := range [][]string{primary, secondary} {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			normalized := strings.ToLower(value)
+			if normalized == "" || seen[normalized] {
+				continue
+			}
+			seen[normalized] = true
+			out = append(out, value)
+		}
 	}
 	if len(out) == 0 {
 		return nil

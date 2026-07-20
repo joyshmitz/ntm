@@ -11,6 +11,152 @@ import (
 	"time"
 )
 
+type doneObservedContext struct {
+	context.Context
+	doneObserved chan<- struct{}
+}
+
+func (c doneObservedContext) Done() <-chan struct{} {
+	select {
+	case c.doneObserved <- struct{}{}:
+	default:
+	}
+	return c.Context.Done()
+}
+
+type retryWaitObservedContext struct {
+	context.Context
+	retryWaitEntered chan<- time.Duration
+	continueRetry    <-chan struct{}
+}
+
+func (c retryWaitObservedContext) observeBeadsRetryWaitForTest(delay time.Duration) {
+	select {
+	case c.retryWaitEntered <- delay:
+	case <-c.Context.Done():
+		return
+	}
+	select {
+	case <-c.continueRetry:
+	case <-c.Context.Done():
+	}
+}
+
+func waitForTestFile(t *testing.T, path, description string) {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("inspect %s: %v", description, err)
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for %s", description)
+		}
+	}
+}
+
+func TestBeadsMutatorsRejectInactiveContextWithoutInvokingSubprocesses(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	binDir := t.TempDir()
+	invoked := filepath.Join(t.TempDir(), "subprocess-invoked")
+	script := "#!/bin/sh\nprintf 'invoked\\n' > " + invoked + "\nexit 1\n"
+	for _, name := range []string{"br", "git"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o700); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+
+	tests := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{
+			name: "generic claim",
+			run: func(ctx context.Context) error {
+				_, err := ClaimBead(ctx, dir, "ntm-test", "TestActor")
+				return err
+			},
+		},
+		{
+			name: "assignment claim",
+			run: func(ctx context.Context) error {
+				_, err := ClaimBeadForAssignment(ctx, dir, "ntm-test", "TestActor")
+				return err
+			},
+		},
+		{
+			name: "assignment claim with policy",
+			run: func(ctx context.Context) error {
+				_, err := ClaimBeadForAssignmentWithOperatorGatedLabels(ctx, dir, "ntm-test", "TestActor", []string{"human-gated"})
+				return err
+			},
+		},
+		{
+			name: "stale assignment claim",
+			run: func(ctx context.Context) error {
+				_, err := ClaimStaleBeadForAssignment(ctx, dir, "ntm-test", "TestActor", time.Now().UTC())
+				return err
+			},
+		},
+		{
+			name: "stale assignment claim with policy",
+			run: func(ctx context.Context) error {
+				_, err := ClaimStaleBeadForAssignmentWithOperatorGatedLabels(ctx, dir, "ntm-test", "TestActor", time.Now().UTC(), []string{"human-gated"})
+				return err
+			},
+		},
+		{
+			name: "claim release",
+			run: func(ctx context.Context) error {
+				_, err := ReleaseBeadClaim(ctx, dir, "ntm-test", "TestActor")
+				return err
+			},
+		},
+	}
+
+	contexts := []struct {
+		name    string
+		context func() context.Context
+		want    error
+	}{
+		{name: "nil", context: func() context.Context { return nil }},
+		{name: "pre-canceled", context: func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}, want: context.Canceled},
+	}
+	for _, test := range tests {
+		for _, contextCase := range contexts {
+			t.Run(test.name+"/"+contextCase.name, func(t *testing.T) {
+				err := test.run(contextCase.context())
+				if contextCase.want != nil {
+					if !errors.Is(err, contextCase.want) {
+						t.Fatalf("error=%v, want errors.Is(%v)", err, contextCase.want)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "beads mutation context is required") {
+					t.Fatalf("error=%v, want required-context failure", err)
+				}
+				if _, statErr := os.Stat(invoked); !os.IsNotExist(statErr) {
+					t.Fatalf("subprocess executed for inactive context: stat error=%v", statErr)
+				}
+			})
+		}
+	}
+}
+
 func TestRunBdContextCancelsWhileQueuedForWorkspaceGate(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
@@ -24,15 +170,34 @@ func TestRunBdContextCancelsWhileQueuedForWorkspaceGate(t *testing.T) {
 	gate.Lock()
 	defer gate.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	started := time.Now()
-	_, err = RunBdContext(ctx, dir, "ready", "--json")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("RunBdContext error=%v, want deadline exceeded", err)
+	doneObserved := make(chan struct{}, 1)
+	result := make(chan error, 1)
+	go func() {
+		_, runErr := RunBdContext(doneObservedContext{
+			Context:      ctx,
+			doneObserved: doneObserved,
+		}, dir, "ready", "--json")
+		result <- runErr
+	}()
+
+	select {
+	case <-doneObserved:
+	case err := <-result:
+		t.Fatalf("RunBdContext returned before waiting for the workspace gate: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunBdContext did not reach the workspace gate")
 	}
-	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
-		t.Fatalf("workspace gate cancellation took %s", elapsed)
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunBdContext error=%v, want context canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunBdContext did not stop after cancellation while queued for the workspace gate")
 	}
 }
 
@@ -44,7 +209,9 @@ func TestGetBeadsSummaryContextCancelsWhileStatsWaitsForWorkspaceGate(t *testing
 		}
 	}
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	invoked := filepath.Join(t.TempDir(), "br-invoked")
+	script := "#!/bin/sh\nprintf 'invoked\\n' > " + invoked + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
 		t.Fatalf("write fake br: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -56,15 +223,41 @@ func TestGetBeadsSummaryContextCancelsWhileStatsWaitsForWorkspaceGate(t *testing
 	gate.Lock()
 	defer gate.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	started := time.Now()
-	result, err := GetBeadsSummaryContext(ctx, dir, 10)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("GetBeadsSummaryContext result=%+v error=%v, want deadline exceeded", result, err)
+	doneObserved := make(chan struct{}, 1)
+	type summaryResult struct {
+		summary *BeadsSummary
+		err     error
 	}
-	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
-		t.Fatalf("Beads summary cancellation took %s", elapsed)
+	result := make(chan summaryResult, 1)
+	go func() {
+		summary, summaryErr := GetBeadsSummaryContext(doneObservedContext{
+			Context:      ctx,
+			doneObserved: doneObserved,
+		}, dir, 10)
+		result <- summaryResult{summary: summary, err: summaryErr}
+	}()
+
+	select {
+	case <-doneObserved:
+	case got := <-result:
+		t.Fatalf("GetBeadsSummaryContext returned before stats waited for the workspace gate: result=%+v error=%v", got.summary, got.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetBeadsSummaryContext stats did not reach the workspace gate")
+	}
+	cancel()
+
+	select {
+	case got := <-result:
+		if !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("GetBeadsSummaryContext result=%+v error=%v, want context canceled", got.summary, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetBeadsSummaryContext did not stop after cancellation while stats waited for the workspace gate")
+	}
+	if _, err := os.Stat(invoked); !os.IsNotExist(err) {
+		t.Fatalf("gated br command executed before cancellation: stat error=%v", err)
 	}
 }
 
@@ -82,35 +275,50 @@ func TestRunBdContextCancelsDuringTransientRetryBackoff(t *testing.T) {
 	t.Setenv("PATH", binDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	retryWaitEntered := make(chan time.Duration)
+	continueRetry := make(chan struct{}, 1)
 	result := make(chan error, 1)
 	go func() {
-		_, err := RunBdContext(ctx, dir, "ready", "--json")
+		_, err := RunBdContext(retryWaitObservedContext{
+			Context:          ctx,
+			retryWaitEntered: retryWaitEntered,
+			continueRetry:    continueRetry,
+		}, dir, "ready", "--json")
 		result <- err
 	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		data, _ := os.ReadFile(marker)
-		if strings.Count(string(data), "x") >= 3 {
-			break
+	for attempt := 1; attempt <= 3; attempt++ {
+		select {
+		case delay := <-retryWaitEntered:
+			if want := transientBeadsDBBackoff(attempt); delay != want {
+				t.Fatalf("retry backoff %d delay=%s, want %s", attempt, delay, want)
+			}
+			if attempt < 3 {
+				continueRetry <- struct{}{}
+			}
+		case err := <-result:
+			t.Fatalf("RunBdContext returned before entering retry backoff %d: %v", attempt, err)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("RunBdContext did not enter retry backoff %d", attempt)
 		}
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatal("fake br did not reach third transient attempt")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	started := time.Now()
 	cancel()
+
 	select {
 	case err := <-result:
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("RunBdContext error=%v, want context canceled", err)
 		}
-		if elapsed := time.Since(started); elapsed > 120*time.Millisecond {
-			t.Fatalf("transient retry cancellation took %s", elapsed)
-		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("RunBdContext ignored cancellation during retry backoff")
+	}
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read fake br attempts: %v", err)
+	}
+	if attempts := strings.Count(string(data), "x"); attempts != 3 {
+		t.Fatalf("fake br attempts=%d, want exactly 3 with no post-cancellation execution", attempts)
 	}
 }
 
@@ -146,20 +354,34 @@ func TestGetRecentlyCompletedListContext(t *testing.T) {
 			}
 		}
 		binDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(binDir, "br"), []byte("#!/bin/sh\nexec /bin/sleep 30\n"), 0o700); err != nil {
+		started := filepath.Join(t.TempDir(), "br-started")
+		script := "#!/bin/sh\n: > " + started + "\nexec /bin/sleep 30\n"
+		if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
 			t.Fatalf("write blocking fake br: %v", err)
 		}
 		t.Setenv("PATH", binDir)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		started := time.Now()
-		items, err := GetRecentlyCompletedListContext(ctx, dir, 10)
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("items=%+v error=%v, want deadline exceeded", items, err)
+		type completedResult struct {
+			items []BeadPreview
+			err   error
 		}
-		if elapsed := time.Since(started); elapsed > time.Second {
-			t.Fatalf("blocking completed-list read took %s after cancellation", elapsed)
+		result := make(chan completedResult, 1)
+		go func() {
+			items, listErr := GetRecentlyCompletedListContext(ctx, dir, 10)
+			result <- completedResult{items: items, err: listErr}
+		}()
+		waitForTestFile(t, started, "blocking fake br startup")
+		cancel()
+
+		select {
+		case got := <-result:
+			if !errors.Is(got.err, context.Canceled) {
+				t.Fatalf("items=%+v error=%v, want context canceled", got.items, got.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("blocking completed-list br process ignored cancellation")
 		}
 	})
 }
@@ -317,6 +539,67 @@ func TestGetBeadsSummary_EarlyValidation(t *testing.T) {
 			t.Fatalf("Reason = %q, want %q", res.Reason, "br not installed")
 		}
 	})
+}
+
+func TestGetPlanContextRequiresPlanTracksEnvelope(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		wantErr    string
+		wantTracks int
+	}{
+		{name: "missing plan", output: `{}`, wantErr: "missing plan object"},
+		{name: "null plan", output: `{"plan":null}`, wantErr: "missing plan object"},
+		{name: "missing tracks", output: `{"plan":{}}`, wantErr: "missing plan.tracks array"},
+		{name: "null tracks", output: `{"plan":{"tracks":null}}`, wantErr: "missing plan.tracks array"},
+		{name: "empty tracks is valid", output: `{"plan":{"tracks":[]}}`, wantTracks: 0},
+		{name: "missing track items", output: `{"plan":{"tracks":[{"track_id":"one"}]}}`, wantErr: "missing plan.tracks[0].items array"},
+		{name: "null track items", output: `{"plan":{"tracks":[{"track_id":"one","items":null}]}}`, wantErr: "missing plan.tracks[0].items array"},
+		{name: "empty track items is valid", output: `{"plan":{"tracks":[{"track_id":"one","items":[]}]}}`, wantTracks: 1},
+		{name: "missing item status", output: `{"plan":{"tracks":[{"track_id":"one","items":[{"id":"ntm-test","priority":1}]}]}}`, wantErr: "missing or blank plan.tracks[0].items[0].status"},
+		{name: "null item status", output: `{"plan":{"tracks":[{"track_id":"one","items":[{"id":"ntm-test","status":null,"priority":1}]}]}}`, wantErr: "missing or blank plan.tracks[0].items[0].status"},
+		{name: "blank item status", output: `{"plan":{"tracks":[{"track_id":"one","items":[{"id":"ntm-test","status":"   ","priority":1}]}]}}`, wantErr: "missing or blank plan.tracks[0].items[0].status"},
+		{name: "missing item priority", output: `{"plan":{"tracks":[{"track_id":"one","items":[{"id":"ntm-test","status":"open"}]}]}}`, wantErr: "missing plan.tracks[0].items[0].priority"},
+		{name: "null item priority", output: `{"plan":{"tracks":[{"track_id":"one","items":[{"id":"ntm-test","status":"open","priority":null}]}]}}`, wantErr: "missing plan.tracks[0].items[0].priority"},
+		{name: "negative item priority", output: `{"plan":{"tracks":[{"track_id":"one","items":[{"id":"ntm-test","status":"open","priority":-1}]}]}}`, wantErr: "priority -1 is outside 0..4"},
+		{name: "above-range item priority", output: `{"plan":{"tracks":[{"track_id":"one","items":[{"id":"ntm-test","status":"open","priority":5}]}]}}`, wantErr: "priority 5 is outside 0..4"},
+		{name: "explicit priority zero is valid", output: `{"plan":{"tracks":[{"track_id":"one","items":[{"id":"ntm-test","status":"open","priority":0}]}]}}`, wantTracks: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binDir := t.TempDir()
+			script := "#!/bin/sh\nprintf '%s\\n' '" + tt.output + "'\n"
+			if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(script), 0o700); err != nil {
+				t.Fatalf("write fake bv: %v", err)
+			}
+			t.Setenv("PATH", binDir)
+
+			plan, err := GetPlanContext(context.Background(), dir)
+			if tt.wantErr != "" {
+				if err == nil || plan != nil {
+					t.Fatalf("GetPlanContext() = plan:%+v err:%v, want error containing %q", plan, err, tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("GetPlanContext error = %q, want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetPlanContext() error: %v", err)
+			}
+			if plan == nil {
+				t.Fatal("GetPlanContext() returned nil plan")
+			}
+			if got := len(plan.Plan.Tracks); got != tt.wantTracks {
+				t.Fatalf("len(plan.tracks) = %d, want %d", got, tt.wantTracks)
+			}
+			if plan.Plan.Tracks == nil {
+				t.Fatal("valid empty plan.tracks decoded as nil, want present empty array")
+			}
+		})
+	}
 }
 
 func TestGetHealthSummary_NonFatalBottlenecksError(t *testing.T) {

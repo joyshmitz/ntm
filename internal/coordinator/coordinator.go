@@ -40,12 +40,14 @@ type SessionCoordinator struct {
 	mailClient        *agentmail.Client
 	reservationClient coordinatorReservationClient
 
-	atomicCoordinatorFactory func(*assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator
-	assignWorkFn             func(context.Context) ([]AssignmentResult, error)
-	triageFn                 func(context.Context, string) (*bv.TriageResponse, error)
-	workItemStatusFn         func(context.Context, string) (string, error)
-	workItemDetailsFn        func(context.Context, string) (*bv.BeadAssignmentDetails, error)
-	releaseWorkItemClaimFn   func(context.Context, string, string, string) (bool, error)
+	atomicCoordinatorFactory    func(*assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator
+	assignWorkFn                func(context.Context) ([]AssignmentResult, error)
+	actionableRecommendationsFn func(context.Context, string, int) ([]bv.TriageRecommendation, error)
+	workItemStatusFn            func(context.Context, string) (string, error)
+	workItemDetailsFn           func(context.Context, string) (*bv.BeadAssignmentDetails, error)
+	claimBeadForAssignmentFn    func(context.Context, string, string, string, []string) (bv.BeadClaimResult, error)
+	releaseWorkItemClaimFn      func(context.Context, string, string, string) (bool, error)
+	operatorGatedLabels         []string
 
 	// Agent tracking
 	agents     map[string]*AgentState
@@ -171,15 +173,16 @@ type busCoordinatorEvent struct {
 // New creates a new SessionCoordinator.
 func New(session, projectKey string, mailClient *agentmail.Client, agentName string) *SessionCoordinator {
 	return &SessionCoordinator{
-		session:           session,
-		agentName:         agentName,
-		projectKey:        projectKey,
-		mailClient:        mailClient,
-		reservationClient: mailClient,
-		agents:            make(map[string]*AgentState),
-		config:            DefaultCoordinatorConfig(),
-		events:            make(chan CoordinatorEvent, 100),
-		stopCh:            make(chan struct{}),
+		session:             session,
+		agentName:           agentName,
+		projectKey:          projectKey,
+		mailClient:          mailClient,
+		reservationClient:   mailClient,
+		operatorGatedLabels: append([]string(nil), bv.OperatorGatedLabelsForProject(projectKey)...),
+		agents:              make(map[string]*AgentState),
+		config:              DefaultCoordinatorConfig(),
+		events:              make(chan CoordinatorEvent, 100),
+		stopCh:              make(chan struct{}),
 	}
 }
 

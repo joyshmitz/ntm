@@ -23,6 +23,7 @@ type ProjectConfig struct {
 	PaletteState PaletteState        `toml:"palette_state"`
 	Templates    ProjectTemplates    `toml:"templates"`
 	Agents       AgentConfig         `toml:"agents"`
+	Assign       ProjectAssign       `toml:"assign"`
 	Integrations ProjectIntegrations `toml:"integrations"`
 }
 
@@ -46,6 +47,13 @@ type ProjectIntegrations struct {
 // ProjectDefaults holds default settings for the project
 type ProjectDefaults struct {
 	Agents map[string]int `toml:"agents"` // e.g., { cc = 2, cod = 1 }
+}
+
+// ProjectAssign holds the assignment settings that repositories may safely
+// add to the global configuration. Project labels can add operator gates but
+// cannot remove the user's global gates.
+type ProjectAssign struct {
+	OperatorGatedLabels []string `toml:"operator_gated_labels"`
 }
 
 // ProjectAlerts holds project-scoped alert overrides. Pointer fields preserve
@@ -88,9 +96,25 @@ func FindProjectConfig(startDir string) (string, *ProjectConfig, error) {
 
 	for {
 		configPath := filepath.Join(dir, ".ntm", "config.toml")
-		if info, err := os.Stat(configPath); err == nil && !info.IsDir() {
+		info, statErr := os.Lstat(configPath)
+		switch {
+		case statErr == nil:
+			if info.Mode()&os.ModeSymlink != 0 {
+				info, statErr = os.Stat(configPath)
+				if statErr != nil {
+					return dir, nil, fmt.Errorf("resolving project config %s: %w", configPath, statErr)
+				}
+			}
+			if !info.Mode().IsRegular() {
+				return dir, nil, fmt.Errorf("project config %s is not a regular file", configPath)
+			}
 			cfg, err := LoadProjectConfig(configPath)
 			return dir, cfg, err
+		case os.IsNotExist(statErr):
+			// Keep walking only when the entry is genuinely absent. Other lookup
+			// failures must remain visible to strict safety-policy callers.
+		default:
+			return dir, nil, fmt.Errorf("inspecting project config %s: %w", configPath, statErr)
 		}
 
 		parent := filepath.Dir(dir)
@@ -353,6 +377,11 @@ cm = true
 # Project-level spawn defaults. Use these instead of [agents], because
 # project configs intentionally do not override agent command templates.
 # agents = { cc = 2, cod = 1 }
+
+[assign]
+# Additional approval labels for this repository. These extend the user's
+# global and NTM built-in gates; project config cannot remove a gate.
+# operator_gated_labels = ["security-review", "legal-approval"]
 
 [palette]
 # file = "palette.md"  # Relative to .ntm/

@@ -1,7 +1,9 @@
 package bv
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -83,6 +85,61 @@ func TestBVClientIsAvailable(t *testing.T) {
 	// Should match the package-level IsInstalled() at minimum
 	if !IsInstalled() && available {
 		t.Error("IsAvailable should be false when bv is not installed")
+	}
+}
+
+func TestBVClientIsAvailableContextDoesNotCacheCanceledProbe(t *testing.T) {
+	binDir := t.TempDir()
+	probeStarted := filepath.Join(binDir, "probe-started")
+	bvPath := filepath.Join(binDir, "bv")
+	blockedProbe := "#!/bin/sh\n: > \"$BV_PROBE_STARTED\"\nexec /bin/sleep 60\n"
+	if err := os.WriteFile(bvPath, []byte(blockedProbe), 0o755); err != nil {
+		t.Fatalf("write blocking bv fixture: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("BV_PROBE_STARTED", probeStarted)
+
+	client := NewBVClient()
+	if client.IsAvailableContext(nil) {
+		t.Fatal("nil-context availability probe reported success")
+	}
+	preCanceled, cancelPreCanceled := context.WithCancel(context.Background())
+	cancelPreCanceled()
+	if client.IsAvailableContext(preCanceled) {
+		t.Fatal("pre-canceled availability probe reported success")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan bool, 1)
+	go func() { result <- client.IsAvailableContext(ctx) }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(probeStarted); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("blocking bv availability probe did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case available := <-result:
+		if available {
+			t.Fatal("canceled availability probe reported success")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("availability probe did not return after cancellation")
+	}
+	if cacheTime := client.availableCacheTime.Load(); cacheTime != 0 {
+		t.Fatalf("canceled availability probe populated cache timestamp %d", cacheTime)
+	}
+
+	if err := os.WriteFile(bvPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write live bv fixture: %v", err)
+	}
+	if !client.IsAvailableContext(t.Context()) {
+		t.Fatal("live probe after cancellation was poisoned by the canceled result")
 	}
 }
 

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -524,7 +525,7 @@ func TestGetValue_CASS(t *testing.T) {
 	}
 }
 
-func TestGetValue_Health(t *testing.T) {
+func TestGetValue_RemovedHealthPaths(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
 
@@ -544,8 +545,8 @@ func TestGetValue_Health(t *testing.T) {
 		t.Run(tt.path, func(t *testing.T) {
 			t.Parallel()
 			_, err := GetValue(cfg, tt.path)
-			if err != nil {
-				t.Errorf("GetValue(%q) error = %v", tt.path, err)
+			if err == nil || !strings.Contains(err.Error(), "unknown config path") {
+				t.Errorf("GetValue(%q) error = %v, want unknown config path", tt.path, err)
 			}
 		})
 	}

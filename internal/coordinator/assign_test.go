@@ -467,6 +467,111 @@ func TestCoordinatorAtomicPreflightBlocksSensitiveReservationPathBeforeClaim(t *
 	}
 }
 
+func TestCoordinatorAtomicPolicySnapshotsRemainProjectIsolatedConcurrently(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := t.Context()
+	const (
+		gateA = "project-a-approval"
+		gateB = "project-b-approval"
+	)
+
+	type projectRun struct {
+		name        string
+		coordinator *SessionCoordinator
+		ownBead     string
+		crossBead   string
+		ownGate     string
+		crossGate   string
+		claimStop   error
+		claimPolicy []string
+		claimMu     sync.Mutex
+	}
+	newProjectRun := func(name, ownGate, crossGate string) *projectRun {
+		projectDir := t.TempDir()
+		if err := bv.ConfigureProjectOperatorGatedLabels(projectDir, []string{ownGate}); err != nil {
+			t.Fatalf("configure %s policy: %v", name, err)
+		}
+		run := &projectRun{
+			name: name, ownBead: "ntm-" + name + "-own-gate", crossBead: "ntm-" + name + "-cross-gate",
+			ownGate: ownGate, crossGate: crossGate, claimStop: errors.New(name + " claim policy captured"),
+		}
+		run.coordinator = New("coordinator-policy-"+name, projectDir, &agentmail.Client{}, "CoordinatorAgent")
+		run.coordinator.workItemDetailsFn = func(_ context.Context, beadID string) (*bv.BeadAssignmentDetails, error) {
+			label := run.crossGate
+			if beadID == run.ownBead {
+				label = run.ownGate
+			}
+			return &bv.BeadAssignmentDetails{ID: beadID, Status: "open", Labels: []string{label}}, nil
+		}
+		run.coordinator.claimBeadForAssignmentFn = func(_ context.Context, _ string, beadID, actor string, gatedLabels []string) (bv.BeadClaimResult, error) {
+			run.claimMu.Lock()
+			run.claimPolicy = append([]string(nil), gatedLabels...)
+			run.claimMu.Unlock()
+			return bv.BeadClaimResult{ID: beadID, Actor: actor}, run.claimStop
+		}
+		return run
+	}
+
+	runs := []*projectRun{
+		newProjectRun("a", gateA, gateB),
+		newProjectRun("b", gateB, gateA),
+	}
+	type runResult struct {
+		run        *projectRun
+		ownErr     error
+		crossErr   error
+		ownMutated bool
+		policy     []string
+	}
+	results := make(chan runResult, len(runs))
+	start := make(chan struct{})
+	runProject := func(run *projectRun) {
+		<-start
+		execute := func(beadID, key, target string) (*assignmentstore.AssignmentStore, error) {
+			store := assignmentstore.NewStore("coordinator-policy-" + run.name + "-" + key)
+			_, err := run.coordinator.newAtomicAssignmentCoordinator(store).Execute(ctx, assignmentstore.AtomicRequest{
+				BeadID: beadID, BeadTitle: "Project policy isolation", Target: target, OccupancyKey: target,
+				Pane: 1, AgentType: "cod", AgentName: "BlueLake", Actor: "BlueLake",
+				Prompt: "verify isolated policy", IdempotencyKey: key,
+			})
+			return store, err
+		}
+		ownStore, ownErr := execute(run.ownBead, "own", "%501")
+		_, crossErr := execute(run.crossBead, "cross", "%502")
+		run.claimMu.Lock()
+		policy := append([]string(nil), run.claimPolicy...)
+		run.claimMu.Unlock()
+		results <- runResult{run: run, ownErr: ownErr, crossErr: crossErr, ownMutated: ownStore.Get(run.ownBead) != nil, policy: policy}
+	}
+	go runProject(runs[0])
+	go runProject(runs[1])
+	close(start)
+
+	containsLabel := func(labels []string, wanted string) bool {
+		for _, label := range labels {
+			if strings.EqualFold(strings.TrimSpace(label), wanted) {
+				return true
+			}
+		}
+		return false
+	}
+	for range runs {
+		result := <-results
+		if !errors.Is(result.ownErr, assignmentstore.ErrClaimIneligible) || result.ownMutated {
+			t.Fatalf("project %s own gate error=%v mutated=%v", result.run.name, result.ownErr, result.ownMutated)
+		}
+		if !errors.Is(result.crossErr, result.run.claimStop) {
+			t.Fatalf("project %s cross gate error=%v, want claim callback", result.run.name, result.crossErr)
+		}
+		if !containsLabel(result.policy, result.run.ownGate) || containsLabel(result.policy, result.run.crossGate) {
+			t.Fatalf("project %s claim policy=%v, want own gate %q without %q", result.run.name, result.policy, result.run.ownGate, result.run.crossGate)
+		}
+		if !reflect.DeepEqual(result.policy, result.run.coordinator.operatorGatedLabels) {
+			t.Fatalf("project %s preauthorization/CAS snapshots differ: claim=%v coordinator=%v", result.run.name, result.policy, result.run.coordinator.operatorGatedLabels)
+		}
+	}
+}
+
 func TestCoordinatorReservationPortPreservesPartialLeaseHandles(t *testing.T) {
 	client := &fakeCoordinatorReservationClient{reserveResult: &agentmail.ReservationResult{
 		Granted: []agentmail.FileReservation{{
@@ -764,10 +869,10 @@ func TestAssignWorkSkipsPersistedActiveRecommendation(t *testing.T) {
 		Status: robot.StateWaiting, Healthy: true, SafeToDispatch: true,
 		LastActivity: now.Add(-time.Minute), ObservedAt: now, ObservationFreshness: status.FreshnessFresh,
 	}
-	c.triageFn = func(context.Context, string) (*bv.TriageResponse, error) {
-		return &bv.TriageResponse{Triage: bv.TriageData{Recommendations: []bv.TriageRecommendation{{
+	c.actionableRecommendationsFn = func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+		return []bv.TriageRecommendation{{
 			ID: "ntm-active", Title: "Already assigned", Status: "open", Priority: 1, Score: 1,
-		}}}}, nil
+		}}, nil
 	}
 	c.workItemStatusFn = func(context.Context, string) (string, error) {
 		return "in_progress", nil
@@ -831,10 +936,10 @@ func TestAssignWorkReconcilesClosedAssignmentAndReusesPane(t *testing.T) {
 		}
 		return "open", nil
 	}
-	c.triageFn = func(context.Context, string) (*bv.TriageResponse, error) {
-		return &bv.TriageResponse{Triage: bv.TriageData{Recommendations: []bv.TriageRecommendation{{
+	c.actionableRecommendationsFn = func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+		return []bv.TriageRecommendation{{
 			ID: "ntm-new", Title: "Fresh work", Status: "open", Priority: 1, Score: 1,
-		}}}}, nil
+		}}, nil
 	}
 	c.atomicCoordinatorFactory = func(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
 		claim := assignmentstore.ClaimFunc(func(_ context.Context, beadID, actor string) (assignmentstore.ClaimReceipt, error) {
@@ -891,8 +996,8 @@ func TestAssignWorkReconcilesClosedAssignmentBeforeCandidateGate(t *testing.T) {
 		}
 		return "closed", nil
 	}
-	c.triageFn = func(context.Context, string) (*bv.TriageResponse, error) {
-		t.Fatal("triage must not run when there are no assignment candidates")
+	c.actionableRecommendationsFn = func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+		t.Fatal("actionable planning must not run when there are no assignment candidates")
 		return nil, nil
 	}
 
@@ -920,7 +1025,169 @@ func addEligibleCoordinatorAgent(c *SessionCoordinator, paneID, agentName string
 		LastActivity: now.Add(-time.Minute), ObservedAt: now, ObservationFreshness: status.FreshnessFresh,
 	}
 	c.workItemStatusFn = func(context.Context, string) (string, error) { return "in_progress", nil }
-	c.triageFn = func(context.Context, string) (*bv.TriageResponse, error) { return &bv.TriageResponse{}, nil }
+	c.actionableRecommendationsFn = func(context.Context, string, int) ([]bv.TriageRecommendation, error) { return nil, nil }
+}
+
+func TestAssignWorkFailsClosedBeforePendingRecoveryWhenActionableVerificationFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "plan", err: bv.ErrActionablePlanUnverified},
+		{name: "labels", err: bv.ErrActionableLabelsUnverified},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session := fmt.Sprintf("coordinator-actionable-%s-failure", test.name)
+			request := assignmentstore.AtomicRequest{
+				BeadID:         "ntm-pending-" + test.name,
+				BeadTitle:      "Pending recovery must wait for verified " + test.name,
+				Target:         fmt.Sprintf("%%%d", index+81),
+				OccupancyKey:   fmt.Sprintf("%%%d", index+81),
+				Pane:           index + 1,
+				AgentType:      "cod",
+				AgentName:      "BlueLake" + test.name,
+				Actor:          "BlueLake" + test.name,
+				Prompt:         "pending verified recovery prompt",
+				IdempotencyKey: "coordinator-actionable-" + test.name + "-key",
+			}
+			store := assignmentstore.NewStore(session)
+			actor := assignmentstore.StableClaimActor(request.Actor, request.IdempotencyKey)
+			if _, err := store.RecordAtomicIntent(request, actor, time.Now().UTC()); err != nil {
+				t.Fatalf("RecordAtomicIntent: %v", err)
+			}
+			if _, err := store.RecordAtomicClaim(request, assignmentstore.ClaimReceipt{
+				BeadID: request.BeadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("RecordAtomicClaim: %v", err)
+			}
+
+			c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+			addEligibleCoordinatorAgent(c, request.Target, request.AgentName)
+			verificationCalls := 0
+			c.actionableRecommendationsFn = func(_ context.Context, projectKey string, limit int) ([]bv.TriageRecommendation, error) {
+				verificationCalls++
+				if projectKey != c.projectKey || limit != 0 {
+					t.Fatalf("actionable verification project=%q limit=%d", projectKey, limit)
+				}
+				return nil, fmt.Errorf("injected %s verification failure: %w", test.name, test.err)
+			}
+			factoryCalls := 0
+			claimCalls := 0
+			reserveCalls := 0
+			dispatchCalls := 0
+			c.atomicCoordinatorFactory = func(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+				factoryCalls++
+				claim := assignmentstore.ClaimFunc(func(_ context.Context, beadID, gotActor string) (assignmentstore.ClaimReceipt, error) {
+					claimCalls++
+					return assignmentstore.ClaimReceipt{BeadID: beadID, Actor: gotActor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+				})
+				reserve := assignmentstore.ReservationFunc(func(_ context.Context, req assignmentstore.ReservationRequest) (assignmentstore.LeaseReceipt, error) {
+					reserveCalls++
+					return assignmentstore.LeaseReceipt{AgentName: req.AgentName, Target: req.Target}, nil
+				})
+				dispatch := assignmentstore.DispatchFunc(func(context.Context, assignmentstore.DispatchRequest) (assignmentstore.DispatchReceipt, error) {
+					dispatchCalls++
+					return assignmentstore.DispatchReceipt{DeliveryID: "must-not-dispatch"}, nil
+				})
+				preflight := assignmentstore.PromptPreflightFunc(func(_ context.Context, req assignmentstore.DispatchRequest) (assignmentstore.PromptPreflightResult, error) {
+					return assignmentstore.PromptPreflightResult{DispatchPrompt: req.Prompt, DurablePrompt: req.Prompt}, nil
+				})
+				return assignmentstore.NewAtomicCoordinator(store, claim, reserve, dispatch, preflight)
+			}
+
+			results, err := c.AssignWork(t.Context())
+			if !errors.Is(err, test.err) || results != nil {
+				t.Fatalf("AssignWork results=%+v error=%v, want typed fail-closed error", results, err)
+			}
+			if verificationCalls != 1 || factoryCalls != 0 || claimCalls != 0 || reserveCalls != 0 || dispatchCalls != 0 {
+				t.Fatalf("calls verification=%d factory=%d claim=%d reserve=%d dispatch=%d", verificationCalls, factoryCalls, claimCalls, reserveCalls, dispatchCalls)
+			}
+			reloaded, err := assignmentstore.LoadStoreStrict(session)
+			if err != nil {
+				t.Fatalf("reload pending assignment: %v", err)
+			}
+			pending := reloaded.Get(request.BeadID)
+			if pending == nil || pending.DispatchState != assignmentstore.DispatchPending || pending.DispatchAttempts != 0 {
+				t.Fatalf("pending assignment changed across verification failure: %+v", pending)
+			}
+		})
+	}
+}
+
+func TestAssignWorkUsesPlanOnlyVerifiedRecommendationWithoutReintroducingStaleTriageRows(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		planOnlyID    = "ntm-plan-only"
+		staleTriageID = "ntm-stale-triage-only"
+	)
+	c := New("coordinator-verified-membership", t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+	addEligibleCoordinatorAgent(c, "%83", "BlueLake")
+	verificationCalls := 0
+	c.actionableRecommendationsFn = func(_ context.Context, projectKey string, limit int) ([]bv.TriageRecommendation, error) {
+		verificationCalls++
+		if projectKey != c.projectKey || limit != 0 {
+			t.Fatalf("actionable verification project=%q limit=%d", projectKey, limit)
+		}
+		return []bv.TriageRecommendation{{
+			ID: planOnlyID, Title: "Plan-only actionable work", Status: "open", Priority: 1, Score: 1,
+		}}, nil
+	}
+	var detailLookups []string
+	c.workItemDetailsFn = func(_ context.Context, beadID string) (*bv.BeadAssignmentDetails, error) {
+		detailLookups = append(detailLookups, beadID)
+		if beadID == staleTriageID {
+			t.Fatal("stale triage-only recommendation was reintroduced")
+		}
+		return &bv.BeadAssignmentDetails{ID: planOnlyID, Title: "Plan-only actionable work", Status: "open"}, nil
+	}
+	c.atomicCoordinatorFactory = successfulCoordinatorAtomicFactory("mail-plan-only")
+
+	results, err := c.AssignWork(t.Context())
+	if err != nil || len(results) != 1 || !results[0].Success || results[0].Assignment == nil || results[0].Assignment.BeadID != planOnlyID {
+		t.Fatalf("AssignWork results=%+v error=%v", results, err)
+	}
+	if verificationCalls != 1 || !reflect.DeepEqual(detailLookups, []string{planOnlyID}) {
+		t.Fatalf("verification calls=%d detail lookups=%v", verificationCalls, detailLookups)
+	}
+}
+
+func TestAssignWorkAppliesLiveConfiguredOperatorGateBeforeClaimAndDispatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	if err := bv.ConfigureProjectOperatorGatedLabels(projectDir, []string{"coordinator-approval-required"}); err != nil {
+		t.Fatalf("configure project policy: %v", err)
+	}
+
+	c := New("coordinator-live-operator-gate", projectDir, &agentmail.Client{}, "CoordinatorAgent")
+	addEligibleCoordinatorAgent(c, "%84", "BlueLake")
+	c.actionableRecommendationsFn = func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+		return []bv.TriageRecommendation{{
+			ID: "ntm-live-operator-gate", Title: "Stale ungated work", Status: "open", Priority: 1, Score: 1,
+		}}, nil
+	}
+	detailCalls := 0
+	c.workItemDetailsFn = func(context.Context, string) (*bv.BeadAssignmentDetails, error) {
+		detailCalls++
+		return &bv.BeadAssignmentDetails{
+			ID: "ntm-live-operator-gate", Title: "Live gated work", Status: "open", Labels: []string{" Coordinator-Approval-Required "},
+		}, nil
+	}
+	factoryCalls := 0
+	c.atomicCoordinatorFactory = func(*assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+		factoryCalls++
+		return nil
+	}
+
+	results, err := c.AssignWork(t.Context())
+	if err != nil || len(results) != 0 {
+		t.Fatalf("AssignWork results=%+v error=%v, want live operator gate to skip assignment", results, err)
+	}
+	if detailCalls != 1 || factoryCalls != 0 {
+		t.Fatalf("live detail calls=%d atomic factory calls=%d", detailCalls, factoryCalls)
+	}
 }
 
 func TestAssignWorkRecoversKnownUnsentIntentWithOriginalIdentity(t *testing.T) {
@@ -950,10 +1217,6 @@ func TestAssignWorkRecoversKnownUnsentIntentWithOriginalIdentity(t *testing.T) {
 
 	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
 	addEligibleCoordinatorAgent(c, request.Target, request.AgentName)
-	triageErr := errors.New("triage unavailable after recovery")
-	c.triageFn = func(context.Context, string) (*bv.TriageResponse, error) {
-		return nil, triageErr
-	}
 	claimCalls := 0
 	reserveCalls := 0
 	dispatchCalls := 0
@@ -984,8 +1247,8 @@ func TestAssignWorkRecoversKnownUnsentIntentWithOriginalIdentity(t *testing.T) {
 	}
 
 	results, err := c.AssignWork(t.Context())
-	if !errors.Is(err, triageErr) {
-		t.Fatalf("AssignWork error = %v, want later triage error", err)
+	if err != nil {
+		t.Fatalf("AssignWork error = %v", err)
 	}
 	if len(results) != 1 || !results[0].Success || results[0].IdempotencyKey != request.IdempotencyKey || results[0].ClaimActor != actor {
 		t.Fatalf("recovery results = %+v", results)
@@ -1526,36 +1789,36 @@ func TestFilterActionableRecommendationsUsesLiveDependencyAndLabelTruth(t *testi
 	}
 }
 
-func TestAssignWorkDoesNotMutateSharedTriageResponse(t *testing.T) {
+func TestAssignWorkDoesNotMutateSharedActionableRecommendations(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	shared := &bv.TriageResponse{Triage: bv.TriageData{Recommendations: []bv.TriageRecommendation{{
+	shared := []bv.TriageRecommendation{{
 		ID: "ntm-cached", Title: "Cached recommendation", Status: "open", Priority: 1, Score: 1,
-	}}}}
-	original := append([]bv.TriageRecommendation(nil), shared.Triage.Recommendations...)
+	}}
+	original := append([]bv.TriageRecommendation(nil), shared...)
 
 	for i, session := range []string{"coordinator-cache-first", "coordinator-cache-second"} {
 		c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
 		addEligibleCoordinatorAgent(c, fmt.Sprintf("%%%d", i+1), fmt.Sprintf("BlueLake%d", i+1))
 		c.workItemStatusFn = func(context.Context, string) (string, error) { return "open", nil }
-		c.triageFn = func(context.Context, string) (*bv.TriageResponse, error) { return shared, nil }
+		c.actionableRecommendationsFn = func(context.Context, string, int) ([]bv.TriageRecommendation, error) { return shared, nil }
 		c.atomicCoordinatorFactory = successfulCoordinatorAtomicFactory(fmt.Sprintf("mail-cache-%d", i+1))
 
 		results, err := c.AssignWork(t.Context())
 		if err != nil || len(results) != 1 || !results[0].Success {
 			t.Fatalf("AssignWork cycle %d results=%+v error=%v", i+1, results, err)
 		}
-		if !reflect.DeepEqual(shared.Triage.Recommendations, original) {
-			t.Fatalf("shared triage response mutated after cycle %d: got=%+v want=%+v", i+1, shared.Triage.Recommendations, original)
+		if !reflect.DeepEqual(shared, original) {
+			t.Fatalf("shared actionable recommendations mutated after cycle %d: got=%+v want=%+v", i+1, shared, original)
 		}
 	}
 }
 
-func TestAssignWorkConcurrentCyclesDoNotRaceOnSharedTriageResponse(t *testing.T) {
+func TestAssignWorkConcurrentCyclesDoNotRaceOnSharedActionableRecommendations(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	shared := &bv.TriageResponse{Triage: bv.TriageData{Recommendations: []bv.TriageRecommendation{{
+	shared := []bv.TriageRecommendation{{
 		ID: "ntm-concurrent-cache", Title: "Shared concurrent recommendation", Status: "open", Priority: 1, Score: 1,
-	}}}}
-	original := append([]bv.TriageRecommendation(nil), shared.Triage.Recommendations...)
+	}}
+	original := append([]bv.TriageRecommendation(nil), shared...)
 
 	const workers = 8
 	type outcome struct {
@@ -1569,7 +1832,7 @@ func TestAssignWorkConcurrentCyclesDoNotRaceOnSharedTriageResponse(t *testing.T)
 		c := New(fmt.Sprintf("coordinator-cache-concurrent-%d", i), t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
 		addEligibleCoordinatorAgent(c, fmt.Sprintf("%%%d", i+20), fmt.Sprintf("BlueLake%d", i+20))
 		c.workItemStatusFn = func(context.Context, string) (string, error) { return "open", nil }
-		c.triageFn = func(context.Context, string) (*bv.TriageResponse, error) { return shared, nil }
+		c.actionableRecommendationsFn = func(context.Context, string, int) ([]bv.TriageRecommendation, error) { return shared, nil }
 		c.atomicCoordinatorFactory = successfulCoordinatorAtomicFactory(fmt.Sprintf("mail-concurrent-%d", i))
 
 		wg.Add(1)
@@ -1591,8 +1854,8 @@ func TestAssignWorkConcurrentCyclesDoNotRaceOnSharedTriageResponse(t *testing.T)
 			t.Fatalf("concurrent AssignWork cycle %d results=%+v error=%v", cycle, got.results, got.err)
 		}
 	}
-	if !reflect.DeepEqual(shared.Triage.Recommendations, original) {
-		t.Fatalf("shared triage response mutated by concurrent cycles: got=%+v want=%+v", shared.Triage.Recommendations, original)
+	if !reflect.DeepEqual(shared, original) {
+		t.Fatalf("shared actionable recommendations mutated by concurrent cycles: got=%+v want=%+v", shared, original)
 	}
 }
 

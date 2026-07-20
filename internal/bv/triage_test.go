@@ -5,11 +5,43 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+type controlledErrorContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+	mu   sync.RWMutex
+	err  error
+}
+
+func newControlledErrorContext() *controlledErrorContext {
+	return &controlledErrorContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *controlledErrorContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *controlledErrorContext) Err() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.err
+}
+
+func (c *controlledErrorContext) finish(err error) {
+	c.once.Do(func() {
+		c.mu.Lock()
+		c.err = err
+		c.mu.Unlock()
+		close(c.done)
+	})
+}
 
 func TestGetTriageContextCancelsWhileWaitingForRunLock(t *testing.T) {
 	triageRunMu.Lock()
@@ -271,29 +303,27 @@ func TestGetTriageNoCache(t *testing.T) {
 	// making slow bv calls. The caching logic is tested in TestTriageCache.
 }
 
-// Regression for #224: `br ready` excludes epic-type beads while
-// bv --robot-plan includes them as actionable, so label enrichment must also
-// consult `br list --status open` or an operator-gated epic below triage's
-// top-10 cut arrives with empty labels and bypasses the operator gate.
+// TestReadyBeadLabelsMergesOpenListForEpics is the #224 regression: `br ready`
+// excludes epic-type beads, so an operator-gated epic surfaced by
+// bv --robot-plan must get its labels from the merged `br list --status open`
+// pass. Ready entries stay authoritative when a bead appears in both.
 func TestReadyBeadLabelsMergesOpenListForEpics(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir .git: %v", err)
-	}
 	binDir := t.TempDir()
-	// br sees args like: --lock-timeout 5000 ready --json --limit 100000
 	script := `#!/bin/sh
-case "$*" in
-*" ready "*)
-	echo '[{"id":"bd-task","labels":["human-gated","ready-fresh"]}]'
-	;;
-*" list "*)
-	echo '[{"id":"bd-task","labels":["stale-from-list"]},{"id":"bd-epic","labels":["human-gated"]},{"id":"bd-plain","labels":[]}]'
-	;;
-*)
-	echo '[]'
-	;;
-esac
+for arg in "$@"; do
+  case "$arg" in
+    ready)
+      echo '[{"id":"br-task","labels":["backend"]},{"id":"br-both","labels":["from-ready"]},{"id":"br-unlabeled","labels":[]},{"id":"br-omitted"}]'
+      exit 0
+      ;;
+    list)
+      echo '[{"id":"br-epic","labels":["human-gated"]},{"id":"br-both","labels":["from-list"]},{"id":"br-task","labels":["backend"]},{"id":"br-omitted","labels":["from-open"]}]'
+      exit 0
+      ;;
+  esac
+done
+echo '[]'
 `
 	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
 		t.Fatalf("write fake br: %v", err)
@@ -304,16 +334,603 @@ esac
 	if err != nil {
 		t.Fatalf("readyBeadLabelsContext: %v", err)
 	}
-	// Epic missing from `br ready` must still carry its labels via `br list`.
-	if got := labels["bd-epic"]; len(got) != 1 || got[0] != "human-gated" {
-		t.Fatalf("epic labels = %v, want [human-gated]", got)
+	if got := labels["br-epic"]; len(got) != 1 || got[0] != "human-gated" {
+		t.Fatalf("epic labels = %v, want [human-gated] (br list must fill br ready's epic gap)", got)
 	}
-	// Entries present in `br ready` win over `br list` duplicates.
-	if got := labels["bd-task"]; len(got) != 2 || got[0] != "human-gated" || got[1] != "ready-fresh" {
-		t.Fatalf("task labels = %v, want ready-sourced [human-gated ready-fresh]", got)
+	if got := labels["br-both"]; len(got) != 1 || got[0] != "from-ready" {
+		t.Fatalf("merged labels = %v, want [from-ready] (br ready entries must win)", got)
 	}
-	// Beads with no labels stay absent (empty means nothing to gate on).
-	if _, ok := labels["bd-plain"]; ok {
-		t.Fatalf("bd-plain should not appear in label map")
+	if got := labels["br-task"]; len(got) != 1 || got[0] != "backend" {
+		t.Fatalf("task labels = %v, want [backend]", got)
+	}
+	if got, verified := labels["br-unlabeled"]; !verified || len(got) != 0 {
+		t.Fatalf("verified unlabeled task = %v, present=%t; want present empty labels", got, verified)
+	}
+	if got := labels["br-omitted"]; len(got) != 1 || got[0] != "from-open" {
+		t.Fatalf("omitted ready labels = %v, want open-list fallback [from-open]", got)
+	}
+}
+
+// TestReadyBeadLabelsOpenListFillsEmptyReadyLabels protects the operator gate
+// when br ready covers a bead but omits labels that br list still reports.
+func TestReadyBeadLabelsOpenListFillsEmptyReadyLabels(t *testing.T) {
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    ready)
+      echo '[{"id":"br-gated","labels":[]},{"id":"br-ready-wins","labels":["from-ready"]}]'
+      exit 0
+      ;;
+    list)
+      echo '[{"id":"br-gated","labels":["human-gated"]},{"id":"br-ready-wins","labels":["from-list"]}]'
+      exit 0
+      ;;
+  esac
+done
+echo '[]'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	labels, err := readyBeadLabelsContext(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("readyBeadLabelsContext: %v", err)
+	}
+	if got := labels["br-gated"]; len(got) != 1 || got[0] != "human-gated" {
+		t.Fatalf("gated labels = %v, want [human-gated] from open list", got)
+	}
+	if got := labels["br-ready-wins"]; len(got) != 1 || got[0] != "from-ready" {
+		t.Fatalf("non-empty ready labels = %v, want [from-ready]", got)
+	}
+}
+
+func TestReadyBeadLabelsRejectsMalformedReadyLabelsBeforeOpenListFallback(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		labels string
+	}{
+		{name: "null container", labels: `null`},
+		{name: "null entry", labels: `[null]`},
+		{name: "blank", labels: `["   "]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binDir := t.TempDir()
+			script := `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    ready)
+      echo '[{"id":"br-gated","labels":` + test.labels + `}]'
+      exit 0
+      ;;
+    list)
+      echo '[{"id":"br-gated","labels":["human-gated"]}]'
+      exit 0
+      ;;
+  esac
+done
+echo '[]'
+`
+			if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
+				t.Fatalf("write fake br: %v", err)
+			}
+			t.Setenv("PATH", binDir)
+
+			labels, err := readyBeadLabelsContext(t.Context(), dir)
+			if labels != nil || err == nil {
+				t.Fatalf("labels=%v error=%v, want fail-closed malformed-label error", labels, err)
+			}
+			if !strings.Contains(err.Error(), "null or blank label") || !strings.Contains(err.Error(), "br-gated") {
+				t.Fatalf("error=%q, want malformed-label identity", err)
+			}
+		})
+	}
+}
+
+// TestReadyBeadLabelsFailsClosedWhenOpenListFails asserts a br list failure is
+// fatal: an incomplete label map would silently bypass the operator gate.
+func TestReadyBeadLabelsFailsClosedWhenOpenListFails(t *testing.T) {
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    ready)
+      echo '[{"id":"br-task","labels":["backend"]}]'
+      exit 0
+      ;;
+    list)
+      echo 'boom' >&2
+      exit 3
+      ;;
+  esac
+done
+echo '[]'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "br"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	if _, err := readyBeadLabelsContext(context.Background(), dir); err == nil {
+		t.Fatal("readyBeadLabelsContext succeeded despite br list failure; want fail-closed error")
+	}
+}
+
+func TestGetActionableRecommendationsPreservesLabelCancellationIdentity(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr error
+	}{
+		{name: "explicit cancellation", wantErr: context.Canceled},
+		{name: "deadline expiry", wantErr: context.DeadlineExceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binDir := t.TempDir()
+			marker := filepath.Join(t.TempDir(), "label-lookup-started")
+			bvScript := `#!/bin/sh
+case "$1" in
+  --robot-triage)
+    echo '{"triage":{"recommendations":[]}}'
+    ;;
+  --robot-plan)
+    echo '{"plan":{"tracks":[{"track_id":"one","items":[{"id":"br-blocked","title":"blocked label lookup","status":"open","priority":1}]}]}}'
+    ;;
+  *)
+    echo "unexpected bv args: $*" >&2
+    exit 64
+    ;;
+esac
+`
+			brScript := `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "ready" ]; then
+    : > "$NTM_TEST_LABEL_MARKER"
+    exec /bin/sleep 10
+  fi
+done
+echo '[]'
+`
+			for name, script := range map[string]string{"bv": bvScript, "br": brScript} {
+				if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o700); err != nil {
+					t.Fatalf("write fake %s: %v", name, err)
+				}
+			}
+			t.Setenv("PATH", binDir)
+			t.Setenv("NTM_TEST_LABEL_MARKER", marker)
+			InvalidateTriageCache()
+			t.Cleanup(InvalidateTriageCache)
+
+			ctx := newControlledErrorContext()
+			defer ctx.finish(context.Canceled)
+			type result struct {
+				recs []TriageRecommendation
+				err  error
+			}
+			resultCh := make(chan result, 1)
+			go func() {
+				recs, err := GetActionableRecommendationsContext(ctx, dir, 0)
+				resultCh <- result{recs: recs, err: err}
+			}()
+
+			waitForTestFile(t, marker, "label lookup startup")
+			started := time.Now()
+			ctx.finish(tt.wantErr)
+			var got result
+			select {
+			case got = <-resultCh:
+			case <-time.After(2 * time.Second):
+				t.Fatal("label lookup did not stop within 2s of context completion")
+			}
+			recs, err := got.recs, got.err
+			if recs != nil || !errors.Is(err, tt.wantErr) {
+				t.Fatalf("GetActionableRecommendationsContext() = recs:%+v err:%v, want %v", recs, err, tt.wantErr)
+			}
+			if errors.Is(err, ErrActionableLabelsUnverified) {
+				t.Fatalf("cancellation error %v was misclassified as ErrActionableLabelsUnverified", err)
+			}
+			if elapsed := time.Since(started); elapsed > 2*time.Second {
+				t.Fatalf("label lookup cancellation took %s", elapsed)
+			}
+		})
+	}
+}
+
+func TestGetActionableRecommendationsRejectsNilContext(t *testing.T) {
+	recs, err := GetActionableRecommendationsContext(nil, t.TempDir(), 0)
+	if recs != nil || err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("GetActionableRecommendationsContext(nil) = recs:%+v err:%v, want context-required error", recs, err)
+	}
+}
+
+func TestClassifyActionableLabelsErrorPreservesWrappedCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		wrapped error
+		want    error
+	}{
+		{
+			name:    "canceled transport",
+			wrapped: errors.Join(errors.New("label transport stopped"), context.Canceled),
+			want:    context.Canceled,
+		},
+		{
+			name:    "deadline transport",
+			wrapped: errors.Join(errors.New("label transport timed out"), context.DeadlineExceeded),
+			want:    context.DeadlineExceeded,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := classifyActionableLabelsError(t.Context(), test.wrapped)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("classifyActionableLabelsError() error = %v, want %v", err, test.want)
+			}
+			if errors.Is(err, ErrActionableLabelsUnverified) {
+				t.Fatalf("cancellation error %v was also classified as ErrActionableLabelsUnverified", err)
+			}
+		})
+	}
+
+	err := classifyActionableLabelsError(t.Context(), errors.New("malformed label response"))
+	if !errors.Is(err, ErrActionableLabelsUnverified) {
+		t.Fatalf("generic label error = %v, want ErrActionableLabelsUnverified", err)
+	}
+}
+
+func TestGetActionableRecommendationsFailsClosedWhenPlanItemLabelsAreUnverified(t *testing.T) {
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	bvScript := `#!/bin/sh
+case "$1" in
+  --robot-triage)
+    echo '{"triage":{"recommendations":[]}}'
+    ;;
+  --robot-plan)
+    echo '{"plan":{"tracks":[{"track_id":"one","items":[{"id":"br-missing","title":"missing from tracker sources","status":"open","priority":1}]}]}}'
+    ;;
+  *)
+    echo "unexpected bv args: $*" >&2
+    exit 64
+    ;;
+esac
+`
+	brScript := `#!/bin/sh
+if [ "$1" != "--lock-timeout" ] || [ "$2" != "5000" ]; then
+  echo "missing br lock timeout: $*" >&2
+  exit 64
+fi
+shift 2
+case "$1" in
+  ready|list)
+    echo '[]'
+    ;;
+  *)
+    echo "unexpected br args: $*" >&2
+    exit 64
+    ;;
+esac
+`
+	for name, script := range map[string]string{"bv": bvScript, "br": brScript} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o700); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	InvalidateTriageCache()
+	t.Cleanup(InvalidateTriageCache)
+
+	_, err := GetActionableRecommendationsContext(context.Background(), dir, 0)
+	if err == nil || !errors.Is(err, ErrActionableLabelsUnverified) || !strings.Contains(err.Error(), `actionable plan item "br-missing"`) {
+		t.Fatalf("GetActionableRecommendationsContext error = %v, want unverified-label failure", err)
+	}
+}
+
+func installActionableRecommendationTestTools(
+	t *testing.T,
+	triageOutput string,
+	planOutput string,
+	planExit int,
+	readyOutput string,
+	listOutput string,
+) {
+	t.Helper()
+	binDir := t.TempDir()
+	planCommand := "printf '%s\\n' '" + planOutput + "'"
+	if planExit != 0 {
+		planCommand = "printf '%s\\n' 'plan failed' >&2\n    exit 7"
+	}
+	bvScript := `#!/bin/sh
+case "$1" in
+  --robot-triage)
+    printf '%s\n' '` + triageOutput + `'
+    ;;
+  --robot-plan)
+    ` + planCommand + `
+    ;;
+  *)
+    printf 'unexpected bv args: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+`
+	brScript := `#!/bin/sh
+if [ "$1" != "--lock-timeout" ] || [ "$2" != "5000" ]; then
+  printf 'missing br lock timeout: %s\n' "$*" >&2
+  exit 64
+fi
+shift 2
+case "$1" in
+  ready)
+    printf '%s\n' '` + readyOutput + `'
+    ;;
+  list)
+    printf '%s\n' '` + listOutput + `'
+    ;;
+  *)
+    printf 'unexpected br args: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+`
+	for name, script := range map[string]string{"bv": bvScript, "br": brScript} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o700); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	InvalidateTriageCache()
+	t.Cleanup(InvalidateTriageCache)
+}
+
+func TestGetActionableRecommendationsFailsClosedOnUnverifiedPlan(t *testing.T) {
+	tests := []struct {
+		name       string
+		planOutput string
+		planExit   int
+		wantError  string
+	}{
+		{name: "plan command failure", planExit: 7, wantError: "load bv --robot-plan"},
+		{name: "plan parse failure", planOutput: `{`, wantError: "parsing plan"},
+		{name: "missing plan structure", planOutput: `{}`, wantError: "missing plan object"},
+		{name: "missing tracks structure", planOutput: `{"plan":{}}`, wantError: "missing plan.tracks array"},
+		{name: "null tracks structure", planOutput: `{"plan":{"tracks":null}}`, wantError: "missing plan.tracks array"},
+		{name: "missing track items structure", planOutput: `{"plan":{"tracks":[{"track_id":"one"}]}}`, wantError: "missing plan.tracks[0].items array"},
+		{name: "null track items structure", planOutput: `{"plan":{"tracks":[{"track_id":"one","items":null}]}}`, wantError: "missing plan.tracks[0].items array"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			installActionableRecommendationTestTools(
+				t,
+				`{"triage":{"recommendations":[]}}`,
+				tt.planOutput,
+				tt.planExit,
+				`[]`,
+				`[]`,
+			)
+
+			recs, err := GetActionableRecommendationsContext(context.Background(), t.TempDir(), 0)
+			if err == nil || recs != nil {
+				t.Fatalf("GetActionableRecommendationsContext() = recs:%+v err:%v, want fail-closed plan error", recs, err)
+			}
+			if !errors.Is(err, ErrActionablePlanUnverified) {
+				t.Fatalf("error = %v, want ErrActionablePlanUnverified", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("error = %q, want substring %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestGetActionableRecommendationsClassifiesTriageFailuresAsUnverifiedPlan(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		script string
+		want   string
+	}{
+		{
+			name:   "command failure",
+			script: "#!/bin/sh\nprintf 'triage unavailable\\n' >&2\nexit 71\n",
+			want:   "triage unavailable",
+		},
+		{
+			name:   "parse failure",
+			script: "#!/bin/sh\nprintf '{\\n'\n",
+			want:   "parsing triage",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(test.script), 0o700); err != nil {
+				t.Fatalf("write fake bv: %v", err)
+			}
+			t.Setenv("PATH", binDir)
+			InvalidateTriageCache()
+			t.Cleanup(InvalidateTriageCache)
+
+			recommendations, err := GetActionableRecommendationsContext(t.Context(), t.TempDir(), 0)
+			if recommendations != nil || err == nil || !errors.Is(err, ErrActionablePlanUnverified) ||
+				!strings.Contains(err.Error(), "load bv --robot-triage") || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("triage failure recommendations=%+v err=%v, want ErrActionablePlanUnverified containing %q", recommendations, err, test.want)
+			}
+		})
+	}
+}
+
+func TestGetActionableRecommendationsRejectsBlankPlanItemID(t *testing.T) {
+	installActionableRecommendationTestTools(
+		t,
+		`{"triage":{"recommendations":[]}}`,
+		`{"plan":{"tracks":[{"track_id":"one","items":[{"id":"  \t ","title":"blank","status":"open","priority":1}]}]}}`,
+		0,
+		`[]`,
+		`[]`,
+	)
+
+	recs, err := GetActionableRecommendationsContext(context.Background(), t.TempDir(), 0)
+	if err == nil || recs != nil {
+		t.Fatalf("GetActionableRecommendationsContext() = recs:%+v err:%v, want blank-ID error", recs, err)
+	}
+	if !errors.Is(err, ErrActionablePlanUnverified) || !strings.Contains(err.Error(), "empty id") {
+		t.Fatalf("error = %v, want ErrActionablePlanUnverified with empty-id context", err)
+	}
+}
+
+func TestGetActionableRecommendationsRejectsUnverifiedPlanItemStatus(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		item string
+	}{
+		{name: "missing", item: `{"id":"br-covered","title":"covered","priority":1}`},
+		{name: "null", item: `{"id":"br-covered","title":"covered","status":null,"priority":1}`},
+		{name: "blank", item: `{"id":"br-covered","title":"covered","status":"   ","priority":1}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installActionableRecommendationTestTools(
+				t,
+				`{"triage":{"recommendations":[{"id":"br-covered","title":"covered","status":"open","priority":1}]}}`,
+				`{"plan":{"tracks":[{"track_id":"one","items":[`+test.item+`]}]}}`,
+				0,
+				`[{"id":"br-covered","labels":[]}]`,
+				`[{"id":"br-covered","labels":[]}]`,
+			)
+
+			recs, err := GetActionableRecommendationsContext(t.Context(), t.TempDir(), 0)
+			if recs != nil || err == nil || !errors.Is(err, ErrActionablePlanUnverified) {
+				t.Fatalf("recommendations=%+v error=%v, want ErrActionablePlanUnverified", recs, err)
+			}
+			if !strings.Contains(err.Error(), "missing or blank") || !strings.Contains(err.Error(), ".status") {
+				t.Fatalf("error=%q, want missing-status context", err)
+			}
+		})
+	}
+}
+
+func TestGetActionableRecommendationsRejectsUnverifiedPlanItemPriority(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		item string
+	}{
+		{name: "missing", item: `{"id":"br-covered","title":"covered","status":"open"}`},
+		{name: "null", item: `{"id":"br-covered","title":"covered","status":"open","priority":null}`},
+		{name: "negative", item: `{"id":"br-covered","title":"covered","status":"open","priority":-1}`},
+		{name: "above range", item: `{"id":"br-covered","title":"covered","status":"open","priority":5}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installActionableRecommendationTestTools(
+				t,
+				`{"triage":{"recommendations":[{"id":"br-covered","title":"covered","status":"open","priority":3}]}}`,
+				`{"plan":{"tracks":[{"track_id":"one","items":[`+test.item+`]}]}}`,
+				0,
+				`[{"id":"br-covered","labels":[]}]`,
+				`[{"id":"br-covered","labels":[]}]`,
+			)
+
+			recs, err := GetActionableRecommendationsContext(t.Context(), t.TempDir(), 0)
+			if recs != nil || err == nil || !errors.Is(err, ErrActionablePlanUnverified) {
+				t.Fatalf("recommendations=%+v error=%v, want ErrActionablePlanUnverified", recs, err)
+			}
+			if !strings.Contains(err.Error(), ".priority") {
+				t.Fatalf("error=%q, want priority context", err)
+			}
+		})
+	}
+}
+
+func TestGetActionableRecommendationsUsesPlanMembershipAndLiveBeadState(t *testing.T) {
+	installActionableRecommendationTestTools(
+		t,
+		`{"triage":{"recommendations":[{"id":"br-overlap","title":"Ranked overlap","status":"blocked","priority":4,"labels":["stale-gate"],"score":99,"blocked_by":["stale-blocker"],"unblocks_ids":["stale-unblock"]},{"id":"br-triage-only","title":"Triage only","status":"open","priority":0,"labels":["triage-only"],"score":100}]}}`,
+		`{"plan":{"tracks":[{"track_id":"one","items":[{"id":"br-overlap","title":"Plan overlap","status":"open","priority":1,"unblocks":["br-downstream"]},{"id":"br-plan-only","title":"Plan only","status":"open","priority":2,"unblocks":["br-later"]}]}]}}`,
+		0,
+		`[{"id":"br-overlap","labels":["live-gate"]}]`,
+		`[{"id":"br-overlap","labels":["stale-list-value"]},{"id":"br-plan-only","labels":["plan-only-live"]},{"id":"br-triage-only","labels":["irrelevant"]}]`,
+	)
+
+	recs, err := GetActionableRecommendationsContext(context.Background(), t.TempDir(), 0)
+	if err != nil {
+		t.Fatalf("GetActionableRecommendationsContext() error: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("recommendations = %+v, want overlap plus plan-only item", recs)
+	}
+
+	overlap := recs[0]
+	if overlap.ID != "br-overlap" || overlap.Title != "Ranked overlap" || overlap.Score != 99 {
+		t.Fatalf("ranked overlap identity = %+v, want preserved triage rank metadata", overlap)
+	}
+	if overlap.Status != "open" || overlap.Priority != 1 {
+		t.Fatalf("overlap state = status:%q priority:%d, want plan state open/1", overlap.Status, overlap.Priority)
+	}
+	if got, want := overlap.Labels, []string{"live-gate"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("overlap labels = %#v, want live labels %#v", got, want)
+	}
+	if got, want := overlap.UnblocksIDs, []string{"br-downstream"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("overlap unblocks = %#v, want plan unblocks %#v", got, want)
+	}
+	if len(overlap.BlockedBy) != 0 {
+		t.Fatalf("overlap blocked_by = %#v, want plan-authoritative empty blockers", overlap.BlockedBy)
+	}
+
+	planOnly := recs[1]
+	if planOnly.ID != "br-plan-only" || planOnly.Title != "Plan only" || planOnly.Status != "open" || planOnly.Priority != 2 {
+		t.Fatalf("plan-only recommendation = %+v, want plan item retained", planOnly)
+	}
+	if got, want := planOnly.Labels, []string{"plan-only-live"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("plan-only labels = %#v, want live labels %#v", got, want)
+	}
+	for _, rec := range recs {
+		if rec.ID == "br-triage-only" {
+			t.Fatalf("triage-only recommendation escaped plan membership boundary: %+v", rec)
+		}
+	}
+}
+
+func TestGetActionableRecommendationsExcludesNonOpenPlanRowsBeforeLabelVerification(t *testing.T) {
+	installActionableRecommendationTestTools(
+		t,
+		`{"triage":{"recommendations":[{"id":"br-open","title":"Open work","status":"open","priority":1,"score":10},{"id":"br-progress","title":"Stale recovery candidate","status":"in_progress","priority":1,"score":20}]}}`,
+		`{"plan":{"tracks":[{"track_id":"mixed-state","items":[{"id":"br-progress","title":"Stale recovery candidate","status":"in_progress","priority":1},{"id":"br-open","title":"Open work","status":"open","priority":1}]}]}}`,
+		0,
+		`[{"id":"br-open","labels":["verified-live-label"]}]`,
+		`[{"id":"br-open","labels":["verified-list-label"]}]`,
+	)
+
+	recs, err := GetActionableRecommendationsContext(t.Context(), t.TempDir(), 0)
+	if err != nil {
+		t.Fatalf("GetActionableRecommendationsContext() error: %v", err)
+	}
+	if len(recs) != 1 || recs[0].ID != "br-open" || recs[0].Status != "open" {
+		t.Fatalf("recommendations = %+v, want only verified open work", recs)
+	}
+	if got, want := recs[0].Labels, []string{"verified-live-label"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("open recommendation labels = %#v, want %#v", got, want)
+	}
+}
+
+func TestGetActionableRecommendationsAcceptsEmptyPlanTracks(t *testing.T) {
+	installActionableRecommendationTestTools(
+		t,
+		`{"triage":{"recommendations":[{"id":"br-triage-only","title":"Triage only","status":"open","priority":0}]}}`,
+		`{"plan":{"tracks":[]}}`,
+		0,
+		`not valid json`,
+		`not valid json`,
+	)
+
+	recs, err := GetActionableRecommendationsContext(context.Background(), t.TempDir(), 0)
+	if err != nil {
+		t.Fatalf("GetActionableRecommendationsContext() empty plan error: %v", err)
+	}
+	if recs == nil || len(recs) != 0 {
+		t.Fatalf("recommendations = %#v, want present empty result", recs)
 	}
 }

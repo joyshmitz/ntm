@@ -50,6 +50,7 @@ type BVClient struct {
 	// Internal cache for availability
 	availableCache     atomic.Bool
 	availableCacheTime atomic.Int64
+	availabilityMu     sync.Mutex
 }
 
 // NewBVClient creates a new BVClient with default settings.
@@ -123,13 +124,48 @@ type Insights struct {
 
 // IsAvailable checks if bv is installed and responsive.
 func (c *BVClient) IsAvailable() bool {
+	return c.IsAvailableContext(context.Background())
+}
+
+// IsAvailableContext checks whether bv is installed and responsive while
+// honoring caller cancellation. Interrupted probes are never cached.
+func (c *BVClient) IsAvailableContext(ctx context.Context) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+
 	// Check cache first
 	cacheTime := c.availableCacheTime.Load()
 	if cacheTime > 0 && time.Now().Unix()-cacheTime < int64(AvailabilityCacheTTL.Seconds()) {
 		return c.availableCache.Load()
 	}
 
-	available := c.checkAvailability()
+	for !c.availabilityMu.TryLock() {
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return false
+		case <-timer.C:
+		}
+	}
+	defer c.availabilityMu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+
+	// A concurrent probe may have populated the cache while this caller waited.
+	cacheTime = c.availableCacheTime.Load()
+	if cacheTime > 0 && time.Now().Unix()-cacheTime < int64(AvailabilityCacheTTL.Seconds()) {
+		return c.availableCache.Load()
+	}
+
+	available, cacheable := c.checkAvailabilityContext(ctx)
+	if !cacheable {
+		return false
+	}
 
 	c.availableCache.Store(available)
 	c.availableCacheTime.Store(time.Now().Unix())
@@ -137,18 +173,22 @@ func (c *BVClient) IsAvailable() bool {
 	return available
 }
 
-func (c *BVClient) checkAvailability() bool {
+func (c *BVClient) checkAvailabilityContext(ctx context.Context) (available, cacheable bool) {
 	if !IsInstalled() {
-		return false
+		return false, true
 	}
 
 	// Quick health check - just verify we can run bv --version
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bv", "--version")
+	cmd := exec.CommandContext(probeCtx, "bv", "--version")
 	cmd.WaitDelay = 2 * time.Second
-	return cmd.Run() == nil
+	err := cmd.Run()
+	if ctx.Err() != nil || probeCtx.Err() != nil {
+		return false, false
+	}
+	return err == nil, true
 }
 
 // GetRecommendations returns task recommendations from bv --robot-triage.

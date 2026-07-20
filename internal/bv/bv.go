@@ -234,9 +234,66 @@ func GetPlanContext(ctx context.Context, dir string) (*PlanResponse, error) {
 		return nil, err
 	}
 
+	var envelope struct {
+		Plan json.RawMessage `json:"plan"`
+	}
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		return nil, fmt.Errorf("parsing plan: %w", err)
+	}
+	if len(envelope.Plan) == 0 || string(envelope.Plan) == "null" {
+		return nil, errors.New("parsing plan: missing plan object")
+	}
+	var planEnvelope struct {
+		Tracks json.RawMessage `json:"tracks"`
+	}
+	if err := json.Unmarshal(envelope.Plan, &planEnvelope); err != nil {
+		return nil, fmt.Errorf("parsing plan object: %w", err)
+	}
+	if len(planEnvelope.Tracks) == 0 || string(planEnvelope.Tracks) == "null" {
+		return nil, errors.New("parsing plan: missing plan.tracks array")
+	}
+	var trackEnvelopes []struct {
+		Items json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(planEnvelope.Tracks, &trackEnvelopes); err != nil {
+		return nil, fmt.Errorf("parsing plan.tracks: %w", err)
+	}
+	for i, track := range trackEnvelopes {
+		if len(track.Items) == 0 || string(track.Items) == "null" {
+			return nil, fmt.Errorf("parsing plan: missing plan.tracks[%d].items array", i)
+		}
+		var items []struct {
+			Status   *string `json:"status"`
+			Priority *int    `json:"priority"`
+		}
+		if err := json.Unmarshal(track.Items, &items); err != nil {
+			return nil, fmt.Errorf("parsing plan.tracks[%d].items: %w", i, err)
+		}
+		for itemIndex, item := range items {
+			if item.Status == nil || strings.TrimSpace(*item.Status) == "" {
+				return nil, fmt.Errorf("parsing plan: missing or blank plan.tracks[%d].items[%d].status", i, itemIndex)
+			}
+			if item.Priority == nil {
+				return nil, fmt.Errorf("parsing plan: missing plan.tracks[%d].items[%d].priority", i, itemIndex)
+			}
+			if *item.Priority < 0 || *item.Priority > 4 {
+				return nil, fmt.Errorf("parsing plan: plan.tracks[%d].items[%d].priority %d is outside 0..4", i, itemIndex, *item.Priority)
+			}
+		}
+	}
+
 	var resp PlanResponse
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
 		return nil, fmt.Errorf("parsing plan: %w", err)
+	}
+	for trackIndex := range resp.Plan.Tracks {
+		for itemIndex := range resp.Plan.Tracks[trackIndex].Items {
+			item := &resp.Plan.Tracks[trackIndex].Items[itemIndex]
+			item.Status = strings.TrimSpace(item.Status)
+			if item.Status == "" {
+				return nil, fmt.Errorf("parsing plan: missing or blank plan.tracks[%d].items[%d].status", trackIndex, itemIndex)
+			}
+		}
 	}
 
 	return &resp, nil
@@ -795,7 +852,10 @@ func RunBdContext(ctx context.Context, dir string, args ...string) (string, erro
 // claims because JSONL-only fallback cannot provide the SQLite transaction.
 func runBdContext(parent context.Context, dir string, allowNoDB bool, args ...string) (string, error) {
 	if parent == nil {
-		parent = context.Background()
+		return "", errors.New("br command context is required")
+	}
+	if err := parent.Err(); err != nil {
+		return "", err
 	}
 	// Normalize dir to ensure consistent cache keys.
 	normalizedDir, err := normalizeTriageDir(dir)
@@ -869,12 +929,21 @@ func runBdContext(parent context.Context, dir string, allowNoDB bool, args ...st
 	return "", fmt.Errorf("br %s: exceeded retry budget", strings.Join(args, " "))
 }
 
+// beadsRetryWaitTestObserver lets in-package tests synchronize at the exact
+// backoff boundary without exposing a public or process-global hook.
+type beadsRetryWaitTestObserver interface {
+	observeBeadsRetryWaitForTest(time.Duration)
+}
+
 func waitForBeadsRetry(ctx context.Context, delay time.Duration) error {
 	if ctx == nil {
 		return errors.New("beads retry context is required")
 	}
 	if delay <= 0 {
 		return ctx.Err()
+	}
+	if observer, ok := ctx.(beadsRetryWaitTestObserver); ok {
+		observer.observeBeadsRetryWaitForTest(delay)
 	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -896,31 +965,156 @@ var ErrBeadTerminal = errors.New("bead is terminal")
 // observed a work item that was not open and free of automation gates.
 var ErrBeadAssignmentIneligible = errors.New("bead is not eligible for automated assignment")
 
-var operatorGatedLabels = map[string]struct{}{
-	"operator-gated":      {},
-	"operator-action":     {},
-	"needs-operator":      {},
-	"human-gated":         {},
-	"human-input":         {},
-	"business-input":      {},
-	"blocked-on-operator": {},
-	"blocked-on-ivan":     {},
+// defaultOperatorGatedLabels is the built-in vocabulary of labels that mark a
+// bead as requiring a human or operator decision before automated assignment.
+// Projects with their own gating vocabulary extend (never replace) this set via
+// `[assign] operator_gated_labels` in config.toml (#223); the merged set is
+// installed process-wide through ConfigureOperatorGatedLabels.
+var defaultOperatorGatedLabels = []string{
+	"blocked-on-ivan",
+	"operator-gated",
+	"operator-action",
+	"needs-operator",
+	"human-gated",
+	"human-input",
+	"business-input",
+	"blocked-on-operator",
 }
 
-// OperatorGatedLabels returns the canonical normalized labels that require a
-// human or operator decision before automated assignment.
-func OperatorGatedLabels() []string {
-	labels := make([]string, 0, len(operatorGatedLabels))
-	for label := range operatorGatedLabels {
+var (
+	operatorGatedMu     sync.RWMutex
+	operatorGatedLabels = buildOperatorGatedSet(nil)
+	// projectOperatorGatedLabels keeps assignment policy isolated by the
+	// authoritative Beads workspace. Automated assignment commands register
+	// the strictly loaded merged policy before planning or claiming, so two
+	// projects in the same process cannot overwrite one another's gates.
+	projectOperatorGatedLabels sync.Map // map[string]map[string]struct{}
+)
+
+// buildOperatorGatedSet merges the built-in defaults with normalized
+// (lowercased, trimmed) extra labels. Empty entries are dropped.
+func buildOperatorGatedSet(extra []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(defaultOperatorGatedLabels)+len(extra))
+	for _, label := range defaultOperatorGatedLabels {
+		set[label] = struct{}{}
+	}
+	for _, label := range extra {
+		normalized := strings.ToLower(strings.TrimSpace(label))
+		if normalized == "" {
+			continue
+		}
+		set[normalized] = struct{}{}
+	}
+	return set
+}
+
+func canonicalOperatorGatedLabels(extra []string) []string {
+	set := buildOperatorGatedSet(extra)
+	labels := make([]string, 0, len(set))
+	for label := range set {
 		labels = append(labels, label)
 	}
 	sort.Strings(labels)
 	return labels
 }
 
+// ConfigureOperatorGatedLabels installs the process-wide operator-gate
+// vocabulary: the built-in defaults merged with the configured extra labels
+// (`[assign] operator_gated_labels`). Extras extend the defaults — they can
+// never un-gate a built-in label. Matching is case-insensitive.
+func ConfigureOperatorGatedLabels(extra []string) {
+	set := buildOperatorGatedSet(extra)
+	operatorGatedMu.Lock()
+	operatorGatedLabels = set
+	operatorGatedMu.Unlock()
+}
+
+// ConfigureProjectOperatorGatedLabels installs the operator-gate vocabulary
+// for one authoritative project. The stored set is immutable after publication
+// and may be replaced atomically when that same project's configuration is
+// reloaded.
+func ConfigureProjectOperatorGatedLabels(projectDir string, extra []string) error {
+	key, err := operatorGateProjectKey(projectDir)
+	if err != nil {
+		return err
+	}
+	projectOperatorGatedLabels.Store(key, buildOperatorGatedSet(extra))
+	return nil
+}
+
+func operatorGateProjectKey(projectDir string) (string, error) {
+	resolved, err := normalizeTriageDir(strings.TrimSpace(projectDir))
+	if err != nil {
+		return "", fmt.Errorf("resolve operator-gate project directory %q: %w", projectDir, err)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func operatorGatedLabelsForProject(projectDir string) map[string]struct{} {
+	if key, err := operatorGateProjectKey(projectDir); err == nil {
+		if stored, ok := projectOperatorGatedLabels.Load(key); ok {
+			if labels, valid := stored.(map[string]struct{}); valid {
+				return labels
+			}
+		}
+	}
+	operatorGatedMu.RLock()
+	labels := make(map[string]struct{}, len(operatorGatedLabels))
+	for label := range operatorGatedLabels {
+		labels[label] = struct{}{}
+	}
+	operatorGatedMu.RUnlock()
+	return labels
+}
+
+// OperatorGatedLabelsForProject returns the canonical gate vocabulary for one
+// authoritative project. It falls back to the compatibility process policy
+// only when the project has not yet registered a strict policy snapshot.
+func OperatorGatedLabelsForProject(projectDir string) []string {
+	set := operatorGatedLabelsForProject(projectDir)
+	labels := make([]string, 0, len(set))
+	for label := range set {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+// IsOperatorGatedLabelForProject reports whether label blocks automated
+// assignment under the exact authoritative project's configured policy.
+func IsOperatorGatedLabelForProject(projectDir, label string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(label))
+	_, gated := operatorGatedLabelsForProject(projectDir)[normalized]
+	return gated
+}
+
+// IsOperatorGatedLabelInPolicy evaluates a label against the built-in gates
+// plus one immutable configured extras snapshot.
+func IsOperatorGatedLabelInPolicy(label string, extra []string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(label))
+	_, gated := buildOperatorGatedSet(extra)[normalized]
+	return gated
+}
+
+// OperatorGatedLabels returns the canonical normalized labels that require a
+// human or operator decision before automated assignment.
+func OperatorGatedLabels() []string {
+	operatorGatedMu.RLock()
+	labels := make([]string, 0, len(operatorGatedLabels))
+	for label := range operatorGatedLabels {
+		labels = append(labels, label)
+	}
+	operatorGatedMu.RUnlock()
+	sort.Strings(labels)
+	return labels
+}
+
 // IsOperatorGatedLabel reports whether label blocks automated assignment.
 func IsOperatorGatedLabel(label string) bool {
-	_, gated := operatorGatedLabels[strings.ToLower(strings.TrimSpace(label))]
+	normalized := strings.ToLower(strings.TrimSpace(label))
+	operatorGatedMu.RLock()
+	_, gated := operatorGatedLabels[normalized]
+	operatorGatedMu.RUnlock()
 	return gated
 }
 
@@ -991,6 +1185,22 @@ type BeadClaimResult struct {
 // intentionally limited to assignment paths and never delegates to br's
 // generic --claim behavior.
 func ClaimBeadForAssignment(ctx context.Context, dir, beadID, actor string) (BeadClaimResult, error) {
+	if err := requireBeadsMutationContext(ctx); err != nil {
+		return BeadClaimResult{}, err
+	}
+	return ClaimBeadForAssignmentWithOperatorGatedLabels(
+		ctx, dir, beadID, actor, OperatorGatedLabelsForProject(dir),
+	)
+}
+
+// ClaimBeadForAssignmentWithOperatorGatedLabels performs the final guarded
+// claim using an immutable policy snapshot captured by the authoritative
+// command. Passing the vocabulary explicitly prevents a concurrent project
+// from changing the gates between read-only authorization and this CAS.
+func ClaimBeadForAssignmentWithOperatorGatedLabels(ctx context.Context, dir, beadID, actor string, gatedLabels []string) (BeadClaimResult, error) {
+	if err := requireBeadsMutationContext(ctx); err != nil {
+		return BeadClaimResult{}, err
+	}
 	beadID = strings.TrimSpace(beadID)
 	actor = strings.TrimSpace(actor)
 	if beadID == "" {
@@ -1021,7 +1231,7 @@ func ClaimBeadForAssignment(ctx context.Context, dir, beadID, actor string) (Bea
 		return BeadClaimResult{}, err
 	}
 	result, changed, claimErr := claimBeadForAssignmentTransaction(
-		ctx, databasePath, beadID, actor, OperatorGatedLabels(),
+		ctx, databasePath, beadID, actor, canonicalOperatorGatedLabels(gatedLabels),
 	)
 	mu.Unlock()
 	if claimErr != nil {
@@ -1049,6 +1259,9 @@ func ClaimBeadForAssignment(ctx context.Context, dir, beadID, actor string) (Bea
 // Open and in-progress issues become open; closed and tombstoned issues keep
 // their terminal status while only the matching actor is cleared.
 func ReleaseBeadClaim(ctx context.Context, dir, beadID, actor string) (bool, error) {
+	if err := requireBeadsMutationContext(ctx); err != nil {
+		return false, err
+	}
 	beadID = strings.TrimSpace(beadID)
 	actor = strings.TrimSpace(actor)
 	if beadID == "" {
@@ -1102,6 +1315,9 @@ func ReleaseBeadClaim(ctx context.Context, dir, beadID, actor string) (bool, err
 // in the same transaction as the claim. This generic path deliberately
 // disables RunBd's --no-db fallback.
 func ClaimBead(ctx context.Context, dir, beadID, actor string) (BeadClaimResult, error) {
+	if err := requireBeadsMutationContext(ctx); err != nil {
+		return BeadClaimResult{}, err
+	}
 	beadID = strings.TrimSpace(beadID)
 	actor = strings.TrimSpace(actor)
 	if beadID == "" {
@@ -1158,13 +1374,27 @@ type guardedClaimIssue struct {
 // br then exports the dirty row and supplies its version-specific canonical
 // content hash, avoiding a second independent hash implementation in NTM.
 func claimBeadNonTerminal(ctx context.Context, dir, beadID, actor string) (BeadClaimResult, error) {
-	return claimBeadNonTerminalMode(ctx, dir, beadID, actor, time.Time{})
+	return claimBeadNonTerminalMode(ctx, dir, beadID, actor, time.Time{}, OperatorGatedLabelsForProject(dir))
 }
 
 // ClaimStaleBeadForAssignment atomically adopts an unowned in-progress bead.
 // It never reopens terminal work and remains idempotent for the actor that won
 // the first compare-and-set, making it suitable for bulk stale-work recovery.
 func ClaimStaleBeadForAssignment(ctx context.Context, dir, beadID, actor string, expectedUpdatedAt time.Time) (BeadClaimResult, error) {
+	if err := requireBeadsMutationContext(ctx); err != nil {
+		return BeadClaimResult{}, err
+	}
+	return ClaimStaleBeadForAssignmentWithOperatorGatedLabels(
+		ctx, dir, beadID, actor, expectedUpdatedAt, OperatorGatedLabelsForProject(dir),
+	)
+}
+
+// ClaimStaleBeadForAssignmentWithOperatorGatedLabels adopts stale work under
+// the exact immutable project policy captured during assignment admission.
+func ClaimStaleBeadForAssignmentWithOperatorGatedLabels(ctx context.Context, dir, beadID, actor string, expectedUpdatedAt time.Time, gatedLabels []string) (BeadClaimResult, error) {
+	if err := requireBeadsMutationContext(ctx); err != nil {
+		return BeadClaimResult{}, err
+	}
 	beadID = strings.TrimSpace(beadID)
 	actor = strings.TrimSpace(actor)
 	if beadID == "" {
@@ -1176,10 +1406,17 @@ func ClaimStaleBeadForAssignment(ctx context.Context, dir, beadID, actor string,
 	if expectedUpdatedAt.IsZero() {
 		return BeadClaimResult{}, errors.New("expected stale update time is required")
 	}
-	return claimBeadNonTerminalMode(ctx, dir, beadID, actor, expectedUpdatedAt)
+	return claimBeadNonTerminalMode(ctx, dir, beadID, actor, expectedUpdatedAt, gatedLabels)
 }
 
-func claimBeadNonTerminalMode(ctx context.Context, dir, beadID, actor string, expectedStaleUpdatedAt time.Time) (BeadClaimResult, error) {
+func requireBeadsMutationContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("beads mutation context is required")
+	}
+	return ctx.Err()
+}
+
+func claimBeadNonTerminalMode(ctx context.Context, dir, beadID, actor string, expectedStaleUpdatedAt time.Time, gatedLabels []string) (BeadClaimResult, error) {
 	normalizedDir, err := normalizeTriageDir(dir)
 	if err != nil {
 		return BeadClaimResult{}, err
@@ -1201,7 +1438,7 @@ func claimBeadNonTerminalMode(ctx context.Context, dir, beadID, actor string, ex
 	if err := mu.LockContext(ctx); err != nil {
 		return BeadClaimResult{}, err
 	}
-	result, changed, claimErr := claimBeadNonTerminalTransaction(ctx, databasePath, beadID, actor, expectedStaleUpdatedAt)
+	result, changed, claimErr := claimBeadNonTerminalTransaction(ctx, databasePath, beadID, actor, expectedStaleUpdatedAt, canonicalOperatorGatedLabels(gatedLabels))
 	mu.Unlock()
 	if claimErr != nil {
 		return BeadClaimResult{}, claimErr
@@ -1252,17 +1489,10 @@ func claimBeadForAssignmentTransaction(ctx context.Context, databasePath, beadID
 	}
 	status := strings.ToLower(strings.TrimSpace(issue.Status))
 	currentAssignee := strings.TrimSpace(issue.Assignee.String)
-	if status == "in_progress" && currentAssignee == actor {
-		if err := tx.Commit(); err != nil {
-			return BeadClaimResult{}, false, fmt.Errorf("commit idempotent assignment Beads claim: %w", err)
-		}
-		committed = true
-		return BeadClaimResult{ID: beadID, Title: issue.Title, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, !issue.ContentHash.Valid, nil
-	}
 	if issue.Assignee.Valid && currentAssignee != "" && currentAssignee != actor {
 		return BeadClaimResult{}, false, fmt.Errorf("%w: issue %s already assigned to %s", ErrBeadAlreadyClaimed, beadID, currentAssignee)
 	}
-	if status == "in_progress" {
+	if status == "in_progress" && currentAssignee != actor {
 		return BeadClaimResult{}, false, fmt.Errorf("%w: issue %s is already in progress", ErrBeadAlreadyClaimed, beadID)
 	}
 
@@ -1275,13 +1505,21 @@ func claimBeadForAssignmentTransaction(ctx context.Context, databasePath, beadID
 		return BeadClaimResult{}, false, err
 	}
 	wisp := strings.Contains(strings.ToLower(beadID), "-wisp-")
-	if status != "open" || len(blockers) > 0 || len(operatorLabels) > 0 || issue.Deferred || issue.Pinned || issue.Ephemeral || issue.Template || wisp {
+	sameActorInProgress := status == "in_progress" && currentAssignee == actor
+	if (!sameActorInProgress && status != "open") || len(blockers) > 0 || len(operatorLabels) > 0 || issue.Deferred || issue.Pinned || issue.Ephemeral || issue.Template || wisp {
 		return BeadClaimResult{}, false, &AssignmentEligibilityError{
 			BeadID: beadID, Status: issue.Status,
 			UnresolvedBlockers: blockers, OperatorLabels: operatorLabels,
 			Deferred: issue.Deferred, Pinned: issue.Pinned, Ephemeral: issue.Ephemeral,
 			Template: issue.Template, Wisp: wisp,
 		}
+	}
+	if sameActorInProgress {
+		if err := tx.Commit(); err != nil {
+			return BeadClaimResult{}, false, fmt.Errorf("commit idempotent assignment Beads claim: %w", err)
+		}
+		committed = true
+		return BeadClaimResult{ID: beadID, Title: issue.Title, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, !issue.ContentHash.Valid, nil
 	}
 
 	claimedAt := time.Now().UTC()
@@ -1407,7 +1645,7 @@ func loadAssignmentOperatorLabels(ctx context.Context, tx *sql.Tx, beadID string
 	return labels, nil
 }
 
-func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, actor string, expectedStaleUpdatedAt time.Time) (BeadClaimResult, bool, error) {
+func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, actor string, expectedStaleUpdatedAt time.Time, gatedLabels []string) (BeadClaimResult, bool, error) {
 	dsn := sqliteutil.ImmediateTransactionFileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)")
 	database, err := sql.Open(sqliteutil.DriverName, dsn)
 	if err != nil {
@@ -1446,6 +1684,23 @@ func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, 
 	if issue.Assignee.Valid && currentAssignee != "" && currentAssignee != actor {
 		return BeadClaimResult{}, false, fmt.Errorf("%w: issue %s already assigned to %s", ErrBeadAlreadyClaimed, beadID, currentAssignee)
 	}
+	blockers, err := loadUnresolvedAssignmentBlockers(ctx, tx, beadID)
+	if err != nil {
+		return BeadClaimResult{}, false, err
+	}
+	operatorLabels, err := loadAssignmentOperatorLabels(ctx, tx, beadID, gatedLabels)
+	if err != nil {
+		return BeadClaimResult{}, false, err
+	}
+	wisp := strings.Contains(strings.ToLower(beadID), "-wisp-")
+	if len(blockers) > 0 || len(operatorLabels) > 0 || issue.Deferred || issue.Pinned || issue.Ephemeral || issue.Template || wisp {
+		return BeadClaimResult{}, false, &AssignmentEligibilityError{
+			BeadID: beadID, Status: issue.Status,
+			UnresolvedBlockers: blockers, OperatorLabels: operatorLabels,
+			Deferred: issue.Deferred, Pinned: issue.Pinned, Ephemeral: issue.Ephemeral,
+			Template: issue.Template, Wisp: wisp,
+		}
+	}
 	if status == "in_progress" && currentAssignee == actor {
 		if err := tx.Commit(); err != nil {
 			return BeadClaimResult{}, false, fmt.Errorf("commit idempotent guarded Beads claim: %w", err)
@@ -1463,23 +1718,6 @@ func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, 
 		}
 		if observedUpdatedAt.After(time.Now().UTC().Add(-24 * time.Hour)) {
 			return BeadClaimResult{}, false, fmt.Errorf("%w: bead %s is not stale enough to adopt", ErrBeadAssignmentIneligible, beadID)
-		}
-		blockers, err := loadUnresolvedAssignmentBlockers(ctx, tx, beadID)
-		if err != nil {
-			return BeadClaimResult{}, false, err
-		}
-		operatorLabels, err := loadAssignmentOperatorLabels(ctx, tx, beadID, OperatorGatedLabels())
-		if err != nil {
-			return BeadClaimResult{}, false, err
-		}
-		wisp := strings.Contains(strings.ToLower(beadID), "-wisp-")
-		if len(blockers) > 0 || len(operatorLabels) > 0 || issue.Deferred || issue.Pinned || issue.Ephemeral || issue.Template || wisp {
-			return BeadClaimResult{}, false, &AssignmentEligibilityError{
-				BeadID: beadID, Status: issue.Status,
-				UnresolvedBlockers: blockers, OperatorLabels: operatorLabels,
-				Deferred: issue.Deferred, Pinned: issue.Pinned, Ephemeral: issue.Ephemeral,
-				Template: issue.Template, Wisp: wisp,
-			}
 		}
 	}
 
@@ -1914,6 +2152,122 @@ type BeadAssignmentDetails struct {
 	Labels               []string
 	BlockedBy            []string
 	BlockingDependencies []BeadDependencyState
+}
+
+// BeadAssignmentAuthorization defines the tracker ownership states an atomic
+// assignment generation may accept. Automation gates are never relaxed by
+// these state allowances.
+type BeadAssignmentAuthorization struct {
+	BeadID                    string
+	ExpectedAssignee          string
+	AllowUnassignedOpen       bool
+	AllowOwnedOpen            bool
+	AllowUnassignedInProgress bool
+	AllowOwnedInProgress      bool
+}
+
+// ValidateBeadAssignmentAuthorization checks an exact live br show result at
+// the final read-only boundary before an assignment mutates leases or durable
+// intent. The later ClaimBeadForAssignment transaction remains the race-safe
+// compare-and-set.
+func ValidateBeadAssignmentAuthorization(details *BeadAssignmentDetails, authorization BeadAssignmentAuthorization) error {
+	return validateBeadAssignmentAuthorization(details, authorization, IsOperatorGatedLabel)
+}
+
+// ValidateBeadAssignmentAuthorizationForProject validates against the policy
+// registered for one authoritative Beads workspace.
+func ValidateBeadAssignmentAuthorizationForProject(projectDir string, details *BeadAssignmentDetails, authorization BeadAssignmentAuthorization) error {
+	return validateBeadAssignmentAuthorization(details, authorization, func(label string) bool {
+		return IsOperatorGatedLabelForProject(projectDir, label)
+	})
+}
+
+// ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels validates against
+// the immutable vocabulary captured by the caller at strict policy admission.
+// The same slice can then be passed to the guarded claim, keeping both sides of
+// the atomic boundary on an identical policy snapshot.
+func ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels(details *BeadAssignmentDetails, authorization BeadAssignmentAuthorization, gatedLabels []string) error {
+	set := buildOperatorGatedSet(gatedLabels)
+	return validateBeadAssignmentAuthorization(details, authorization, func(label string) bool {
+		_, gated := set[strings.ToLower(strings.TrimSpace(label))]
+		return gated
+	})
+}
+
+func validateBeadAssignmentAuthorization(details *BeadAssignmentDetails, authorization BeadAssignmentAuthorization, operatorGated func(string) bool) error {
+	beadID := strings.TrimSpace(authorization.BeadID)
+	if beadID == "" {
+		return fmt.Errorf("%w: requested bead ID is empty", ErrBeadAssignmentIneligible)
+	}
+	if details == nil {
+		return fmt.Errorf("%w: live details for %s are missing", ErrBeadAssignmentIneligible, beadID)
+	}
+	liveID := strings.TrimSpace(details.ID)
+	if liveID != beadID {
+		return fmt.Errorf("%w: live details returned bead %q, want %q", ErrBeadAssignmentIneligible, liveID, beadID)
+	}
+
+	blockerSet := make(map[string]struct{}, len(details.BlockedBy)+len(details.BlockingDependencies))
+	for _, blockerID := range details.BlockedBy {
+		if blockerID = strings.TrimSpace(blockerID); blockerID != "" {
+			blockerSet[blockerID] = struct{}{}
+		}
+	}
+	for _, dependency := range details.BlockingDependencies {
+		status := strings.ToLower(strings.TrimSpace(dependency.Status))
+		if status == "closed" || status == "tombstone" {
+			continue
+		}
+		if blockerID := strings.TrimSpace(dependency.ID); blockerID != "" {
+			blockerSet[blockerID] = struct{}{}
+		}
+	}
+	blockers := make([]string, 0, len(blockerSet))
+	for blockerID := range blockerSet {
+		blockers = append(blockers, blockerID)
+	}
+	sort.Strings(blockers)
+
+	operatorLabels := make([]string, 0, len(details.Labels))
+	for _, label := range details.Labels {
+		if operatorGated(label) {
+			operatorLabels = append(operatorLabels, strings.TrimSpace(label))
+		}
+	}
+	sort.Strings(operatorLabels)
+	deferred := details.DeferUntil != nil && details.DeferUntil.After(time.Now().UTC())
+	wisp := details.Wisp || strings.Contains(strings.ToLower(liveID), "-wisp-")
+	if len(blockers) > 0 || len(operatorLabels) > 0 || deferred || details.Pinned || details.Ephemeral || details.Template || wisp {
+		return &AssignmentEligibilityError{
+			BeadID: liveID, Status: details.Status,
+			UnresolvedBlockers: blockers, OperatorLabels: operatorLabels,
+			Deferred: deferred, Pinned: details.Pinned, Ephemeral: details.Ephemeral,
+			Template: details.Template, Wisp: wisp,
+		}
+	}
+
+	status := strings.ToLower(strings.TrimSpace(details.Status))
+	status = strings.ReplaceAll(status, "-", "_")
+	status = strings.ReplaceAll(status, " ", "_")
+	assignee := strings.TrimSpace(details.Assignee)
+	expectedAssignee := strings.TrimSpace(authorization.ExpectedAssignee)
+	switch status {
+	case "open":
+		if assignee == "" && authorization.AllowUnassignedOpen {
+			return nil
+		}
+		if expectedAssignee != "" && assignee == expectedAssignee && authorization.AllowOwnedOpen {
+			return nil
+		}
+	case "in_progress":
+		if assignee == "" && authorization.AllowUnassignedInProgress {
+			return nil
+		}
+		if expectedAssignee != "" && assignee == expectedAssignee && authorization.AllowOwnedInProgress {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: bead %s live status %q and assignee %q do not match the authorized generation state for %q", ErrBeadAssignmentIneligible, liveID, details.Status, details.Assignee, expectedAssignee)
 }
 
 type beadShowDependency struct {

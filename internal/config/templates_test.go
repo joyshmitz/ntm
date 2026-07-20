@@ -325,7 +325,7 @@ func TestDefaultAgentTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Grok override template failed: %v", err)
 	}
-	if grokOverride != "grok --always-approve --model 'account/model' --reasoning-effort 'high'" {
+	if grokOverride != "grok --always-approve --model 'account/model' --effort 'high'" {
 		t.Fatalf("Grok override render = %q", grokOverride)
 	}
 

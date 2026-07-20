@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,6 +305,115 @@ func TestOperatorGatedLabelsCanonicalVocabulary(t *testing.T) {
 	}
 }
 
+func TestProjectOperatorGatedLabelsRemainIsolatedUnderConcurrentAccess(t *testing.T) {
+	projects := []struct {
+		dir   string
+		gate  string
+		other string
+	}{
+		{dir: t.TempDir(), gate: "project-alpha-approval", other: "project-beta-approval"},
+		{dir: t.TempDir(), gate: "project-beta-approval", other: "project-alpha-approval"},
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(projects))
+	for _, project := range projects {
+		project := project
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := ConfigureProjectOperatorGatedLabels(project.dir, []string{project.gate}); err != nil {
+				errs <- err
+				return
+			}
+			for i := 0; i < 1000; i++ {
+				if !IsOperatorGatedLabelForProject(project.dir, project.gate) {
+					errs <- fmt.Errorf("project %s lost its configured gate %s", project.dir, project.gate)
+					return
+				}
+				if IsOperatorGatedLabelForProject(project.dir, project.other) {
+					errs <- fmt.Errorf("project %s inherited unrelated gate %s", project.dir, project.other)
+					return
+				}
+				if !IsOperatorGatedLabelForProject(project.dir, "operator-gated") {
+					errs <- fmt.Errorf("project %s lost the built-in gate vocabulary", project.dir)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestProjectOperatorGatedLabelsUseAuthoritativeRootAliases(t *testing.T) {
+	originalGlobal := OperatorGatedLabels()
+	ConfigureOperatorGatedLabels([]string{"global-only-gate"})
+	t.Cleanup(func() { ConfigureOperatorGatedLabels(originalGlobal) })
+
+	projectDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	nestedDir := filepath.Join(projectDir, "internal", "nested")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("mkdir nested project directory: %v", err)
+	}
+	if err := ConfigureProjectOperatorGatedLabels(projectDir, []string{"project-only-gate"}); err != nil {
+		t.Fatalf("configure project gate: %v", err)
+	}
+
+	for _, alias := range []string{projectDir, nestedDir} {
+		if !IsOperatorGatedLabelForProject(alias, "project-only-gate") {
+			t.Fatalf("project gate missing through alias %q", alias)
+		}
+		if IsOperatorGatedLabelForProject(alias, "global-only-gate") {
+			t.Fatalf("alias %q fell back to conflicting process-global policy", alias)
+		}
+	}
+
+	t.Chdir(nestedDir)
+	if !IsOperatorGatedLabelForProject("", "project-only-gate") {
+		t.Fatal("project gate missing through empty cwd alias")
+	}
+	if IsOperatorGatedLabelForProject("", "global-only-gate") {
+		t.Fatal("empty cwd alias fell back to conflicting process-global policy")
+	}
+}
+
+func TestValidateBeadAssignmentAuthorizationAllowsExplicitStaleOwnershipState(t *testing.T) {
+	details := &BeadAssignmentDetails{ID: "ntm-stale", Status: "in_progress"}
+	authorization := BeadAssignmentAuthorization{
+		BeadID: "ntm-stale", AllowUnassignedInProgress: true,
+	}
+	if err := ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels(details, authorization, []string{"project-approval"}); err != nil {
+		t.Fatalf("authorize unassigned in_progress stale work: %v", err)
+	}
+
+	withoutAllowance := authorization
+	withoutAllowance.AllowUnassignedInProgress = false
+	if err := ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels(details, withoutAllowance, nil); !errors.Is(err, ErrBeadAssignmentIneligible) {
+		t.Fatalf("unapproved unassigned in_progress error=%v, want ineligible", err)
+	}
+
+	owned := *details
+	owned.Assignee = "OtherActor"
+	if err := ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels(&owned, authorization, nil); !errors.Is(err, ErrBeadAssignmentIneligible) {
+		t.Fatalf("owned stale work error=%v, want ineligible", err)
+	}
+
+	gated := *details
+	gated.Labels = []string{"project-approval"}
+	if err := ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels(&gated, authorization, []string{"project-approval"}); !errors.Is(err, ErrBeadAssignmentIneligible) {
+		t.Fatalf("gated stale work error=%v, want ineligible", err)
+	}
+}
+
 func TestClaimBeadForAssignmentTransactionRejectsDirectStartBlockers(t *testing.T) {
 	requireRealBR(t)
 
@@ -411,7 +521,7 @@ func TestClaimBeadForAssignmentStatusConflictAndIdempotency(t *testing.T) {
 		}
 	})
 
-	t.Run("same owner retry is idempotent", func(t *testing.T) {
+	t.Run("same owner retry is idempotent while gates remain clear", func(t *testing.T) {
 		dir := t.TempDir()
 		runRealBR(t, dir, "init", "--quiet")
 		beadID := createRealBRBead(t, dir, "idempotent assignment claim")
@@ -419,11 +529,45 @@ func TestClaimBeadForAssignmentStatusConflictAndIdempotency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("first claim: %v", err)
 		}
-		runRealBR(t, dir, "update", beadID, "--add-label", "operator-gated", "--json")
 		second, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "StableActor")
 		if err != nil || second.ID != first.ID || second.Actor != first.Actor || second.Status != "in_progress" {
 			t.Fatalf("idempotent claim=%+v first=%+v error=%v", second, first, err)
 		}
+	})
+
+	t.Run("same owner retry rechecks operator gates", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		beadID := createRealBRBead(t, dir, "gated assignment recovery")
+		if _, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "StableActor"); err != nil {
+			t.Fatalf("first claim: %v", err)
+		}
+		runRealBR(t, dir, "update", beadID, "--add-label", "operator-gated", "--json")
+		_, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "StableActor")
+		var eligibilityErr *AssignmentEligibilityError
+		if !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &eligibilityErr) ||
+			!reflect.DeepEqual(eligibilityErr.OperatorLabels, []string{"operator-gated"}) {
+			t.Fatalf("same-owner gated claim error=%v eligibility=%+v", err, eligibilityErr)
+		}
+		assertRealBRStatusAndAssignee(t, dir, beadID, "in_progress", "StableActor")
+	})
+
+	t.Run("same owner retry rechecks blockers", func(t *testing.T) {
+		dir := t.TempDir()
+		runRealBR(t, dir, "init", "--quiet")
+		beadID := createRealBRBead(t, dir, "blocked assignment recovery")
+		blockerID := createRealBRBead(t, dir, "new blocker")
+		if _, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "StableActor"); err != nil {
+			t.Fatalf("first claim: %v", err)
+		}
+		runRealBR(t, dir, "dep", "add", beadID, blockerID, "--type", "blocks", "--json")
+		_, err := ClaimBeadForAssignment(t.Context(), dir, beadID, "StableActor")
+		var eligibilityErr *AssignmentEligibilityError
+		if !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &eligibilityErr) ||
+			!reflect.DeepEqual(eligibilityErr.UnresolvedBlockers, []string{blockerID}) {
+			t.Fatalf("same-owner blocked claim error=%v eligibility=%+v", err, eligibilityErr)
+		}
+		assertRealBRStatusAndAssignee(t, dir, beadID, "in_progress", "StableActor")
 	})
 }
 
@@ -590,7 +734,7 @@ func TestClaimBeadForAssignmentTransactionRejectsNonReadyOpenWork(t *testing.T) 
 				t.Fatalf("prepare stale readiness gate: %v", err)
 			}
 			_ = database.Close()
-			result, changed, err = claimBeadNonTerminalTransaction(t.Context(), databasePath, beadID, "StaleActor", staleUpdatedAt)
+			result, changed, err = claimBeadNonTerminalTransaction(t.Context(), databasePath, beadID, "StaleActor", staleUpdatedAt, OperatorGatedLabels())
 			var staleEligibilityErr *AssignmentEligibilityError
 			if !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &staleEligibilityErr) || !test.wantReason(staleEligibilityErr) {
 				t.Fatalf("stale claim result=%+v changed=%v error=%v eligibility=%+v", result, changed, err, staleEligibilityErr)
@@ -636,7 +780,7 @@ func TestClaimBeadForAssignmentTransactionRejectsNonReadyOpenWork(t *testing.T) 
 			t.Fatalf("prepare stale wisp: %v", err)
 		}
 		_ = database.Close()
-		_, changed, err = claimBeadNonTerminalTransaction(t.Context(), databasePath, beadID, "StaleActor", staleUpdatedAt)
+		_, changed, err = claimBeadNonTerminalTransaction(t.Context(), databasePath, beadID, "StaleActor", staleUpdatedAt, OperatorGatedLabels())
 		var staleEligibilityErr *AssignmentEligibilityError
 		if changed || !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &staleEligibilityErr) || !staleEligibilityErr.Wisp {
 			t.Fatalf("stale wisp changed=%v error=%v eligibility=%+v", changed, err, staleEligibilityErr)

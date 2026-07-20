@@ -37,6 +37,20 @@ func TestInitProjectConfigAt_Basic(t *testing.T) {
 		t.Error("expected at least one created file")
 	}
 
+	configData, err := os.ReadFile(filepath.Join(expectedNTMDir, "config.toml"))
+	if err != nil {
+		t.Fatalf("read generated project config: %v", err)
+	}
+	for _, want := range []string{
+		"[assign]",
+		`# operator_gated_labels = ["security-review", "legal-approval"]`,
+		"project config cannot remove a gate",
+	} {
+		if !strings.Contains(string(configData), want) {
+			t.Errorf("generated project config omitted %q:\n%s", want, configData)
+		}
+	}
+
 	t.Logf("TEST: InitProjectConfigAt_Basic | Input: %s | CreatedDirs: %d | CreatedFiles: %d",
 		tmpDir, len(result.CreatedDirs), len(result.CreatedFiles))
 }
@@ -320,6 +334,119 @@ legacy = true
 	if !strings.Contains(err.Error(), "legacy") {
 		t.Fatalf("LoadProjectConfig() error = %v, want legacy field name", err)
 	}
+}
+
+func TestLoadProjectConfig_AssignOperatorGatedLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{
+			name: "labels",
+			content: `[assign]
+operator_gated_labels = ["release-approval", "customer-signoff"]
+`,
+			want: []string{"release-approval", "customer-signoff"},
+		},
+		{
+			name: "empty labels",
+			content: `[assign]
+operator_gated_labels = []
+`,
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			configPath := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(configPath, []byte(tt.content), 0644); err != nil {
+				t.Fatalf("write project config: %v", err)
+			}
+
+			cfg, err := LoadProjectConfig(configPath)
+			if err != nil {
+				t.Fatalf("LoadProjectConfig() error = %v", err)
+			}
+			if len(cfg.Assign.OperatorGatedLabels) != len(tt.want) {
+				t.Fatalf("operator_gated_labels = %#v, want %#v", cfg.Assign.OperatorGatedLabels, tt.want)
+			}
+			for i := range tt.want {
+				if cfg.Assign.OperatorGatedLabels[i] != tt.want[i] {
+					t.Fatalf("operator_gated_labels[%d] = %q, want %q", i, cfg.Assign.OperatorGatedLabels[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestLoadProjectConfig_AssignUnknownField(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	content := []byte(`[assign]
+operator_gated_labels = ["release-approval"]
+strategy = "speed"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	_, err := LoadProjectConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for unknown project assign field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("LoadProjectConfig() error = %v, want unknown field", err)
+	}
+	if !strings.Contains(err.Error(), "assign.strategy") {
+		t.Fatalf("LoadProjectConfig() error = %v, want assign.strategy", err)
+	}
+}
+
+func TestFindProjectConfigRejectsInvalidExistingEntries(t *testing.T) {
+	t.Run("config path is a directory", func(t *testing.T) {
+		projectDir := t.TempDir()
+		configPath := filepath.Join(projectDir, ".ntm", "config.toml")
+		if err := os.MkdirAll(configPath, 0o700); err != nil {
+			t.Fatalf("create config directory: %v", err)
+		}
+
+		foundDir, cfg, err := FindProjectConfig(projectDir)
+		if err == nil || cfg != nil {
+			t.Fatalf("FindProjectConfig() = dir:%q cfg:%+v err:%v, want rejection", foundDir, cfg, err)
+		}
+		if foundDir != projectDir || !strings.Contains(err.Error(), configPath) ||
+			!strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("FindProjectConfig() = dir:%q err:%q, want path-specific non-regular error", foundDir, err)
+		}
+	})
+
+	t.Run("config path is a dangling symlink", func(t *testing.T) {
+		projectDir := t.TempDir()
+		ntmDir := filepath.Join(projectDir, ".ntm")
+		if err := os.MkdirAll(ntmDir, 0o700); err != nil {
+			t.Fatalf("create .ntm directory: %v", err)
+		}
+		configPath := filepath.Join(ntmDir, "config.toml")
+		if err := os.Symlink("missing-config.toml", configPath); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+
+		foundDir, cfg, err := FindProjectConfig(projectDir)
+		if err == nil || cfg != nil {
+			t.Fatalf("FindProjectConfig() = dir:%q cfg:%+v err:%v, want rejection", foundDir, cfg, err)
+		}
+		if foundDir != projectDir || !strings.Contains(err.Error(), configPath) ||
+			!strings.Contains(err.Error(), "resolving project config") {
+			t.Fatalf("FindProjectConfig() = dir:%q err:%q, want path-specific symlink error", foundDir, err)
+		}
+	})
 }
 
 // TestLoadProjectConfig_NotFound verifies error for missing file

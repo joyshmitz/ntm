@@ -114,7 +114,7 @@ type AssignmentResult struct {
 	IdempotencyKey string          `json:"idempotency_key,omitempty"`
 }
 
-// AssignWork assigns work to idle agents based on bv triage.
+// AssignWork assigns verified actionable work to idle agents.
 func (c *SessionCoordinator) AssignWork(ctx context.Context) ([]AssignmentResult, error) {
 	if !c.config.AutoAssign {
 		return nil, nil
@@ -123,31 +123,33 @@ func (c *SessionCoordinator) AssignWork(ctx context.Context) ([]AssignmentResult
 	if err != nil {
 		return nil, fmt.Errorf("loading assignment ledger: %w", err)
 	}
-	// Reconcile before candidate and triage gates. A fully occupied session has
-	// no eligible target until terminal work is retired, and an empty triage
-	// response must not leave closed assignments permanently occupying panes.
+	// Reconcile before candidate and planning gates. A fully occupied session has
+	// no eligible target until terminal work is retired, and an empty actionable
+	// set must not leave closed assignments permanently occupying panes.
 	if err := c.reconcileTerminalAssignments(ctx, store); err != nil {
 		return nil, fmt.Errorf("reconciling assignment ledger: %w", err)
 	}
 
 	// Get assignment candidates according to the configured queueing policy.
 	assignmentCandidates := c.getAssignmentCandidates()
-	results := c.recoverPendingAssignments(ctx, store, assignmentCandidates)
 	if len(assignmentCandidates) == 0 {
-		return results, nil
+		return c.recoverPendingAssignments(ctx, store, assignmentCandidates), nil
 	}
 
-	// Get triage recommendations
-	getTriage := bv.GetTriageContext
-	if c.triageFn != nil {
-		getTriage = c.triageFn
+	// Automated assignment requires verified plan membership and live labels.
+	// This gate must precede pending recovery because recovery can reserve and
+	// dispatch work just like a new assignment.
+	getActionableRecommendations := bv.GetActionableRecommendationsContext
+	if c.actionableRecommendationsFn != nil {
+		getActionableRecommendations = c.actionableRecommendationsFn
 	}
-	triage, err := getTriage(ctx, c.projectKey)
+	recommendations, err := getActionableRecommendations(ctx, c.projectKey, 0)
 	if err != nil {
-		return results, fmt.Errorf("getting triage: %w", err)
+		return nil, fmt.Errorf("getting verified actionable recommendations: %w", err)
 	}
 
-	if triage == nil || len(triage.Triage.Recommendations) == 0 {
+	results := c.recoverPendingAssignments(ctx, store, assignmentCandidates)
+	if len(recommendations) == 0 {
 		return results, nil
 	}
 	activeBeads := make(map[string]struct{})
@@ -162,7 +164,7 @@ func (c *SessionCoordinator) AssignWork(ctx context.Context) ([]AssignmentResult
 	if len(assignmentCandidates) == 0 {
 		return results, nil
 	}
-	filtered, terminalRecommendation, err := c.filterActionableRecommendations(ctx, triage.Triage.Recommendations, activeBeads)
+	filtered, terminalRecommendation, err := c.filterActionableRecommendations(ctx, recommendations, activeBeads)
 	if terminalRecommendation {
 		// BV can lag a tracker transition or a terminal cleanup can race the
 		// source update. Do not retain a closed recommendation for the full
@@ -172,7 +174,7 @@ func (c *SessionCoordinator) AssignWork(ctx context.Context) ([]AssignmentResult
 	if err != nil {
 		return results, err
 	}
-	recommendations := filtered
+	recommendations = filtered
 	if len(recommendations) == 0 {
 		return results, nil
 	}
@@ -274,7 +276,7 @@ func (c *SessionCoordinator) filterActionableRecommendations(ctx context.Context
 		}
 		switch strings.ToLower(strings.TrimSpace(trackerStatus)) {
 		case "open":
-			if recommendationPassesSemanticGates(live) {
+			if recommendationPassesSemanticGatesWithOperatorLabels(live, c.operatorGatedLabels) {
 				filtered = append(filtered, live)
 			}
 		case "closed", "tombstone":
@@ -285,6 +287,10 @@ func (c *SessionCoordinator) filterActionableRecommendations(ctx context.Context
 }
 
 func recommendationPassesSemanticGates(recommendation bv.TriageRecommendation) bool {
+	return recommendationPassesSemanticGatesWithOperatorLabels(recommendation, bv.OperatorGatedLabels())
+}
+
+func recommendationPassesSemanticGatesWithOperatorLabels(recommendation bv.TriageRecommendation, gatedLabels []string) bool {
 	status := strings.ToLower(strings.TrimSpace(recommendation.Status))
 	if status != "open" && status != "ready" {
 		return false
@@ -293,8 +299,11 @@ func recommendationPassesSemanticGates(recommendation bv.TriageRecommendation) b
 		return false
 	}
 	for _, rawLabel := range recommendation.Labels {
-		if bv.IsOperatorGatedLabel(rawLabel) {
-			return false
+		normalized := strings.ToLower(strings.TrimSpace(rawLabel))
+		for _, gatedLabel := range gatedLabels {
+			if normalized == strings.ToLower(strings.TrimSpace(gatedLabel)) {
+				return false
+			}
 		}
 	}
 	return true
@@ -1010,8 +1019,13 @@ func validateCoordinatorReservationPaths(paths []string) ([]string, error) {
 }
 
 func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+	operatorGatedLabels := append([]string(nil), c.operatorGatedLabels...)
+	claimBeadForAssignment := bv.ClaimBeadForAssignmentWithOperatorGatedLabels
+	if c.claimBeadForAssignmentFn != nil {
+		claimBeadForAssignment = c.claimBeadForAssignmentFn
+	}
 	claimPort := assignmentstore.ClaimFunc(func(ctx context.Context, beadID, actor string) (assignmentstore.ClaimReceipt, error) {
-		claim, err := bv.ClaimBeadForAssignment(ctx, c.projectKey, beadID, actor)
+		claim, err := claimBeadForAssignment(ctx, c.projectKey, beadID, actor, operatorGatedLabels)
 		if err != nil {
 			switch {
 			case errors.Is(err, bv.ErrBeadAssignmentIneligible):
@@ -1096,21 +1110,45 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 			DurableTitle:   durableTitle,
 		}, nil
 	})
-	replacementAuthorization := assignmentstore.WorkingReplacementAuthorizationFunc(func(ctx context.Context, beadID string) (assignmentstore.WorkingReplacementAuthorization, error) {
+	readLiveDetails := func(detailsCtx context.Context, beadID string) (*bv.BeadAssignmentDetails, error) {
 		var (
 			details *bv.BeadAssignmentDetails
 			err     error
 		)
 		if c.workItemDetailsFn != nil {
-			details, err = c.workItemDetailsFn(ctx, beadID)
+			details, err = c.workItemDetailsFn(detailsCtx, beadID)
 		} else {
-			details, err = bv.GetBeadAssignmentDetailsContext(ctx, c.projectKey, beadID)
+			details, err = bv.GetBeadAssignmentDetailsContext(detailsCtx, c.projectKey, beadID)
 		}
+		if err != nil {
+			return nil, err
+		}
+		if details == nil {
+			return nil, errors.New("live work-item details are missing")
+		}
+		return details, nil
+	}
+	authorizeLiveDetails := func(details *bv.BeadAssignmentDetails, request assignmentstore.AssignmentEligibilityAuthorizationRequest) error {
+		err := bv.ValidateBeadAssignmentAuthorizationWithOperatorGatedLabels(details, bv.BeadAssignmentAuthorization{
+			BeadID: request.BeadID, ExpectedAssignee: request.ClaimActor,
+			AllowUnassignedOpen:  request.AllowUnassignedOpen,
+			AllowOwnedOpen:       request.AllowOwnedOpen,
+			AllowOwnedInProgress: request.AllowOwnedInProgress,
+		}, operatorGatedLabels)
+		if errors.Is(err, bv.ErrBeadAssignmentIneligible) {
+			return fmt.Errorf("%w: %v", assignmentstore.ErrClaimIneligible, err)
+		}
+		return err
+	}
+	replacementAuthorization := assignmentstore.WorkingReplacementAuthorizationFunc(func(ctx context.Context, beadID string) (assignmentstore.WorkingReplacementAuthorization, error) {
+		details, err := readLiveDetails(ctx, beadID)
 		if err != nil {
 			return assignmentstore.WorkingReplacementAuthorization{}, err
 		}
-		if details == nil {
-			return assignmentstore.WorkingReplacementAuthorization{}, errors.New("live work-item details are missing")
+		if err := authorizeLiveDetails(details, assignmentstore.AssignmentEligibilityAuthorizationRequest{
+			BeadID: beadID, ClaimActor: details.Assignee, AllowOwnedInProgress: true,
+		}); err != nil {
+			return assignmentstore.WorkingReplacementAuthorization{}, err
 		}
 		return assignmentstore.WorkingReplacementAuthorization{
 			Status: details.Status, Assignee: details.Assignee,
@@ -1120,6 +1158,15 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 		WithWorkItemStatusPort(assignmentstore.WorkItemStatusFunc(func(statusCtx context.Context, beadID string) (string, error) {
 			return bv.GetBeadStatusContext(statusCtx, c.projectKey, beadID)
 		})).
+		WithAssignmentEligibilityAuthorizationPort(assignmentstore.AssignmentEligibilityAuthorizationFunc(
+			func(detailsCtx context.Context, request assignmentstore.AssignmentEligibilityAuthorizationRequest) error {
+				details, err := readLiveDetails(detailsCtx, request.BeadID)
+				if err != nil {
+					return err
+				}
+				return authorizeLiveDetails(details, request)
+			},
+		)).
 		WithWorkingReplacementAuthorizationPort(replacementAuthorization)
 }
 

@@ -263,7 +263,7 @@ func DefaultAgentTemplates() AgentConfig {
 		// for an explicit/configured override, avoiding stale built-in model IDs.
 		// --always-approve is the official autonomous approval flag exposed by
 		// the current Grok Build CLI.
-		Grok:     `grok --always-approve{{if .Model}} --model {{shellQuote .Model}}{{end}}{{if .ReasoningEffort}} --reasoning-effort {{shellQuote .ReasoningEffort}}{{end}}`,
+		Grok:     `grok --always-approve{{if .Model}} --model {{shellQuote .Model}}{{end}}{{if .ReasoningEffort}} --effort {{shellQuote .ReasoningEffort}}{{end}}`,
 		Ollama:   `ollama run {{shellQuote (.Model | default "codellama:latest")}}`,
 		Cursor:   `cursor{{if .Model}} --model {{shellQuote .Model}}{{end}}`,
 		Windsurf: `windsurf{{if .Model}} --model {{shellQuote .Model}}{{end}}`,

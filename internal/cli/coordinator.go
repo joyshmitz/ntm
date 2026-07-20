@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,7 +104,7 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey, err := resolveCoordinatorProjectKey(session, res.Inferred)
+	projectKey, err := resolveCoordinatorProjectKey(cmd.Context(), session, res.Inferred)
 	if err != nil {
 		return err
 	}
@@ -303,7 +305,7 @@ func runCoordinatorDigest(cmd *cobra.Command, args []string, sendMail bool) erro
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey, err := resolveCoordinatorProjectKey(session, res.Inferred)
+	projectKey, err := resolveCoordinatorProjectKey(cmd.Context(), session, res.Inferred)
 	if err != nil {
 		return err
 	}
@@ -388,12 +390,15 @@ func runCoordinatorRun(cmd *cobra.Command, args []string, once bool) error {
 	}
 	resolved.ExplainIfInferred(cmd.ErrOrStderr())
 	session = resolved.Session
-	projectKey, err := resolveCoordinatorProjectKey(session, resolved.Inferred)
+	projectKey, err := resolveCoordinatorProjectKey(cmd.Context(), session, resolved.Inferred)
 	if err != nil {
 		return err
 	}
 	if projectKey == "" {
 		return errors.New("getting project root failed")
+	}
+	if err := configureAuthoritativeAssignmentPolicy(projectKey); err != nil {
+		return err
 	}
 
 	runtimeConfig := loadCoordinatorRuntimeConfig()
@@ -466,7 +471,7 @@ func coordinatorRunFailure(assignments []coordinator.AssignmentResult, cycleErr 
 	return nil
 }
 
-func resolveCoordinatorProjectKey(session string, inferred bool) (string, error) {
+func resolveCoordinatorProjectKey(ctx context.Context, session string, inferred bool) (string, error) {
 	session = strings.TrimSpace(session)
 	if session == "" {
 		return "", errors.New("session is required")
@@ -491,7 +496,7 @@ func resolveCoordinatorProjectKey(session string, inferred bool) (string, error)
 		projectKey = resolveProjectDirForSession(session, false)
 	} else {
 		var err error
-		projectKey, err = resolveExplicitProjectDirForSession(session)
+		projectKey, err = resolveExplicitProjectDirForSessionContext(ctx, session)
 		if err != nil {
 			return "", err
 		}
@@ -603,7 +608,7 @@ func runCoordinatorConflicts(cmd *cobra.Command, args []string) error {
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey, err := resolveCoordinatorProjectKey(session, res.Inferred)
+	projectKey, err := resolveCoordinatorProjectKey(cmd.Context(), session, res.Inferred)
 	if err != nil {
 		return err
 	}
@@ -722,6 +727,13 @@ func runCoordinatorAssign(cmd *cobra.Command, args []string, dryRun bool) error 
 	}
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
+	projectDir, err := resolveCoordinatorProjectKey(cmd.Context(), session, res.Inferred)
+	if err != nil {
+		return err
+	}
+	if err := configureAuthoritativeAssignmentPolicy(projectDir); err != nil {
+		return err
+	}
 
 	// Apply default strategy for coordinator wrapper.
 	strategy := strings.TrimSpace(assignStrategy)
@@ -757,6 +769,7 @@ func runCoordinatorAssign(cmd *cobra.Command, args []string, dryRun bool) error 
 
 	assignOpts := &AssignCommandOptions{
 		Session:         session,
+		ProjectDir:      projectDir,
 		BeadIDs:         beadIDs,
 		Strategy:        strategy,
 		Limit:           assignLimit,
@@ -771,6 +784,7 @@ func runCoordinatorAssign(cmd *cobra.Command, args []string, dryRun bool) error 
 		Force:           assignForce,
 		IgnoreDeps:      assignIgnoreDeps,
 		Prompt:          assignPrompt,
+		policyProject:   filepath.Clean(projectDir),
 	}
 
 	if strings.TrimSpace(assignPane) != "" {
@@ -812,7 +826,9 @@ Available features:
   conflict-notify     - Notify when conflicts are detected
   conflict-negotiate  - Attempt automatic conflict resolution
 
-Note: These settings are configured globally in ~/.config/ntm/config.toml.
+The flag is written to the [coordinator] section of the selected config file
+(--config, or the global ~/.config/ntm/config.toml). A running
+'ntm coordinator run' daemon reads config at startup; restart it to apply.
 
 Examples:
   ntm coordinator enable auto-assign
@@ -842,7 +858,9 @@ Available features:
   conflict-notify     - Conflict notifications
   conflict-negotiate  - Automatic conflict resolution
 
-Note: These settings are configured globally in ~/.config/ntm/config.toml.
+The flag is written to the [coordinator] section of the selected config file
+(--config, or the global ~/.config/ntm/config.toml). A running
+'ntm coordinator run' daemon reads config at startup; restart it to apply.
 
 Examples:
   ntm coordinator disable auto-assign
@@ -856,22 +874,70 @@ Examples:
 	return cmd
 }
 
+// coordinatorFeatureKeys maps a toggle feature name to the TOML assignments it
+// persists under [coordinator]. An error is returned for an unknown feature or
+// an unparseable digest interval.
+func coordinatorFeatureKeys(feature string, enable bool, interval string) ([][2]string, error) {
+	enableTOML := strconv.FormatBool(enable)
+	switch feature {
+	case "auto-assign":
+		if interval != "" {
+			return nil, fmt.Errorf("--interval is only valid with the digest feature")
+		}
+		return [][2]string{{"auto_assign", enableTOML}}, nil
+	case "digest":
+		keys := [][2]string{{"send_digests", enableTOML}}
+		if enable && interval != "" {
+			duration, err := time.ParseDuration(interval)
+			if err != nil {
+				return nil, fmt.Errorf("invalid --interval %q: %w", interval, err)
+			}
+			if duration < coordinator.MinDigestInterval {
+				return nil, fmt.Errorf("invalid --interval %q: must be at least %s", interval, coordinator.MinDigestInterval)
+			}
+			keys = append(keys, [2]string{"digest_interval", strconv.Quote(interval)})
+		}
+		return keys, nil
+	case "conflict-notify":
+		if interval != "" {
+			return nil, fmt.Errorf("--interval is only valid with the digest feature")
+		}
+		return [][2]string{{"conflict_notify", enableTOML}}, nil
+	case "conflict-negotiate":
+		if interval != "" {
+			return nil, fmt.Errorf("--interval is only valid with the digest feature")
+		}
+		return [][2]string{{"conflict_negotiate", enableTOML}}, nil
+	default:
+		return nil, fmt.Errorf("unknown feature '%s'. Valid features: auto-assign, digest, conflict-notify, conflict-negotiate", feature)
+	}
+}
+
+// coordinatorToggleConfigPath resolves the config file a coordinator toggle
+// writes to: the explicitly selected --config file when given, otherwise the
+// default global config path.
+func coordinatorToggleConfigPath() string {
+	if path := strings.TrimSpace(selectedConfigPath()); path != "" {
+		return path
+	}
+	return config.DefaultPath()
+}
+
+// runCoordinatorToggle persists the feature flag into the [coordinator]
+// section of the selected config file. A command named `enable` must actually
+// enable: it writes the flag (preserving the rest of the file, comments
+// included) instead of only printing a hint (#223).
 func runCoordinatorToggle(cmd *cobra.Command, args []string, enable bool, interval string) error {
 	feature := args[0]
 
-	// Validate feature name
-	validFeatures := []string{"auto-assign", "digest", "conflict-notify", "conflict-negotiate"}
-	valid := false
-	for _, f := range validFeatures {
-		if f == feature {
-			valid = true
-			break
-		}
+	keys, err := coordinatorFeatureKeys(feature, enable, interval)
+	if err != nil {
+		return markCLIInvalidInput(err)
 	}
 
-	if !valid {
-		return fmt.Errorf("unknown feature '%s'. Valid features: %s",
-			feature, strings.Join(validFeatures, ", "))
+	configPath := coordinatorToggleConfigPath()
+	if err := config.PersistTOMLKeys(configPath, "coordinator", keys); err != nil {
+		return fmt.Errorf("persisting coordinator.%s: %w", strings.ReplaceAll(feature, "-", "_"), err)
 	}
 
 	action := "disabled"
@@ -879,12 +945,17 @@ func runCoordinatorToggle(cmd *cobra.Command, args []string, enable bool, interv
 		action = "enabled"
 	}
 
-	// Show configuration instructions
 	if jsonOutput {
+		written := make(map[string]string, len(keys))
+		for _, kv := range keys {
+			written[kv[0]] = kv[1]
+		}
 		return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
 			"feature":     feature,
 			"enabled":     enable,
-			"config_hint": "Add to ~/.config/ntm/config.toml under [coordinator] section",
+			"persisted":   true,
+			"config_path": configPath,
+			"written":     written,
 		})
 	}
 
@@ -894,25 +965,13 @@ func runCoordinatorToggle(cmd *cobra.Command, args []string, enable bool, interv
 	}
 
 	fmt.Printf("Coordinator feature '%s': %s\n\n", feature, status)
-
-	// Show config instructions
-	fmt.Printf("To persist this setting, add to ~/.config/ntm/config.toml:\n\n")
+	fmt.Printf("Persisted to %s:\n\n", configPath)
 	fmt.Printf("  [coordinator]\n")
-
-	switch feature {
-	case "auto-assign":
-		fmt.Printf("  auto_assign = %t\n", enable)
-	case "digest":
-		fmt.Printf("  send_digests = %t\n", enable)
-		if enable && interval != "" {
-			fmt.Printf("  digest_interval = \"%s\"\n", interval)
-		}
-	case "conflict-notify":
-		fmt.Printf("  conflict_notify = %t\n", enable)
-	case "conflict-negotiate":
-		fmt.Printf("  conflict_negotiate = %t\n", enable)
+	for _, kv := range keys {
+		fmt.Printf("  %s = %s\n", kv[0], kv[1])
 	}
 	fmt.Println()
+	fmt.Println("A running `ntm coordinator run` daemon reads config at startup; restart it to apply.")
 
 	return nil
 }

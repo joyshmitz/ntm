@@ -5,14 +5,27 @@ package bv
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
+
+// ErrActionableLabelsUnverified marks a fail-closed planning error: bv plan
+// items cannot authorize automated assignment until their live Beads labels
+// have been verified.
+var ErrActionableLabelsUnverified = errors.New("actionable bead labels could not be verified")
+
+// ErrActionablePlanUnverified marks a fail-closed planning error: automated
+// assignment requires a complete dependency-aware bv plan and cannot fall
+// back to permissive triage recommendations when that plan is unavailable or
+// structurally invalid.
+var ErrActionablePlanUnverified = errors.New("actionable bv plan could not be verified")
 
 // TriageCacheTTL is the default cache TTL for triage results
 const TriageCacheTTL = 30 * time.Second
@@ -238,21 +251,20 @@ func GetTriageTopPicks(dir string, n int) ([]TriageTopPick, error) {
 // the assigner: it reports the queue drained while dozens of beads below the
 // top-10 cut are actually actionable (issue #197).
 //
-// This helper removes the ceiling without losing triage ranking:
-//   - triage recommendations come first, in triage's scored order (they carry
-//     the rich BlockedBy/Labels/Status/Score fields downstream filters need);
-//   - every actionable plan item that triage did NOT surface is then appended
-//     as a synthesized recommendation, so beads beyond the top-10 are still
-//     dispatchable. Plan items are the dependency-aware actionable set, so they
-//     carry no BlockedBy — synthesized recs pass the blocked-by filter and are
-//     classified by status/active-assignment like any other. bv --robot-plan
-//     omits labels, so each synthesized rec is re-enriched with its bead's
-//     labels from `br` (readyBeadLabels) — otherwise an operator-gated bead
-//     below the top-10 cut would bypass the operator gate.
+// This helper removes the ceiling without losing triage ranking. The plan is
+// the authoritative membership boundary, while triage contributes ordering and
+// scoring only for open/ready IDs also present in that plan. Every assignable
+// plan item is enriched with live labels from `br ready` plus `br list --status
+// open`, including IDs that also appeared in triage. Non-open plan rows are not
+// assignment candidates; stale-recovery callers verify those rows through a
+// separate guarded tracker path. This prevents stale or omitted triage labels
+// from bypassing operator gates without letting in-progress rows poison the
+// open-work authorization set.
 //
 // n caps the merged result (≤0 means no cap). If the plan surface is
-// unavailable, it degrades to the (capped) triage set so callers never regress
-// below today's behavior; if triage itself fails, the error is returned.
+// unavailable, malformed, structurally incomplete, or contains an assignable
+// item whose labels cannot be verified, the call fails closed rather than
+// authorizing raw triage candidates.
 func GetActionableRecommendations(dir string, n int) ([]TriageRecommendation, error) {
 	return GetActionableRecommendationsContext(context.Background(), dir, n)
 }
@@ -260,58 +272,101 @@ func GetActionableRecommendations(dir string, n int) ([]TriageRecommendation, er
 // GetActionableRecommendationsContext returns the full actionable set while
 // honoring caller cancellation across triage, plan, and label enrichment.
 func GetActionableRecommendationsContext(ctx context.Context, dir string, n int) ([]TriageRecommendation, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("actionable recommendations context is required")
+	}
 	triage, err := GetTriageContext(ctx, dir)
 	if err != nil {
-		return nil, err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("%w: load bv --robot-triage: %v", ErrActionablePlanUnverified, err)
 	}
 
-	recs := make([]TriageRecommendation, 0, len(triage.Triage.Recommendations))
-	seen := make(map[string]struct{}, len(triage.Triage.Recommendations))
+	plan, planErr := GetPlanContext(ctx, dir)
+	if planErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("%w: load bv --robot-plan: %v", ErrActionablePlanUnverified, planErr)
+	}
+	if plan == nil {
+		return nil, fmt.Errorf("%w: bv --robot-plan returned no plan", ErrActionablePlanUnverified)
+	}
+
+	planItems := make([]PlanItem, 0)
+	planByID := make(map[string]PlanItem)
+	for trackIndex, track := range plan.Plan.Tracks {
+		for itemIndex, item := range track.Items {
+			item.ID = strings.TrimSpace(item.ID)
+			if item.ID == "" {
+				return nil, fmt.Errorf("%w: bv --robot-plan track %d item %d has an empty id", ErrActionablePlanUnverified, trackIndex, itemIndex)
+			}
+			switch strings.ToLower(strings.TrimSpace(item.Status)) {
+			case "open", "ready":
+				// Eligible for live-label authorization below.
+			default:
+				continue
+			}
+			if _, duplicate := planByID[item.ID]; duplicate {
+				continue
+			}
+			planByID[item.ID] = item
+			planItems = append(planItems, item)
+		}
+	}
+	if len(planItems) == 0 {
+		return []TriageRecommendation{}, nil
+	}
+
+	labelsByID, labelsErr := readyBeadLabelsContext(ctx, dir)
+	if labelsErr != nil {
+		return nil, classifyActionableLabelsError(ctx, labelsErr)
+	}
+	for _, item := range planItems {
+		if _, verified := labelsByID[item.ID]; !verified {
+			return nil, fmt.Errorf("%w: open actionable plan item %q was absent from both br ready and br list --status open", ErrActionableLabelsUnverified, item.ID)
+		}
+	}
+
+	// Preserve triage score ordering only for IDs authorized by the plan. Live
+	// labels and plan state always replace their potentially stale triage copies.
+	recs := make([]TriageRecommendation, 0, len(planItems))
+	seen := make(map[string]struct{}, len(planItems))
 	for _, rec := range triage.Triage.Recommendations {
-		if _, dup := seen[rec.ID]; dup {
+		id := strings.TrimSpace(rec.ID)
+		item, authorized := planByID[id]
+		if !authorized {
 			continue
 		}
-		seen[rec.ID] = struct{}{}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		rec.ID = id
+		if strings.TrimSpace(rec.Title) == "" {
+			rec.Title = item.Title
+		}
+		rec.Status = item.Status
+		rec.Priority = item.Priority
+		rec.Labels = append([]string(nil), labelsByID[id]...)
+		rec.BlockedBy = nil
+		rec.UnblocksIDs = append([]string(nil), item.Unblocks...)
+		seen[id] = struct{}{}
 		recs = append(recs, rec)
 	}
-
-	// Best-effort: pull the uncapped actionable plan and append anything triage
-	// didn't already rank. A plan failure is non-fatal — fall back to triage.
-	plan, planErr := GetPlanContext(ctx, dir)
-	if planErr != nil && ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if planErr == nil && plan != nil {
-		// bv --robot-plan omits per-item labels (PlanItem carries only
-		// id/title/status/priority/unblocks), yet the assignment classifier
-		// gates operator-gated beads by label. A synthesized rec with empty
-		// Labels would silently bypass that gate for any operator-gated bead
-		// surfaced below triage's top-10 cut, so restore label fidelity from
-		// `br ready` merged with `br list --status open` (#197, #224 — epics
-		// are excluded from `br ready` but actionable in the plan).
-		labelsByID, labelsErr := readyBeadLabelsContext(ctx, dir)
-		if labelsErr != nil {
-			return nil, labelsErr
+	for _, item := range planItems {
+		if _, duplicate := seen[item.ID]; duplicate {
+			continue
 		}
-		for _, track := range plan.Plan.Tracks {
-			for _, item := range track.Items {
-				if item.ID == "" {
-					continue
-				}
-				if _, dup := seen[item.ID]; dup {
-					continue
-				}
-				seen[item.ID] = struct{}{}
-				recs = append(recs, TriageRecommendation{
-					ID:          item.ID,
-					Title:       item.Title,
-					Status:      item.Status,
-					Priority:    item.Priority,
-					Labels:      labelsByID[item.ID],
-					UnblocksIDs: item.Unblocks,
-				})
-			}
-		}
+		seen[item.ID] = struct{}{}
+		recs = append(recs, TriageRecommendation{
+			ID:          item.ID,
+			Title:       item.Title,
+			Status:      item.Status,
+			Priority:    item.Priority,
+			Labels:      append([]string(nil), labelsByID[item.ID]...),
+			UnblocksIDs: append([]string(nil), item.Unblocks...),
+		})
 	}
 
 	if n > 0 && len(recs) > n {
@@ -320,23 +375,34 @@ func GetActionableRecommendationsContext(ctx context.Context, dir string, n int)
 	return recs, nil
 }
 
+func classifyActionableLabelsError(ctx context.Context, err error) error {
+	if ctx != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ErrActionableLabelsUnverified, err)
+}
+
 // readyBeadLabels returns a map of bead ID -> labels for the actionable work
-// set, sourced from `br ready --json` merged with `br list --json --status open`.
+// set, sourced from `br ready --json` merged with `br list --json --status
+// open` (non-empty ready entries win; the open list fills absent/empty gaps).
 //
 // It exists to restore label fidelity on plan-sourced recommendations:
 // bv --robot-plan omits labels, yet the assignment classifier
 // (classifyTriageRecForAssignment) gates operator-gated beads by label.
 //
-// Why two commands (#224): `br ready` excludes epic-type beads, while
-// bv --robot-plan includes epics as actionable. An operator-gated epic below
-// triage's top-10 cut would therefore arrive with empty labels and silently
-// bypass the operator gate if enrichment stopped at `br ready`. Merging
-// `br list --status open` fills that gap — ready entries win, list fills the
-// rest (epics included), so every plan-sourced candidate keeps its labels.
+// `br ready` alone is NOT sufficient: it excludes epic-type beads, while
+// bv --robot-plan includes them as actionable. An operator-gated epic surfaced
+// below triage's top-10 cut would therefore arrive with empty labels and slip
+// through the operator gate (#224). Merging the full open list restores epic
+// labels; non-empty ready entries stay authoritative for beads present in both.
 //
-// A large explicit --limit keeps the map complete on br builds whose default
-// limit is finite (older builds treat --limit 0 as zero rows rather than
-// "unlimited").
+// A br error or parse failure on either source is fatal: an incomplete label
+// map would silently bypass the operator gate.
 func readyBeadLabels(dir string) map[string][]string {
 	labels, _ := readyBeadLabelsContext(context.Background(), dir)
 	return labels
@@ -344,28 +410,54 @@ func readyBeadLabels(dir string) map[string][]string {
 
 func readyBeadLabelsContext(ctx context.Context, dir string) (map[string][]string, error) {
 	labels := make(map[string][]string)
+	// Order matters: `br ready` first so its non-empty labels win, then the full
+	// open list (which includes epics) fills every absent or empty label gap. A
+	// large explicit --limit keeps each map complete on br builds whose default
+	// limit is finite (older builds treat --limit 0 as zero rows rather than
+	// "unlimited").
 	for _, args := range [][]string{
 		{"ready", "--json", "--limit", "100000"},
 		{"list", "--json", "--status", "open", "--limit", "100000"},
 	} {
 		output, err := RunBdContext(ctx, dir, args...)
 		if err != nil {
-			return nil, fmt.Errorf("read bead labels (br %s): %w", args[0], err)
+			return nil, fmt.Errorf("read bead labels (br %s): %w", strings.Join(args, " "), err)
 		}
 		items, err := UnmarshalBdList[struct {
-			ID     string   `json:"id"`
-			Labels []string `json:"labels"`
+			ID     string          `json:"id"`
+			Labels json.RawMessage `json:"labels"`
 		}](output)
 		if err != nil {
-			return nil, fmt.Errorf("parse bead labels (br %s): %w", args[0], err)
+			return nil, fmt.Errorf("parse bead labels (br %s): %w", strings.Join(args, " "), err)
 		}
 		for _, it := range items {
-			if it.ID == "" || len(it.Labels) == 0 {
+			it.ID = strings.TrimSpace(it.ID)
+			if it.ID == "" {
 				continue
 			}
-			if _, seen := labels[it.ID]; !seen {
-				labels[it.ID] = it.Labels
+			var itemLabels []string
+			if len(it.Labels) > 0 {
+				if strings.TrimSpace(string(it.Labels)) == "null" {
+					return nil, fmt.Errorf("parse bead labels (br %s): bead %q has a null or blank labels container", strings.Join(args, " "), it.ID)
+				}
+				if err := json.Unmarshal(it.Labels, &itemLabels); err != nil {
+					return nil, fmt.Errorf("parse bead labels (br %s): bead %q labels: %w", strings.Join(args, " "), it.ID, err)
+				}
 			}
+			for labelIndex := range itemLabels {
+				itemLabels[labelIndex] = strings.TrimSpace(itemLabels[labelIndex])
+				if itemLabels[labelIndex] == "" {
+					return nil, fmt.Errorf("parse bead labels (br %s): bead %q has a null or blank label at index %d", strings.Join(args, " "), it.ID, labelIndex)
+				}
+			}
+			existing, seen := labels[it.ID]
+			if seen && (len(existing) > 0 || len(itemLabels) == 0) {
+				continue
+			}
+			// Preserve empty rows as proof that the tracker covered this ID, but
+			// let a later non-empty source fill that label gap. This matters when
+			// `br ready` omits labels that `br list --status open` still reports.
+			labels[it.ID] = append([]string(nil), itemLabels...)
 		}
 	}
 	return labels, nil
