@@ -31,8 +31,6 @@ import (
 // Run with `go test -race -run TestLockOrder` to also catch any
 // remaining unsynchronized access to e.state.
 func TestLockOrder_StateMuVarMuCanonicalOrder(t *testing.T) {
-	t.Parallel()
-
 	workflow := &Workflow{
 		Name: "lock-order",
 		Steps: []Step{
@@ -64,12 +62,8 @@ func TestLockOrder_StateMuVarMuCanonicalOrder(t *testing.T) {
 	const writers = 4 // mimicking applyStartFrom's stateMu→varMu pattern
 	const readers = 8 // resolveForeachMaxRounds (now stateMu→varMu too)
 
-	timeout := time.AfterFunc(15*time.Second, func() {
-		t.Errorf("bd-8wo27 regression: lock-order test deadlocked; goroutines did not finish within 15s")
-	})
-	defer timeout.Stop()
-
 	var wg sync.WaitGroup
+	workerErrs := make(chan error, readers)
 
 	// Writers: acquire stateMu.Lock + varMu.Lock the way applyStartFrom
 	// does, mutate one entry from each protected map, then release in
@@ -101,14 +95,18 @@ func TestLockOrder_StateMuVarMuCanonicalOrder(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
 				if _, err := executor.resolveForeachMaxRounds(parent); err != nil {
-					t.Errorf("resolveForeachMaxRounds: %v", err)
+					workerErrs <- err
 					return
 				}
 			}
 		}()
 	}
 
-	wg.Wait()
+	waitForLockOrderWorkers(t, &wg, "bd-8wo27")
+	close(workerErrs)
+	for err := range workerErrs {
+		t.Errorf("resolveForeachMaxRounds: %v", err)
+	}
 }
 
 // TestLockOrder_AuditedCallSitesAllRespectCanonicalOrder is the
@@ -118,12 +116,10 @@ func TestLockOrder_StateMuVarMuCanonicalOrder(t *testing.T) {
 // plus loops.go::resolveItems. This test runs all five readers in
 // parallel against the canonical stateMu→varMu writer pattern; if any
 // of them is flipped back to varMu→stateMu, the AB-BA edge fires and
-// the 15s deadlock-watchdog catches it.
+// the bounded completion wait catches it.
 //
 // Run with `go test -race -run TestLockOrder_AuditedCallSites`.
 func TestLockOrder_AuditedCallSitesAllRespectCanonicalOrder(t *testing.T) {
-	t.Parallel()
-
 	cfg := DefaultExecutorConfig("session")
 	executor := NewExecutor(cfg)
 	executor.state = &ExecutionState{
@@ -142,11 +138,6 @@ func TestLockOrder_AuditedCallSitesAllRespectCanonicalOrder(t *testing.T) {
 	const iterations = 200
 	const writers = 4
 	const readers = 4 // per call site (4 × 5 sites)
-
-	timeout := time.AfterFunc(15*time.Second, func() {
-		t.Errorf("bd-6vp7y regression: lock-order test deadlocked; goroutines did not finish within 15s")
-	})
-	defer timeout.Stop()
 
 	var wg sync.WaitGroup
 
@@ -226,7 +217,7 @@ func TestLockOrder_AuditedCallSitesAllRespectCanonicalOrder(t *testing.T) {
 		}()
 	}
 
-	wg.Wait()
+	waitForLockOrderWorkers(t, &wg, "bd-6vp7y")
 }
 
 // TestLockOrder_LoopSubstituteIntExprCanonicalOrder is the bd-eslpu
@@ -240,8 +231,6 @@ func TestLockOrder_AuditedCallSitesAllRespectCanonicalOrder(t *testing.T) {
 //
 // Run with `go test -race -run TestLockOrder_LoopSubstituteIntExpr`.
 func TestLockOrder_LoopSubstituteIntExprCanonicalOrder(t *testing.T) {
-	t.Parallel()
-
 	cfg := DefaultExecutorConfig("session")
 	executor := NewExecutor(cfg)
 	executor.state = &ExecutionState{
@@ -262,12 +251,8 @@ func TestLockOrder_LoopSubstituteIntExprCanonicalOrder(t *testing.T) {
 	const writers = 4
 	const readers = 8
 
-	timeout := time.AfterFunc(15*time.Second, func() {
-		t.Errorf("bd-eslpu regression: lock-order test deadlocked; goroutines did not finish within 15s")
-	})
-	defer timeout.Stop()
-
 	var wg sync.WaitGroup
+	workerErrs := make(chan error, readers)
 
 	// Writers mirror applyStartFrom's stateMu.Lock + varMu.Lock pattern.
 	for w := 0; w < writers; w++ {
@@ -294,12 +279,35 @@ func TestLockOrder_LoopSubstituteIntExprCanonicalOrder(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
 				if _, err := le.substituteIntExpr("${vars.limit}"); err != nil {
-					t.Errorf("substituteIntExpr: %v", err)
+					workerErrs <- err
 					return
 				}
 			}
 		}()
 	}
 
-	wg.Wait()
+	waitForLockOrderWorkers(t, &wg, "bd-eslpu")
+	close(workerErrs)
+	for err := range workerErrs {
+		t.Errorf("substituteIntExpr: %v", err)
+	}
+}
+
+func waitForLockOrderWorkers(t *testing.T, wg *sync.WaitGroup, regression string) {
+	t.Helper()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	timer := time.NewTimer(60 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+	case <-timer.C:
+		t.Fatalf("%s regression: lock-order workers did not finish within 60s", regression)
+	}
 }

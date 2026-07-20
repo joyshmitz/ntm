@@ -1,10 +1,129 @@
 package testutil
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
+
+const (
+	processGroupOwnerCrashEnv    = "_NTM_TEST_PROCESS_GROUP_OWNER_CRASH"
+	processGroupOwnerCrashPIDEnv = "_NTM_TEST_PROCESS_GROUP_OWNER_CHILD_PID"
+)
+
+func TestProcessGroupGuardianKillsDescendantsWhenOwnerExits(t *testing.T) {
+	if os.Getenv(processGroupOwnerCrashEnv) == "1" {
+		pidPath := os.Getenv(processGroupOwnerCrashPIDEnv)
+		cmd := exec.Command("/bin/sh", "-c", `sleep 600 & child=$!; printf '%s\n' "$child" > "$1"; wait "$child"`, "owner-crash", pidPath)
+		group, err := NewProcessGroupForTest(context.Background(), cmd)
+		if err != nil {
+			t.Fatalf("create owner-crash process group: %v", err)
+		}
+		if err := cmd.Start(); err != nil {
+			closeErr := group.Close()
+			t.Fatalf("start owner-crash target: %v; close owned process group: %v", err, closeErr)
+		}
+		for {
+			time.Sleep(time.Second)
+			runtime.KeepAlive(group)
+		}
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("owner-crash descendant assertion uses Linux /proc")
+	}
+
+	pidPath := filepath.Join(t.TempDir(), "descendant.pid")
+	owner := exec.Command(os.Args[0], "-test.run=^TestProcessGroupGuardianKillsDescendantsWhenOwnerExits$")
+	overrides := map[string]string{
+		processGroupOwnerCrashEnv:    "1",
+		processGroupOwnerCrashPIDEnv: pidPath,
+		processGroupGuardianEnv:      "0",
+	}
+	owner.Env = make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, replaced := overrides[key]; !replaced {
+			owner.Env = append(owner.Env, entry)
+		}
+	}
+	for key, value := range overrides {
+		owner.Env = append(owner.Env, key+"="+value)
+	}
+	var output bytes.Buffer
+	owner.Stdout = &output
+	owner.Stderr = &output
+	owner.WaitDelay = 2 * time.Second
+	if err := owner.Start(); err != nil {
+		t.Fatalf("start owner-crash helper: %v", err)
+	}
+	joined := false
+	defer func() {
+		if joined {
+			return
+		}
+		_ = owner.Process.Kill()
+		_ = owner.Wait()
+	}()
+
+	var descendantPID int
+	readinessDeadline := time.Now().Add(30 * time.Second)
+	for {
+		pidBytes, err := os.ReadFile(pidPath)
+		if err == nil {
+			descendantPID, err = strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+			if err != nil || descendantPID <= 0 {
+				t.Fatalf("parse owner-crash descendant pid %q: %v", pidBytes, err)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read owner-crash descendant pid: %v", err)
+		}
+		if time.Now().After(readinessDeadline) {
+			t.Fatalf("owner-crash helper did not publish descendant pid: output=%s", output.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if err := owner.Process.Kill(); err != nil {
+		t.Fatalf("kill owner-crash helper: %v", err)
+	}
+	waitErr := owner.Wait()
+	joined = true
+	if waitErr == nil {
+		t.Fatal("killed owner-crash helper exited successfully")
+	}
+
+	statusPath := filepath.Join("/proc", strconv.Itoa(descendantPID), "status")
+	terminationDeadline := time.Now().Add(10 * time.Second)
+	for {
+		status, err := os.ReadFile(statusPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("read owner-crash descendant status: %v", err)
+		}
+		for _, line := range strings.Split(string(status), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] == "State:" && fields[1] == "Z" {
+				return
+			}
+		}
+		if time.Now().After(terminationDeadline) {
+			t.Fatalf("descendant process %d survived owner exit", descendantPID)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
 
 func TestNewTestLoggerStdout(t *testing.T) {
 	logger := NewTestLoggerStdout(t)
@@ -95,9 +214,15 @@ func TestIsolateTmuxTestProcess(t *testing.T) {
 	t.Setenv("TMUX_PANE", "%9")
 	t.Setenv("TMUX_TMPDIR", "/tmp/ambient-tmux-root")
 
-	if err := IsolateTmuxTestProcess(); err != nil {
+	cleanupTmux, err := IsolateTmuxTestProcess()
+	if err != nil {
 		t.Fatalf("IsolateTmuxTestProcess() error = %v", err)
 	}
+	t.Cleanup(func() {
+		if err := cleanupTmux(); err != nil {
+			t.Errorf("cleanup IsolateTmuxTestProcess(): %v", err)
+		}
+	})
 	if got := os.Getenv("TMUX"); got != "" {
 		t.Fatalf("TMUX = %q, want empty", got)
 	}
@@ -114,6 +239,201 @@ func TestIsolateTmuxTestProcess(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Fatalf("TMUX_TMPDIR = %q, want directory", tmuxTmpDir)
+	}
+	if err := validateTmuxSocketRoot(tmuxTmpDir); err != nil {
+		t.Fatalf("TMUX_TMPDIR = %q cannot host a portable tmux socket: %v", tmuxTmpDir, err)
+	}
+	if err := cleanupTmux(); err != nil {
+		t.Fatalf("cleanup IsolateTmuxTestProcess(): %v", err)
+	}
+	if _, err := os.Stat(tmuxTmpDir); !os.IsNotExist(err) {
+		t.Fatalf("isolated tmux cleanup left %q behind; stat error = %v", tmuxTmpDir, err)
+	}
+}
+
+func TestIsolateTmuxTestProcessPreservesConfiguredFakeBinaryEnvironment(t *testing.T) {
+	fakeDir := t.TempDir()
+	invoked := filepath.Join(fakeDir, "invoked")
+	fakeBinary := filepath.Join(fakeDir, "tmux")
+	ownedTmuxRoot := t.TempDir()
+	script := "#!/bin/sh\n: > \"$NTM_TEST_FAKE_TMUX_INVOKED\"\nexit 64\n"
+	if err := os.WriteFile(fakeBinary, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake tmux binary: %v", err)
+	}
+	t.Setenv("NTM_TEST_FAKE_TMUX_INVOKED", invoked)
+	t.Setenv("NTM_TEST_TMUX_ENV_OWNED", "1")
+	t.Setenv("NTM_TMUX_BINARY", fakeBinary)
+	t.Setenv("TMUX", "fake-server,1,0")
+	t.Setenv("TMUX_PANE", "%9")
+	t.Setenv("TMUX_TMPDIR", ownedTmuxRoot)
+
+	cleanupTmux, err := IsolateTmuxTestProcess()
+	if err != nil {
+		t.Fatalf("IsolateTmuxTestProcess() error = %v", err)
+	}
+	if got := os.Getenv("TMUX"); got != "fake-server,1,0" {
+		t.Fatalf("TMUX = %q, want caller-owned fake environment", got)
+	}
+	if got := os.Getenv("TMUX_PANE"); got != "%9" {
+		t.Fatalf("TMUX_PANE = %q, want caller-owned fake environment", got)
+	}
+	if got := os.Getenv("TMUX_TMPDIR"); got != ownedTmuxRoot {
+		t.Fatalf("TMUX_TMPDIR = %q, want caller-owned %q", got, ownedTmuxRoot)
+	}
+	if err := cleanupTmux(); err != nil {
+		t.Fatalf("cleanup IsolateTmuxTestProcess(): %v", err)
+	}
+	if _, err := os.Stat(invoked); !os.IsNotExist(err) {
+		t.Fatalf("configured fake tmux was invoked during cleanup; stat error = %v", err)
+	}
+	if info, err := os.Stat(ownedTmuxRoot); err != nil || !info.IsDir() {
+		t.Fatalf("caller-owned tmux root %q was changed during no-op cleanup: info=%v err=%v", ownedTmuxRoot, info, err)
+	}
+}
+
+func TestIsolateTmuxTestProcessStillIsolatesConfiguredBinary(t *testing.T) {
+	fakeDir := t.TempDir()
+	invoked := filepath.Join(fakeDir, "invoked")
+	fakeBinary := filepath.Join(fakeDir, "tmux")
+	script := "#!/bin/sh\n: > \"$NTM_TEST_FAKE_TMUX_INVOKED\"\nexit 64\n"
+	if err := os.WriteFile(fakeBinary, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake tmux binary: %v", err)
+	}
+	t.Setenv("NTM_TEST_FAKE_TMUX_INVOKED", invoked)
+	t.Setenv("NTM_TMUX_BINARY", fakeBinary)
+	t.Setenv("TMUX", "ambient-server,1,0")
+	t.Setenv("TMUX_PANE", "%8")
+	t.Setenv("TMUX_TMPDIR", "/tmp/ambient-tmux-root")
+
+	cleanupTmux, err := IsolateTmuxTestProcess()
+	if err != nil {
+		t.Fatalf("IsolateTmuxTestProcess() error = %v", err)
+	}
+	tmuxRoot := os.Getenv("TMUX_TMPDIR")
+	if os.Getenv("TMUX") != "" || os.Getenv("TMUX_PANE") != "" ||
+		tmuxRoot == "" || tmuxRoot == "/tmp/ambient-tmux-root" {
+		t.Fatalf("configured binary retained ambient tmux environment: TMUX=%q TMUX_PANE=%q TMUX_TMPDIR=%q",
+			os.Getenv("TMUX"), os.Getenv("TMUX_PANE"), tmuxRoot)
+	}
+	if err := cleanupTmux(); err != nil {
+		t.Fatalf("cleanup IsolateTmuxTestProcess(): %v", err)
+	}
+	if _, err := os.Stat(invoked); !os.IsNotExist(err) {
+		t.Fatalf("configured fake tmux was invoked during cleanup; stat error = %v", err)
+	}
+	if _, err := os.Stat(tmuxRoot); !os.IsNotExist(err) {
+		t.Fatalf("isolated tmux cleanup left %q behind; stat error = %v", tmuxRoot, err)
+	}
+}
+
+func TestShortTmuxTempDirCandidatesOverrideFirstAndDeduplicated(t *testing.T) {
+	t.Setenv(tmuxTestTempBaseEnv, os.TempDir()+string(filepath.Separator))
+
+	candidates := shortTmuxTempDirCandidates()
+	if len(candidates) == 0 {
+		t.Fatal("shortTmuxTempDirCandidates() returned no candidates")
+	}
+	want, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q): %v", os.TempDir(), err)
+	}
+	if got := candidates[0]; got.source != tmuxTestTempBaseEnv || got.path != want {
+		t.Fatalf("first candidate = %#v, want source %q path %q", got, tmuxTestTempBaseEnv, want)
+	}
+
+	count := 0
+	for _, candidate := range candidates {
+		if candidate.path == want {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("candidate %q appears %d times, want exactly once: %#v", want, count, candidates)
+	}
+}
+
+func TestShortTmuxTempDirCandidatesPreferShortUnixBasesToLongTMPDIR(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix fallback ordering does not apply on Windows")
+	}
+
+	t.Setenv(tmuxTestTempBaseEnv, "")
+	longTempDir := filepath.Join(string(filepath.Separator), strings.Repeat("x", maxTmuxSocketPathBytes))
+	t.Setenv("TMPDIR", longTempDir)
+
+	candidates := shortTmuxTempDirCandidates()
+	if len(candidates) != 3 {
+		t.Fatalf("shortTmuxTempDirCandidates() = %#v, want /var/tmp, /tmp, and long TMPDIR", candidates)
+	}
+	if candidates[0].path != "/var/tmp" || candidates[1].path != "/tmp" || candidates[2].path != longTempDir {
+		t.Fatalf("candidate order = %#v, want /var/tmp, /tmp, then %q", candidates, longTempDir)
+	}
+	if err := validateTmuxTempBase(candidates[2].path); err == nil {
+		t.Fatalf("long TMPDIR candidate %q passed projected socket-path validation", candidates[2].path)
+	}
+}
+
+func TestValidateTmuxSocketRootRejectsLongUnixPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-domain socket path limits do not apply on Windows")
+	}
+
+	if err := validateTmuxSocketRoot(filepath.Join(string(filepath.Separator), "var", "tmp", "ntm")); err != nil {
+		t.Fatalf("short root rejected: %v", err)
+	}
+	longRoot := filepath.Join(string(filepath.Separator), strings.Repeat("x", maxTmuxSocketPathBytes))
+	err := validateTmuxSocketRoot(longRoot)
+	if err == nil {
+		t.Fatalf("validateTmuxSocketRoot(%q) succeeded, want path-length error", longRoot)
+	}
+	if !strings.Contains(err.Error(), "projected tmux socket path") ||
+		!strings.Contains(err.Error(), "portable limit") {
+		t.Fatalf("validateTmuxSocketRoot() error = %q, want actionable path-limit details", err)
+	}
+}
+
+func TestCreateShortTmuxTempDirReportsAllCandidateFailures(t *testing.T) {
+	missingRoot := filepath.Join(t.TempDir(), "missing")
+	candidates := []tmuxTempDirCandidate{
+		{source: "explicit override", path: filepath.Join(missingRoot, "one")},
+		{source: "portable fallback", path: filepath.Join(missingRoot, "two")},
+	}
+
+	_, err := createShortTmuxTempDirFromCandidates(candidates)
+	if err == nil {
+		t.Fatal("createShortTmuxTempDirFromCandidates() succeeded, want aggregate error")
+	}
+	for _, want := range []string{
+		"explicit override",
+		candidates[0].path,
+		"portable fallback",
+		candidates[1].path,
+		tmuxTestTempBaseEnv,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("aggregate error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestShortTmuxTempDirCreatesAndCleansDirectory(t *testing.T) {
+	var dir string
+	t.Run("create", func(t *testing.T) {
+		dir = ShortTmuxTempDir(t)
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat ShortTmuxTempDir(): %v", err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("ShortTmuxTempDir() = %q, want directory", dir)
+		}
+		if err := validateTmuxSocketRoot(dir); err != nil {
+			t.Fatalf("ShortTmuxTempDir() = %q cannot host a portable tmux socket: %v", dir, err)
+		}
+	})
+
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("ShortTmuxTempDir cleanup left %q behind; stat error = %v", dir, err)
 	}
 }
 

@@ -33,18 +33,31 @@ func newTmuxIntegrationTestConfig(projectsBase string) *config.Config {
 }
 
 func TestMain(m *testing.M) {
-	// Clean up any orphan test sessions from previous runs before starting.
-	// This catches sessions left behind when tests are interrupted (Ctrl+C, timeout, etc.)
-	testutil.KillAllTestSessionsSilent()
-	if err := testutil.IsolateTmuxTestProcess(); err != nil {
+	cleanupTmux, err := testutil.IsolateTmuxTestProcess()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "isolate CLI tmux tests: %v\n", err)
+		os.Exit(1)
+	}
+
+	// CLI tests exercise git-touching paths (hooks install via `ntm init`,
+	// worktrees, ...); never let them read or write the developer's real git
+	// configuration (#225).
+	cleanupGit, err := testutil.IsolateGitConfigProcess()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "isolate CLI git config: %v\n", err)
 		os.Exit(1)
 	}
 
 	code := m.Run()
 
-	// Clean up after all tests complete
-	testutil.KillAllTestSessionsSilent()
+	if err := cleanupGit(); err != nil {
+		fmt.Fprintf(os.Stderr, "clean up isolated CLI git config: %v\n", err)
+		code = 1
+	}
+	if err := cleanupTmux(); err != nil {
+		fmt.Fprintf(os.Stderr, "clean up isolated CLI tmux: %v\n", err)
+		code = 1
+	}
 
 	os.Exit(code)
 }

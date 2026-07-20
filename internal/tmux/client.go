@@ -128,10 +128,14 @@ var (
 )
 
 // BinaryPath returns the resolved tmux binary path for local execution.
-// It prefers standard install locations and falls back to PATH lookup.
+// An explicit override is evaluated on every call; only normal installation
+// discovery is cached.
 func BinaryPath() string {
+	if override := strings.TrimSpace(os.Getenv("NTM_TMUX_BINARY")); override != "" {
+		return override
+	}
 	tmuxBinaryOnce.Do(func() {
-		tmuxBinaryPath = resolveTmuxBinaryPath()
+		tmuxBinaryPath = resolveInstalledTmuxBinaryPath()
 	})
 	if tmuxBinaryPath == "" {
 		return "tmux"
@@ -143,6 +147,27 @@ func resolveTmuxBinaryPath() string {
 	if override := strings.TrimSpace(os.Getenv("NTM_TMUX_BINARY")); override != "" {
 		return override
 	}
+	return resolveInstalledTmuxBinaryPath()
+}
+
+func resolveInstalledTmuxBinaryPath() string {
+	if path := findInstalledTmuxBinaryPath(); path != "" {
+		return path
+	}
+	return "/usr/bin/tmux"
+}
+
+func findInstalledTmuxBinaryPath() string {
+	if path := findStandardTmuxBinaryPath(); path != "" {
+		return path
+	}
+	if path, err := exec.LookPath("tmux"); err == nil && path != "" {
+		return path
+	}
+	return ""
+}
+
+func findStandardTmuxBinaryPath() string {
 	candidates := []string{
 		"/usr/bin/tmux",
 		"/usr/local/bin/tmux",
@@ -159,10 +184,7 @@ func resolveTmuxBinaryPath() string {
 			return path
 		}
 	}
-	if path, err := exec.LookPath("tmux"); err == nil && path != "" {
-		return path
-	}
-	return "/usr/bin/tmux"
+	return ""
 }
 
 func binaryExists(path string) bool {

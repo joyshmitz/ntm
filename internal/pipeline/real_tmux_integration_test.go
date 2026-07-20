@@ -360,19 +360,40 @@ steps:
 func newRealTmuxPipelineFixture(t *testing.T) realTmuxPipelineFixture {
 	t.Helper()
 	testutil.RequireTmuxThrottled(t)
+	longTempRoot := filepath.Join(t.TempDir(), strings.Repeat("long-tmux-socket-root-", 6))
+	if err := os.MkdirAll(longTempRoot, 0o755); err != nil {
+		t.Fatalf("create long ambient temp root: %v", err)
+	}
+	t.Setenv("TMPDIR", longTempRoot)
+	t.Setenv("GOTMPDIR", longTempRoot)
+	tmuxRoot := testutil.ShortTmuxTempDir(t)
+	if strings.HasPrefix(tmuxRoot, longTempRoot+string(filepath.Separator)) {
+		t.Fatalf("short tmux socket root %q remained beneath long ambient root %q", tmuxRoot, longTempRoot)
+	}
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+	t.Setenv("TMUX_TMPDIR", tmuxRoot)
 
 	projectDir := t.TempDir()
 	session := fmt.Sprintf("ntm_pipe_e2e_%d", time.Now().UnixNano())
-	if err := tmux.CreateSession(session, projectDir); err != nil {
-		t.Fatalf("tmux.CreateSession(%q) error = %v", session, err)
-	}
 	t.Cleanup(func() {
-		if err := tmux.KillSession(session); err != nil {
-			t.Logf("tmux.KillSession(%q) cleanup error: %v", session, err)
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancelCleanup()
+		if _, err := tmux.NewClient("").RunContext(cleanupCtx, "kill-server"); err != nil &&
+			tmux.ClassifyCommandError(err).Kind != tmux.CommandErrorNoServer {
+			t.Errorf("stop isolated tmux server: %v", err)
 		}
 	})
+	createCtx, cancelCreate := context.WithTimeout(t.Context(), 8*time.Second)
+	err := tmux.CreateSessionContext(createCtx, session, projectDir)
+	cancelCreate()
+	if err != nil {
+		t.Fatalf("tmux.CreateSession(%q) error = %v", session, err)
+	}
 
-	firstWindow, err := tmux.GetFirstWindow(session)
+	windowCtx, cancelWindow := context.WithTimeout(t.Context(), 8*time.Second)
+	firstWindow, err := tmux.GetFirstWindowContext(windowCtx, session)
+	cancelWindow()
 	if err != nil {
 		t.Fatalf("tmux.GetFirstWindow(%q) error = %v", session, err)
 	}
@@ -390,7 +411,10 @@ func newRealTmuxPipelineFixture(t *testing.T) realTmuxPipelineFixture {
 	realTmuxWaitForShellPrompt(t, pane.ID, 5*time.Second)
 
 	readyPath := filepath.Join(projectDir, ".pane-ready")
-	if err := tmux.PasteKeysWithDelay(pane.ID, "printf 'ready' > .pane-ready", true, 500*time.Millisecond); err != nil {
+	sendCtx, cancelSend := context.WithTimeout(t.Context(), 8*time.Second)
+	err = tmux.PasteKeysWithDelayContext(sendCtx, pane.ID, "printf 'ready' > .pane-ready", true, 500*time.Millisecond)
+	cancelSend()
+	if err != nil {
 		t.Fatalf("tmux.PasteKeys(%q, readiness marker) error = %v", pane.ID, err)
 	}
 	realTmuxWaitForFileContent(t, readyPath, "ready", 5*time.Second)

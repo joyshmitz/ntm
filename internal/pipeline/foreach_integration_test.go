@@ -22,6 +22,8 @@ import (
 // per-iteration substitution. These are the contract tests the operator
 // runs before shipping a pipeline that depends on the foreach runtime.
 
+const foreachIntegrationDeadlockTimeout = 30 * time.Second
+
 // brennerbotRoster builds the canonical 5-pane fixture used by the
 // brennerbot phase tests: two Claude investigators, one Codex
 // investigator, one Gemini investigator, one Codex adjudicator. Domains
@@ -111,17 +113,23 @@ func setupBrennerbotIntegration(t *testing.T, templateBody string) (string, *Moc
 
 	cfg := DefaultExecutorConfig("brennerbot-integration")
 	cfg.ProjectDir = projectDir
-	cfg.DefaultTimeout = 2 * time.Second
+	// These integration cases exercise routing and substitution, not timeout
+	// behavior. Keep the fixture's command bound generous enough that the race
+	// detector and a contended builder cannot turn scheduler delay into a
+	// functional failure. Dedicated cancellation tests cover timeout semantics.
+	cfg.DefaultTimeout = foreachIntegrationDeadlockTimeout
 	executor := NewExecutor(cfg)
 	executor.SetTmuxClient(mock)
 	return projectDir, mock, executor
 }
 
-// runWorkflowWithDeadline runs the workflow with a tight deadline and
-// fails the test if it does not complete cleanly.
-func runWorkflowWithDeadline(t *testing.T, executor *Executor, workflow *Workflow, deadline time.Duration) *ExecutionState {
+// runForeachWorkflow bounds the synchronous mock workflow only as a deadlock
+// guard. It is deliberately not a performance assertion: race instrumentation
+// and shared-builder contention can make these integration paths much slower
+// without changing their behavior.
+func runForeachWorkflow(t *testing.T, executor *Executor, workflow *Workflow) *ExecutionState {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	ctx, cancel := context.WithTimeout(context.Background(), foreachIntegrationDeadlockTimeout)
 	defer cancel()
 	state, err := executor.Run(ctx, workflow, nil, nil)
 	if err != nil {
@@ -190,7 +198,7 @@ func TestPhase4InvestigateForeachBeadsRoundRobinByDomain(t *testing.T) {
 		}},
 	}
 
-	runWorkflowWithDeadline(t, executor, workflow, 3*time.Second)
+	runForeachWorkflow(t, executor, workflow)
 
 	wantPerPane := map[string]string{
 		"%1": "Investigate H-001: hypo one",   // pane 1 owns H-001
@@ -253,7 +261,7 @@ func TestPhase4DevilsAdvocateForeachBeadsByModelFamilyDifference(t *testing.T) {
 		}},
 	}
 
-	runWorkflowWithDeadline(t, executor, workflow, 3*time.Second)
+	runForeachWorkflow(t, executor, workflow)
 
 	authorByItem := map[string]string{
 		"H-001": "cc",
@@ -326,7 +334,7 @@ DEBATE-002|H-005|H-007|%3|%4
 		}},
 	}
 
-	runWorkflowWithDeadline(t, executor, workflow, 3*time.Second)
+	runForeachWorkflow(t, executor, workflow)
 
 	pastes := pasteContents(t, mock, "%5")
 	if len(pastes) != 2*3 {
@@ -387,7 +395,7 @@ func TestPhase5AdjudicateForeachDebatesRotateAdjudicator(t *testing.T) {
 		}},
 	}
 
-	runWorkflowWithDeadline(t, executor, workflow, 3*time.Second)
+	runForeachWorkflow(t, executor, workflow)
 
 	dispatchedTo := func(debateID string) string {
 		marker := fmt.Sprintf("Adjudicate %s ", debateID)
@@ -451,7 +459,7 @@ func TestPhase6DistillForeachModels(t *testing.T) {
 		}},
 	}
 
-	runWorkflowWithDeadline(t, executor, workflow, 3*time.Second)
+	runForeachWorkflow(t, executor, workflow)
 
 	// Each family has at least one pane; by_model_family picks the first
 	// available match, which is the lowest-indexed pane carrying that family.
@@ -504,7 +512,7 @@ func TestPhase7TrioForeachPane(t *testing.T) {
 		}},
 	}
 
-	runWorkflowWithDeadline(t, executor, workflow, 3*time.Second)
+	runForeachWorkflow(t, executor, workflow)
 
 	wantPerPane := map[string]string{
 		"%1": "Audit pane %1 role=investigator",

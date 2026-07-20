@@ -150,7 +150,11 @@ func commandExitError(t *testing.T, code int) error {
 	t.Helper()
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestCommandExitErrorHelper")
-	cmd.Env = append(os.Environ(), "NTM_TEST_EXIT_CODE="+strconv.Itoa(code))
+	cmd.Env = append(
+		os.Environ(),
+		"NTM_TEST_EXIT_CODE="+strconv.Itoa(code),
+		"NTM_TEST_TMUX_ENV_OWNED=1",
+	)
 	err := cmd.Run()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {

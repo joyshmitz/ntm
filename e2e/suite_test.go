@@ -29,7 +29,8 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	if err := testutil.IsolateTmuxTestProcess(); err != nil {
+	cleanupTmux, err := testutil.IsolateTmuxTestProcess()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "E2E: failed to isolate tmux: %v\n", err)
 		os.Exit(1)
 	}
@@ -37,6 +38,9 @@ func TestMain(m *testing.M) {
 	bin, err := ensureE2ENTMBin()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "E2E: failed to resolve/build ntm: %v\n", err)
+		if cleanupErr := cleanupTmux(); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "E2E: failed to clean up isolated tmux: %v\n", cleanupErr)
+		}
 		os.Exit(1)
 	}
 
@@ -46,10 +50,18 @@ func TestMain(m *testing.M) {
 	newPath := dir + string(os.PathListSeparator) + oldPath
 	if err := os.Setenv(pathKey, newPath); err != nil {
 		fmt.Fprintf(os.Stderr, "E2E: failed to update PATH: %v\n", err)
+		if cleanupErr := cleanupTmux(); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "E2E: failed to clean up isolated tmux: %v\n", cleanupErr)
+		}
 		os.Exit(1)
 	}
 
-	os.Exit(m.Run())
+	code := m.Run()
+	if err := cleanupTmux(); err != nil {
+		fmt.Fprintf(os.Stderr, "E2E: failed to clean up isolated tmux: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 func ensureE2ENTMBin() (string, error) {

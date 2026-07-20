@@ -2200,17 +2200,18 @@ func TestMain(m *testing.M) {
 		return
 	}
 
-	// Clean up any orphan test sessions from previous runs
-	testutil.KillAllTestSessionsSilent()
-	if err := testutil.IsolateTmuxTestProcess(); err != nil {
+	cleanupTmux, err := testutil.IsolateTmuxTestProcess()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "isolate E2E tmux tests: %v\n", err)
 		os.Exit(1)
 	}
 
 	code := m.Run()
 
-	// Clean up after all tests complete
-	testutil.KillAllTestSessionsSilent()
+	if err := cleanupTmux(); err != nil {
+		fmt.Fprintf(os.Stderr, "clean up isolated E2E tmux: %v\n", err)
+		code = 1
+	}
 
 	os.Exit(code)
 }

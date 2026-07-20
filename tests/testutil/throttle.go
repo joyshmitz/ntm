@@ -1,13 +1,37 @@
 package testutil
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+const (
+	tmuxTestTempBaseEnv = "NTM_TMUX_TEST_TMPDIR"
+
+	// sockaddr_un.sun_path is only 104 bytes on several supported Unix
+	// platforms. Keep the projected pathname below 100 bytes, including its
+	// terminating NUL, so a test root that works on Linux also works on BSD and
+	// macOS.
+	maxTmuxSocketPathBytes = 100
+	tmuxTempDirPattern     = "ntm-tmux-test-*"
+)
+
+type tmuxTempDirCandidate struct {
+	source string
+	path   string
+}
 
 // TmuxTestThrottle limits concurrent tmux session spawning in tests.
 // This prevents fork bombs when running tests with high parallelism.
@@ -92,13 +116,41 @@ func AcquireGlobalTmuxTestLockForTest(t *testing.T) {
 	acquireGlobalTmuxTestLock(t)
 }
 
-// IsolateTmuxTestProcess gives a package test binary its own tmux server.
-// Call it from TestMain before m.Run so tests and child processes cannot
-// discover or mutate the invoking user's tmux server.
-func IsolateTmuxTestProcess() error {
-	dir, err := os.MkdirTemp("", "ntm-tmux-test-*")
+// IsolateTmuxTestProcess gives a package test binary its own tmux server and
+// IsolateGitConfigProcess points git's global and system configuration at
+// empty process-private locations so neither tests nor code under test that
+// shells out to `git` can read or write the developer's real git config. A
+// real-machine incident (#225): a global core.hooksPath redirect routed
+// repo-scoped test hook installs into the user's actual global hooks
+// directory, where every repository on the machine executed them. Call from
+// TestMain before m.Run(); the returned cleanup removes the private dir.
+// GIT_CONFIG_GLOBAL may name a missing file — git treats it as empty.
+func IsolateGitConfigProcess() (func() error, error) {
+	dir, err := os.MkdirTemp("", "ntm-test-gitconfig-")
 	if err != nil {
-		return fmt.Errorf("create tmux test directory: %w", err)
+		return nil, fmt.Errorf("create private git config dir: %w", err)
+	}
+	if err := os.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(dir, "gitconfig")); err != nil {
+		return nil, errors.Join(fmt.Errorf("set GIT_CONFIG_GLOBAL: %w", err), os.RemoveAll(dir))
+	}
+	if err := os.Setenv("GIT_CONFIG_SYSTEM", os.DevNull); err != nil {
+		return nil, errors.Join(fmt.Errorf("set GIT_CONFIG_SYSTEM: %w", err), os.RemoveAll(dir))
+	}
+	return func() error { return os.RemoveAll(dir) }, nil
+}
+
+// returns an idempotent cleanup function. TestMain callers must run cleanup
+// before os.Exit so the private server and its short socket root do not leak.
+// NTM_TEST_TMUX_ENV_OWNED marks a helper process whose caller owns its tmux
+// environment; isolation is a no-op so fake-binary contract tests stay intact.
+func IsolateTmuxTestProcess() (func() error, error) {
+	if os.Getenv("NTM_TEST_TMUX_ENV_OWNED") == "1" {
+		return func() error { return nil }, nil
+	}
+
+	dir, err := createShortTmuxTempDir()
+	if err != nil {
+		return nil, err
 	}
 
 	settings := []struct {
@@ -111,8 +163,202 @@ func IsolateTmuxTestProcess() error {
 	}
 	for _, setting := range settings {
 		if err := os.Setenv(setting.key, setting.value); err != nil {
-			return fmt.Errorf("set %s for tmux test isolation: %w", setting.key, err)
+			removeErr := os.RemoveAll(dir)
+			return nil, errors.Join(
+				fmt.Errorf("set %s for tmux test isolation: %w", setting.key, err),
+				removeErr,
+			)
 		}
+	}
+	cleanupBinary := findSystemTmuxBinary()
+
+	var cleanupOnce sync.Once
+	var cleanupErr error
+	cleanup := func() error {
+		cleanupOnce.Do(func() {
+			if cleanupBinary != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+				cmd := exec.CommandContext(ctx, cleanupBinary, "kill-server")
+				cmd.Env = isolatedTmuxEnvironment(dir)
+				output, err := cmd.CombinedOutput()
+				contextErr := ctx.Err()
+				cancel()
+				if err != nil {
+					wrapped := fmt.Errorf(
+						"%s kill-server: %w: %s",
+						cleanupBinary,
+						errors.Join(err, contextErr),
+						strings.TrimSpace(string(output)),
+					)
+					class := tmux.ClassifyCommandError(wrapped)
+					if class.Kind != tmux.CommandErrorNoServer {
+						cleanupErr = fmt.Errorf("stop isolated tmux server: %w", wrapped)
+					}
+				}
+			}
+			cleanupErr = errors.Join(cleanupErr, os.RemoveAll(dir))
+		})
+		return cleanupErr
+	}
+	return cleanup, nil
+}
+
+func findSystemTmuxBinary() string {
+	candidates := []string{
+		"/usr/bin/tmux",
+		"/usr/local/bin/tmux",
+		"/opt/homebrew/bin/tmux",
+		"/bin/tmux",
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".local", "bin", "tmux"))
+	}
+	for _, candidate := range candidates {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path
+		}
+	}
+	if strings.TrimSpace(os.Getenv("NTM_TMUX_BINARY")) == "" {
+		if path, err := exec.LookPath("tmux"); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+func isolatedTmuxEnvironment(root string) []string {
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "TMUX", "TMUX_PANE", "TMUX_TMPDIR":
+			continue
+		default:
+			env = append(env, entry)
+		}
+	}
+	return append(env, "TMUX=", "TMUX_PANE=", "TMUX_TMPDIR="+root)
+}
+
+// ShortTmuxTempDir creates a per-test TMUX_TMPDIR whose projected default
+// socket pathname fits conservative Unix-domain socket limits. Set
+// NTM_TMUX_TEST_TMPDIR to put these roots on an explicitly chosen filesystem.
+// The directory and all tmux artifacts beneath it are removed during cleanup.
+func ShortTmuxTempDir(t *testing.T) string {
+	t.Helper()
+
+	dir, err := createShortTmuxTempDir()
+	if err != nil {
+		t.Fatalf("create short tmux temp directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove short tmux temp directory %q: %v", dir, err)
+		}
+	})
+	return dir
+}
+
+func createShortTmuxTempDir() (string, error) {
+	return createShortTmuxTempDirFromCandidates(shortTmuxTempDirCandidates())
+}
+
+func createShortTmuxTempDirFromCandidates(candidates []tmuxTempDirCandidate) (string, error) {
+	var failures []string
+	for _, candidate := range candidates {
+		if err := validateTmuxTempBase(candidate.path); err != nil {
+			failures = append(failures, fmt.Sprintf("%s %q: %v", candidate.source, candidate.path, err))
+			continue
+		}
+
+		dir, err := os.MkdirTemp(candidate.path, tmuxTempDirPattern)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s %q: %v", candidate.source, candidate.path, err))
+			continue
+		}
+		if err := validateTmuxSocketRoot(dir); err != nil {
+			cleanupErr := os.Remove(dir)
+			if cleanupErr != nil {
+				err = fmt.Errorf("%w (also could not remove rejected directory %q: %v)", err, dir, cleanupErr)
+			}
+			failures = append(failures, fmt.Sprintf("%s %q: %v", candidate.source, candidate.path, err))
+			continue
+		}
+		return dir, nil
+	}
+
+	if len(failures) == 0 {
+		failures = append(failures, "no candidate directories were configured")
+	}
+	return "", fmt.Errorf(
+		"create tmux test directory: no writable base can produce a portable socket path; "+
+			"set %s to a short writable directory; attempts: %s",
+		tmuxTestTempBaseEnv,
+		strings.Join(failures, "; "),
+	)
+}
+
+func shortTmuxTempDirCandidates() []tmuxTempDirCandidate {
+	raw := []tmuxTempDirCandidate{
+		{source: tmuxTestTempBaseEnv, path: os.Getenv(tmuxTestTempBaseEnv)},
+	}
+	if runtime.GOOS != "windows" {
+		raw = append(raw,
+			tmuxTempDirCandidate{source: "portable fallback", path: "/var/tmp"},
+			tmuxTempDirCandidate{source: "portable fallback", path: "/tmp"},
+		)
+	}
+	raw = append(raw, tmuxTempDirCandidate{source: "os.TempDir fallback", path: os.TempDir()})
+
+	seen := make(map[string]struct{}, len(raw))
+	candidates := make([]tmuxTempDirCandidate, 0, len(raw))
+	for _, candidate := range raw {
+		if candidate.path == "" {
+			continue
+		}
+		path, err := filepath.Abs(candidate.path)
+		if err == nil {
+			candidate.path = path
+		} else {
+			candidate.path = filepath.Clean(candidate.path)
+		}
+		key := candidate.path
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+	return candidates
+}
+
+func validateTmuxTempBase(base string) error {
+	// Go currently replaces '*' with a ten-digit random suffix. Reserving
+	// twenty digits avoids depending on that implementation detail.
+	projectedRoot := filepath.Join(base, "ntm-tmux-test-18446744073709551615")
+	return validateTmuxSocketRoot(projectedRoot)
+}
+
+func validateTmuxSocketRoot(root string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
+	// tmux's default socket is $TMUX_TMPDIR/tmux-$UID/default. Reserve the
+	// largest decimal uint64 UID even though supported Unix systems use
+	// narrower uid_t values.
+	projected := filepath.Join(root, "tmux-18446744073709551615", "default")
+	length := len([]byte(projected)) + 1 // sockaddr_un requires a trailing NUL.
+	if length > maxTmuxSocketPathBytes {
+		return fmt.Errorf(
+			"projected tmux socket path %q needs %d bytes (portable limit %d)",
+			projected,
+			length,
+			maxTmuxSocketPathBytes,
+		)
 	}
 	return nil
 }

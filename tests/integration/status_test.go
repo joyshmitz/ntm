@@ -22,13 +22,18 @@ func TestMain(m *testing.M) {
 		return
 	}
 
-	// Clean up any orphan test sessions from previous runs
-	testutil.KillAllTestSessionsSilent()
+	cleanupTmux, err := testutil.IsolateTmuxTestProcess()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "isolate integration tmux tests: %v\n", err)
+		os.Exit(1)
+	}
 
 	code := m.Run()
 
-	// Clean up after all tests complete
-	testutil.KillAllTestSessionsSilent()
+	if err := cleanupTmux(); err != nil {
+		fmt.Fprintf(os.Stderr, "clean up isolated integration tmux: %v\n", err)
+		code = 1
+	}
 
 	os.Exit(code)
 }

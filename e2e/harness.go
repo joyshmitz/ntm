@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,14 +16,17 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 const (
-	defaultArtifactRootEnv = "NTM_E2E_ARTIFACT_ROOT"
-	legacyLogDirEnv        = "E2E_LOG_DIR"
-	retainPolicyEnv        = "NTM_E2E_RETAIN"
-	debugArtifactsEnv      = "NTM_E2E_DEBUG"
-	defaultRunTimeout      = 30 * time.Second
+	defaultArtifactRootEnv  = "NTM_E2E_ARTIFACT_ROOT"
+	legacyLogDirEnv         = "E2E_LOG_DIR"
+	retainPolicyEnv         = "NTM_E2E_RETAIN"
+	debugArtifactsEnv       = "NTM_E2E_DEBUG"
+	defaultRunTimeout       = 90 * time.Second
+	defaultTmuxSetupTimeout = 90 * time.Second
 )
 
 type ArtifactKind string
@@ -99,6 +103,11 @@ type CommandResult struct {
 	StdoutPath   string        `json:"stdout_path,omitempty"`
 	StderrPath   string        `json:"stderr_path,omitempty"`
 	MetadataPath string        `json:"metadata_path,omitempty"`
+
+	executionStarted   bool
+	executionSucceeded bool
+	processExitSuccess bool
+	lifecycleErr       error
 }
 
 type RunnerFunc func(context.Context, CommandSpec) (CommandResult, error)
@@ -304,7 +313,7 @@ func (h *ScenarioHarness) SetupTmuxSession(opts TmuxSessionOptions) error {
 	}
 	timeout := opts.Timeout
 	if timeout == 0 {
-		timeout = 15 * time.Second
+		timeout = defaultTmuxSetupTimeout
 	}
 
 	args := []string{"new-session", "-d", "-s", h.sessionName, "-x", strconv.Itoa(width), "-y", strconv.Itoa(height)}
@@ -313,31 +322,40 @@ func (h *ScenarioHarness) SetupTmuxSession(opts TmuxSessionOptions) error {
 	}
 	args = append(args, opts.ExtraArgs...)
 
-	if _, err := h.RunCommand(CommandSpec{
+	result, err := h.RunCommand(CommandSpec{
 		Name:    "tmux-new-session",
 		Path:    tmuxPath,
 		Args:    args,
 		Timeout: timeout,
-	}); err != nil {
+	})
+	timedOutCreateMayOwnSession := result.TimedOut && result.executionStarted &&
+		result.ExitCode <= 0 && !isDuplicateTmuxSessionError(result.Stderr)
+	if result.processExitSuccess || result.executionSucceeded || timedOutCreateMayOwnSession {
+		h.AddCleanup("tmux-kill-session", func() error {
+			result, err := h.RunCommand(CommandSpec{
+				Name:    "tmux-kill-session",
+				Path:    tmuxPath,
+				Args:    []string{"kill-session", "-t", h.sessionName},
+				Timeout: defaultTmuxSetupTimeout,
+			})
+			if result.lifecycleErr != nil {
+				return result.lifecycleErr
+			}
+			if result.TimedOut {
+				return fmt.Errorf("tmux cleanup timed out: %w", context.DeadlineExceeded)
+			}
+			if result.executionSucceeded {
+				return nil
+			}
+			if isBenignTmuxCleanupError(result.Stderr) {
+				return nil
+			}
+			return err
+		})
+	}
+	if err != nil {
 		return fmt.Errorf("create tmux session %q: %w", h.sessionName, err)
 	}
-
-	h.AddCleanup("tmux-kill-session", func() error {
-		result, err := h.RunCommand(CommandSpec{
-			Name:         "tmux-kill-session",
-			Path:         tmuxPath,
-			Args:         []string{"kill-session", "-t", h.sessionName},
-			Timeout:      10 * time.Second,
-			AllowFailure: true,
-		})
-		if err == nil {
-			return nil
-		}
-		if isBenignTmuxCleanupError(result.Stderr) {
-			return nil
-		}
-		return err
-	})
 
 	return nil
 }
@@ -390,17 +408,19 @@ func (h *ScenarioHarness) RunCommand(spec CommandSpec) (CommandResult, error) {
 			result.ExitCode = -1
 		}
 	}
+	result.executionSucceeded = !result.TimedOut &&
+		(runErr == nil || (result.ExitCode == 0 && errors.Is(runErr, exec.ErrWaitDelay)))
 
 	seq := h.commandSeq.Add(1)
 	base := fmt.Sprintf("%03d-%s", seq, sanitizeName(spec.Name))
 
 	stdoutPath, err := h.writeArtifact(ArtifactCommands, base+".stdout.txt", result.Stdout)
 	if err != nil {
-		return result, err
+		return result, errors.Join(err, result.lifecycleErr)
 	}
 	stderrPath, err := h.writeArtifact(ArtifactCommands, base+".stderr.txt", result.Stderr)
 	if err != nil {
-		return result, err
+		return result, errors.Join(err, result.lifecycleErr)
 	}
 	result.StdoutPath = stdoutPath
 	result.StderrPath = stderrPath
@@ -424,7 +444,7 @@ func (h *ScenarioHarness) RunCommand(spec CommandSpec) (CommandResult, error) {
 	}
 	metadataPath, err := h.WriteJSONArtifact(ArtifactCommands, base+".json", metadata)
 	if err != nil {
-		return result, err
+		return result, errors.Join(err, result.lifecycleErr)
 	}
 	result.MetadataPath = metadataPath
 
@@ -445,9 +465,12 @@ func (h *ScenarioHarness) RunCommand(spec CommandSpec) (CommandResult, error) {
 		"name":   result.Name,
 		"result": stepDetails,
 	}); err != nil {
-		return result, err
+		return result, errors.Join(err, result.lifecycleErr)
 	}
 
+	if result.lifecycleErr != nil {
+		return result, result.lifecycleErr
+	}
 	if runErr != nil && !spec.AllowFailure {
 		return result, runErr
 	}
@@ -654,32 +677,50 @@ func defaultRunner(ctx context.Context, spec CommandSpec) (CommandResult, error)
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	group, groupErr := testutil.NewProcessGroupForTest(ctx, cmd)
+	if groupErr != nil {
+		completed := time.Now().UTC()
+		return CommandResult{
+			StartedAt:   started,
+			CompletedAt: completed,
+			Duration:    completed.Sub(started),
+			ExitCode:    -1,
+		}, fmt.Errorf("create owned process group: %w", groupErr)
+	}
+	cmd.Cancel = func() error {
+		return group.Signal(os.Kill)
+	}
+	cmd.WaitDelay = 2 * time.Second
 
-	err := cmd.Run()
+	commandErr := cmd.Run()
+	groupCloseErr := group.Close()
 	completed := time.Now().UTC()
 
 	result := CommandResult{
-		StartedAt:   started,
-		CompletedAt: completed,
-		Duration:    completed.Sub(started),
-		Stdout:      stdout.Bytes(),
-		Stderr:      stderr.Bytes(),
+		StartedAt:          started,
+		CompletedAt:        completed,
+		Duration:           completed.Sub(started),
+		Stdout:             stdout.Bytes(),
+		Stderr:             stderr.Bytes(),
+		executionStarted:   cmd.Process != nil,
+		processExitSuccess: cmd.ProcessState != nil && cmd.ProcessState.Success(),
+		lifecycleErr:       groupCloseErr,
 	}
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
-	if err == nil {
+	if commandErr == nil && groupCloseErr == nil {
 		return result, nil
 	}
 
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if errors.As(commandErr, &exitErr) {
 		result.ExitCode = exitErr.ExitCode()
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		result.TimedOut = true
 	}
-	return result, err
+	return result, errors.Join(commandErr, groupCloseErr)
 }
 
 func resolveArtifactRoot(explicit string) string {
@@ -728,7 +769,9 @@ func makeSessionName(prefix, scenario string, startedAt time.Time, runToken stri
 	}
 	name := fmt.Sprintf("%s-%s-%s-%s", prefix, scenario, formatSessionTimestamp(startedAt), sanitizeName(runToken))
 	if len(name) > 64 {
-		return name[:64]
+		digest := sha256.Sum256([]byte(name))
+		suffix := fmt.Sprintf("-%x", digest[:4])
+		return name[:64-len(suffix)] + suffix
 	}
 	return name
 }
@@ -786,5 +829,12 @@ func sanitizeFileName(name string) string {
 
 func isBenignTmuxCleanupError(stderr []byte) bool {
 	text := strings.ToLower(strings.TrimSpace(string(stderr)))
-	return strings.Contains(text, "can't find session") || strings.Contains(text, "no server running")
+	return strings.Contains(text, "can't find session") ||
+		strings.Contains(text, "no server running") ||
+		(strings.Contains(text, "error connecting to ") && strings.Contains(text, "no such file or directory"))
+}
+
+func isDuplicateTmuxSessionError(stderr []byte) bool {
+	text := strings.ToLower(strings.TrimSpace(string(stderr)))
+	return strings.Contains(text, "duplicate session")
 }

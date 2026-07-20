@@ -18,28 +18,36 @@ import (
 
 func TestRealTmuxDashboardE2E(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
-	t.Setenv("TMPDIR", "/tmp")
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("TMUX", "")
-	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	t.Setenv("TMUX_TMPDIR", testutil.ShortTmuxTempDir(t))
 
 	projectDir := t.TempDir()
 	session := fmt.Sprintf("ntm_tui_e2e_%d", time.Now().UnixNano())
-	if err := tmux.CreateSession(session, projectDir); err != nil {
-		t.Fatalf("create isolated tmux session: %v", err)
-	}
 	t.Cleanup(func() {
-		if err := tmux.KillSession(session); err != nil && tmux.SessionExists(session) {
-			t.Logf("kill isolated tmux session: %v", err)
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancelCleanup()
+		if _, err := tmux.NewClient("").RunContext(cleanupCtx, "kill-server"); err != nil &&
+			tmux.ClassifyCommandError(err).Kind != tmux.CommandErrorNoServer {
+			t.Errorf("stop isolated tmux server: %v", err)
 		}
 	})
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), 8*time.Second)
+	createErr := tmux.CreateSessionContext(createCtx, session, projectDir)
+	cancelCreate()
+	if createErr != nil {
+		t.Fatalf("create isolated tmux session: %v", createErr)
+	}
 
 	initial := waitForDashboardPaneCount(t, session, 1)
 	codexID := initial[0].ID
-	if err := tmux.SetPaneTitle(codexID, session+"__cod_1"); err != nil {
+	titleCtx, cancelTitle := context.WithTimeout(t.Context(), 8*time.Second)
+	err := tmux.SetPaneTitleContext(titleCtx, codexID, session+"__cod_1")
+	cancelTitle()
+	if err != nil {
 		t.Fatalf("title codex pane: %v", err)
 	}
 	claudeID, err := tmux.DefaultClient.Run(
@@ -50,7 +58,10 @@ func TestRealTmuxDashboardE2E(t *testing.T) {
 		t.Fatalf("create second tmux window: %v", err)
 	}
 	claudeID = strings.TrimSpace(claudeID)
-	if err := tmux.SetPaneTitle(claudeID, session+"__cc_1"); err != nil {
+	titleCtx, cancelTitle = context.WithTimeout(t.Context(), 8*time.Second)
+	err = tmux.SetPaneTitleContext(titleCtx, claudeID, session+"__cc_1")
+	cancelTitle()
+	if err != nil {
 		t.Fatalf("title claude pane: %v", err)
 	}
 
@@ -106,7 +117,10 @@ func TestRealTmuxDashboardE2E(t *testing.T) {
 		t.Fatalf("split real tmux pane: %v", err)
 	}
 	newPaneID = strings.TrimSpace(newPaneID)
-	if err := tmux.SetPaneTitle(newPaneID, session+"__agy_1"); err != nil {
+	titleCtx, cancelTitle = context.WithTimeout(t.Context(), 8*time.Second)
+	err = tmux.SetPaneTitleContext(titleCtx, newPaneID, session+"__agy_1")
+	cancelTitle()
+	if err != nil {
 		t.Fatalf("title added pane: %v", err)
 	}
 	waitForDashboardPaneCount(t, session, 3)
@@ -120,7 +134,10 @@ func TestRealTmuxDashboardE2E(t *testing.T) {
 	m.paneStatus[newPaneID] = PaneStatus{State: "error", ContextPercent: 99}
 	assertRealDashboardRows(t, m, map[string]string{codexID: "working", claudeID: "idle", newPaneID: "error"})
 
-	if err := tmux.KillPane(newPaneID); err != nil {
+	killCtx, cancelKill := context.WithTimeout(t.Context(), 8*time.Second)
+	err = tmux.KillPaneContext(killCtx, newPaneID)
+	cancelKill()
+	if err != nil {
 		t.Fatalf("remove added real tmux pane: %v", err)
 	}
 	waitForDashboardPaneCount(t, session, 2)
@@ -166,15 +183,19 @@ func fetchRealDashboardSession(t *testing.T, m Model) Model {
 
 func waitForDashboardPaneCount(t *testing.T, session string, want int) []tmux.Pane {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var last []tmux.Pane
 	var lastErr error
-	for time.Now().Before(deadline) {
-		last, lastErr = tmux.GetPanes(session)
+	for ctx.Err() == nil {
+		last, lastErr = tmux.GetPanesContext(ctx, session)
 		if lastErr == nil && len(last) == want {
 			return last
 		}
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
 	t.Fatalf("session %s pane count=%d, want %d (last error: %v; panes: %+v)", session, len(last), want, lastErr, last)
 	return nil
