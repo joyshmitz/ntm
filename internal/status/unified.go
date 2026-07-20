@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"hash/fnv"
 	"sort"
 	"strings"
 	"sync"
@@ -15,6 +16,24 @@ import (
 // activity, prompt, and error detection into a unified status check.
 type UnifiedDetector struct {
 	config DetectorConfig
+
+	// paneContentMu guards paneContent. Long-lived detectors (the pipeline
+	// executor's wait loop, watch loops) call Detect repeatedly for the same
+	// pane, which lets us derive a PANE-LOCAL activity signal from capture
+	// changes. tmux itself cannot provide one: pane_last_activity does not
+	// exist (tmux <= 3.5a renders it as ""), and #{window_activity} is
+	// window-scoped, so a busy neighbor pane in the same window keeps a
+	// finished pane looking eternally active — the wait:completion timeout
+	// direction of ntm#213.
+	paneContentMu sync.Mutex
+	paneContent   map[string]paneContentObservation
+}
+
+// paneContentObservation remembers the last captured content fingerprint for
+// a pane and when that fingerprint was first seen.
+type paneContentObservation struct {
+	fingerprint uint64
+	changedAt   time.Time
 }
 
 // NewDetector creates a new UnifiedDetector with default configuration
@@ -269,6 +288,29 @@ func looksLikeIdle(output string) bool {
 	return false
 }
 
+// observePaneContent folds a freshly captured pane output into the detector's
+// per-pane content history and returns the pane-local activity estimate: the
+// time the captured content last changed as seen by this detector instance.
+// hasHistory is false for the first observation of a pane, where a single
+// capture carries no change information.
+func (d *UnifiedDetector) observePaneContent(paneID, output string, observedAt time.Time) (contentChangedAt time.Time, hasHistory bool) {
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(output))
+	fingerprint := hasher.Sum64()
+
+	d.paneContentMu.Lock()
+	defer d.paneContentMu.Unlock()
+	if d.paneContent == nil {
+		d.paneContent = make(map[string]paneContentObservation)
+	}
+	prev, seen := d.paneContent[paneID]
+	if seen && prev.fingerprint == fingerprint {
+		return prev.changedAt, true
+	}
+	d.paneContent[paneID] = paneContentObservation{fingerprint: fingerprint, changedAt: observedAt}
+	return observedAt, seen
+}
+
 // Detect returns the current status of a single pane.
 // Detection priority: error > idle > working > unknown
 func (d *UnifiedDetector) Detect(paneID string) (AgentStatus, error) {
@@ -302,6 +344,19 @@ func (d *UnifiedDetector) Detect(paneID string) (AgentStatus, error) {
 		}
 	}
 	status.LastOutput = truncateOutput(output, d.config.OutputPreviewLength)
+
+	// Pane-local activity refinement (ntm#213): #{window_activity} is the best
+	// signal tmux offers, but it is window-scoped — any neighbor pane's output
+	// refreshes it, so a finished pane in a busy window never looks idle and
+	// wait:completion times out with the answer sitting in the pane. When this
+	// detector has observed the same pane before, the time its captured
+	// content last changed is a strictly pane-local activity bound; use it
+	// when it is older than the window-scoped timestamp. Agent-specific
+	// spinner classifiers still outrank velocity in determineState, so a
+	// quiet-but-working pane (e.g. Claude thinking) is unaffected.
+	if contentChangedAt, hasHistory := d.observePaneContent(paneID, output, status.UpdatedAt); hasHistory && contentChangedAt.Before(status.LastActive) {
+		status.LastActive = contentChangedAt
+	}
 
 	// Try to get pane details for agent type detection
 	// We'll parse the pane title from output if needed

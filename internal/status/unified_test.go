@@ -738,6 +738,120 @@ func TestDetectAllWithMultiplePanes(t *testing.T) {
 	}
 }
 
+// TestObservePaneContent covers the pane-local content-change tracker that
+// refines window-scoped activity (ntm#213).
+func TestObservePaneContent(t *testing.T) {
+	t.Parallel()
+
+	d := NewDetector()
+	base := time.Now()
+
+	// First observation: no history yet.
+	changedAt, hasHistory := d.observePaneContent("%1", "output-a", base)
+	if hasHistory {
+		t.Fatal("first observation must not report history")
+	}
+	if !changedAt.Equal(base) {
+		t.Fatalf("first observation changedAt = %v, want %v", changedAt, base)
+	}
+
+	// Unchanged content: changedAt must stay pinned to the first sighting.
+	changedAt, hasHistory = d.observePaneContent("%1", "output-a", base.Add(10*time.Second))
+	if !hasHistory || !changedAt.Equal(base) {
+		t.Fatalf("stable content: changedAt=%v hasHistory=%v, want %v/true", changedAt, hasHistory, base)
+	}
+
+	// Changed content: changedAt moves to the new observation time.
+	later := base.Add(20 * time.Second)
+	changedAt, hasHistory = d.observePaneContent("%1", "output-b", later)
+	if !hasHistory || !changedAt.Equal(later) {
+		t.Fatalf("changed content: changedAt=%v hasHistory=%v, want %v/true", changedAt, hasHistory, later)
+	}
+
+	// Panes are tracked independently.
+	otherBase := base.Add(30 * time.Second)
+	changedAt, hasHistory = d.observePaneContent("%2", "output-a", otherBase)
+	if hasHistory || !changedAt.Equal(otherBase) {
+		t.Fatalf("other pane: changedAt=%v hasHistory=%v, want %v/false", changedAt, hasHistory, otherBase)
+	}
+}
+
+// TestDetectPaneLocalActivityIgnoresNoisyNeighbor reproduces the #213 timeout
+// direction: tmux's #{window_activity} is refreshed by ANY pane in the
+// window, so a finished (static) pane in a window with a chatty neighbor
+// looked eternally active and wait:completion never resolved. With per-pane
+// content tracking, repeated Detect calls must report a LastActive for the
+// static pane that predates the window-scoped activity timestamp.
+func TestDetectPaneLocalActivityIgnoresNoisyNeighbor(t *testing.T) {
+	if !tmuxAvailable() {
+		t.Skip("tmux not available")
+	}
+
+	sessionName := createTestSession(t)
+
+	// Static target pane: prints one marker, then sleeps (no further output).
+	staticCmd := exec.Command(tmux.BinaryPath(), "split-window", "-t", sessionName,
+		"sh", "-c", "echo NTM213_STATIC_DONE; exec sleep 300")
+	if out, err := staticCmd.CombinedOutput(); err != nil {
+		t.Fatalf("create static pane: %v: %s", err, out)
+	}
+	// Noisy neighbor in the SAME window keeps #{window_activity} fresh.
+	noisyCmd := exec.Command(tmux.BinaryPath(), "split-window", "-t", sessionName,
+		"sh", "-c", "while true; do echo tick; sleep 0.2; done")
+	if out, err := noisyCmd.CombinedOutput(); err != nil {
+		t.Fatalf("create noisy pane: %v: %s", err, out)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Locate the static pane by its marker command.
+	listOut, err := exec.Command(tmux.BinaryPath(), "list-panes", "-t", sessionName,
+		"-F", "#{pane_id} #{pane_start_command}").Output()
+	if err != nil {
+		t.Fatalf("list panes: %v", err)
+	}
+	staticPane := ""
+	for _, line := range strings.Split(strings.TrimSpace(string(listOut)), "\n") {
+		if strings.Contains(line, "NTM213_STATIC_DONE") {
+			staticPane = strings.Fields(line)[0]
+			break
+		}
+	}
+	if staticPane == "" {
+		t.Fatalf("static pane not found in:\n%s", listOut)
+	}
+
+	d := NewDetector()
+	first, err := d.Detect(staticPane)
+	if err != nil {
+		t.Fatalf("first Detect: %v", err)
+	}
+
+	// Let the neighbor churn well past the first observation.
+	time.Sleep(1500 * time.Millisecond)
+
+	second, err := d.Detect(staticPane)
+	if err != nil {
+		t.Fatalf("second Detect: %v", err)
+	}
+
+	windowActivity, err := tmux.GetPaneActivity(staticPane)
+	if err != nil {
+		t.Fatalf("window activity: %v", err)
+	}
+
+	// The window-scoped signal must be fresh (neighbor output within ~1s)...
+	if time.Since(windowActivity) > 5*time.Second {
+		t.Skipf("neighbor did not keep window activity fresh (age %v); cannot exercise the refinement", time.Since(windowActivity))
+	}
+	// ...while the static pane's reported activity is pinned to the first
+	// observation of its unchanged content, i.e. strictly older than the
+	// noisy window-scoped timestamp.
+	if !second.LastActive.Before(windowActivity) {
+		t.Fatalf("static pane LastActive=%v not before window activity=%v; pane-local refinement missing (first observation was at %v)",
+			second.LastActive, windowActivity, first.UpdatedAt)
+	}
+}
+
 // TestLooksLikeIdle tests the heuristic idle detection function
 func TestLooksLikeIdle(t *testing.T) {
 	tests := []struct {
