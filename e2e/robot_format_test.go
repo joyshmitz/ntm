@@ -13,16 +13,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -462,6 +467,235 @@ func TestE2ERobotCapabilitiesBuiltBinaryBudgets(t *testing.T) {
 	}
 	assertInvalidFilter(t, "--robot-capabilities", "--capability-command=not-a-command", "--capability-compact")
 	assertInvalidFilter(t, "--robot-capabilities", "--capability-category=not-a-category", "--capability-compact")
+}
+
+func validateAgentMailHealthCheckRequest(r *http.Request) error {
+	var request agentmail.JSONRPCRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		return fmt.Errorf("decode JSON-RPC request: %w", err)
+	}
+	if request.JSONRPC != "2.0" || request.Method != "tools/call" {
+		return fmt.Errorf("unexpected JSON-RPC health request: version=%q method=%q", request.JSONRPC, request.Method)
+	}
+	params, ok := request.Params.(map[string]any)
+	if !ok || params["name"] != "health_check" {
+		return fmt.Errorf("unexpected Agent Mail tool params: %v", request.Params)
+	}
+	return nil
+}
+
+func TestE2EMailInboxPermanentUnauthorizedFailsFast(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "mail-inbox-unauthorized")
+
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := validateAgentMailHealthCheckRequest(r); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requestCount.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"detail":"unauthorized"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	env := mergeRobotProcessEnv(fixture.env, map[string]string{
+		"AGENT_MAIL_URL":   server.URL + "/mcp/",
+		"AGENT_MAIL_TOKEN": "invalid-e2e-token",
+	})
+	const deadline = 3 * time.Second
+	started := time.Now()
+	process := runBuiltRobotProcessWithin(t, deadline, fixture.ntmPath, fixture.projectDir, env,
+		"mail", "inbox",
+	)
+	elapsed := time.Since(started)
+
+	if process.exitCode == 0 {
+		t.Fatalf("mail inbox exited zero for permanent HTTP 401: stdout=%s stderr=%s", process.stdout, process.stderr)
+	}
+	if elapsed >= deadline {
+		t.Fatalf("mail inbox permanent HTTP 401 took %s, require less than %s", elapsed, deadline)
+	}
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("mail inbox permanent HTTP 401 made %d requests, want exactly 1", got)
+	}
+	output := strings.ToLower(string(process.stdout) + "\n" + string(process.stderr))
+	if !strings.Contains(output, "http 401") || !strings.Contains(output, "unauthorized") || !strings.Contains(output, "agent mail server not available") {
+		t.Fatalf("mail inbox output lost permanent failure diagnostic: stdout=%s stderr=%s", process.stdout, process.stderr)
+	}
+}
+
+func TestE2EMailReadPermanentUnauthorizedSurfacesDiagnostic(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "mail-read-unauthorized")
+
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := validateAgentMailHealthCheckRequest(r); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+
+	env := mergeRobotProcessEnv(fixture.env, map[string]string{
+		"AGENT_MAIL_URL":   server.URL + "/mcp/",
+		"AGENT_MAIL_TOKEN": "invalid-e2e-token",
+	})
+	process := runBuiltRobotProcessWithin(t, 3*time.Second, fixture.ntmPath, fixture.projectDir, env,
+		"mail", "read", fixture.session, "1", "--agent", "BlueLake",
+	)
+
+	if process.exitCode == 0 {
+		t.Fatalf("mail read exited zero for permanent HTTP 401: stdout=%s stderr=%s", process.stdout, process.stderr)
+	}
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("mail read permanent HTTP 401 made %d requests, want exactly 1", got)
+	}
+	output := strings.ToLower(string(process.stdout) + "\n" + string(process.stderr))
+	if !strings.Contains(output, "http 401") || !strings.Contains(output, "unauthorized") || !strings.Contains(output, "agent mail server not available") {
+		t.Fatalf("mail read output lost permanent failure diagnostic: stdout=%s stderr=%s", process.stdout, process.stderr)
+	}
+}
+
+func TestE2EMailSendPermanentUnauthorizedSurfacesDiagnostic(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "mail-send-unauthorized")
+
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := validateAgentMailHealthCheckRequest(r); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+
+	env := mergeRobotProcessEnv(fixture.env, map[string]string{
+		"AGENT_MAIL_URL":   server.URL + "/mcp/",
+		"AGENT_MAIL_TOKEN": "invalid-e2e-token",
+	})
+	process := runBuiltRobotProcessWithin(t, 3*time.Second, fixture.ntmPath, fixture.projectDir, env,
+		"mail", "send", fixture.session, "release diagnostic", "--to", "BlueLake",
+	)
+
+	if process.exitCode == 0 {
+		t.Fatalf("mail send exited zero for permanent HTTP 401: stdout=%s stderr=%s", process.stdout, process.stderr)
+	}
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("mail send permanent HTTP 401 made %d requests, want exactly 1", got)
+	}
+	output := strings.ToLower(string(process.stdout) + "\n" + string(process.stderr))
+	if !strings.Contains(output, "http 401") || !strings.Contains(output, "unauthorized") || !strings.Contains(output, "agent mail server not available") {
+		t.Fatalf("mail send output lost permanent failure diagnostic: stdout=%s stderr=%s", process.stdout, process.stderr)
+	}
+}
+
+func TestE2EMailInboxTransientExhaustionIsBounded(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "mail-inbox-transient-exhaustion")
+
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+
+	env := mergeRobotProcessEnv(fixture.env, map[string]string{
+		"AGENT_MAIL_URL": server.URL + "/mcp/",
+	})
+	const deadline = 3 * time.Second
+	started := time.Now()
+	process := runBuiltRobotProcessWithin(t, deadline, fixture.ntmPath, fixture.projectDir, env,
+		"mail", "inbox",
+	)
+	elapsed := time.Since(started)
+
+	if process.exitCode == 0 {
+		t.Fatalf("mail inbox exited zero after transient retry exhaustion: stdout=%s stderr=%s", process.stdout, process.stderr)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("mail inbox transient retry exhaustion took %s, require less than 2s", elapsed)
+	}
+	if got := requestCount.Load(); got != int32(3) {
+		t.Fatalf("mail inbox transient retry exhaustion made %d requests, want exactly 3", got)
+	}
+	output := strings.ToLower(string(process.stdout) + "\n" + string(process.stderr))
+	if !strings.Contains(output, "http 503") || !strings.Contains(output, "agent mail server not available") {
+		t.Fatalf("mail inbox output lost terminal transient diagnostic: stdout=%s stderr=%s", process.stdout, process.stderr)
+	}
+}
+
+func TestE2EMailInboxRecoversFromTransientFailure(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "mail-inbox-transient-recovery")
+
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := requestCount.Add(1)
+		if call == 1 {
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		var request agentmail.JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var result json.RawMessage
+		switch request.Method {
+		case "tools/call":
+			params, ok := request.Params.(map[string]any)
+			if !ok || params["name"] != "health_check" {
+				http.Error(w, "unexpected tool call", http.StatusBadRequest)
+				return
+			}
+			result = json.RawMessage(`{"status":"ok"}`)
+		case "resources/read":
+			params, ok := request.Params.(map[string]any)
+			expectedURI := "resource://agents/" + url.PathEscape(fixture.projectDir)
+			if !ok || params["uri"] != expectedURI {
+				http.Error(w, "unexpected resource URI", http.StatusBadRequest)
+				return
+			}
+			result = json.RawMessage(`{"contents":[]}`)
+		default:
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      request.ID,
+			Result:  result,
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	env := mergeRobotProcessEnv(fixture.env, map[string]string{
+		"AGENT_MAIL_URL": server.URL + "/mcp/",
+	})
+	process := runBuiltRobotProcessWithin(t, 3*time.Second, fixture.ntmPath, fixture.projectDir, env,
+		"mail", "inbox",
+	)
+
+	if process.exitCode != 0 {
+		t.Fatalf("mail inbox did not recover from a transient health failure: stdout=%s stderr=%s", process.stdout, process.stderr)
+	}
+	if got := requestCount.Load(); got != 3 {
+		t.Fatalf("mail inbox transient recovery made %d requests, want two health probes and one inbox resource request", got)
+	}
+	if !strings.Contains(string(process.stdout), "Inbox empty") {
+		t.Fatalf("mail inbox recovery output = %q, want empty-inbox success", process.stdout)
+	}
 }
 
 func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {

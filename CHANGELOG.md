@@ -17,9 +17,9 @@ No unreleased changes.
 
 ---
 
-## [v1.20.0] -- 2026-07-19 [GitHub Release]
+## [v1.20.0] -- 2026-07-21 [GitHub Release]
 
-**71 commits since v1.19.1** -- atomic agent assignment, canonical pane identity, unified robot contracts, first-class Grok Build launch support, and substantially broader real-tmux verification.
+**81 commits since v1.19.1** -- atomic agent assignment, canonical pane identity, unified robot contracts, first-class Grok Build launch support, and substantially broader real-tmux verification.
 
 ### Features
 
@@ -28,8 +28,8 @@ No unreleased changes.
 - **Fresh, confidence-scored observation.** Session state estimates carry capture time, confidence, and evidence; actuation revalidates freshness before dispatch, and coordinator auto-assignment only targets freshly observed idle agents ([65a20b55](https://github.com/Dicklesworthstone/ntm/commit/65a20b55), [1ce5e680](https://github.com/Dicklesworthstone/ntm/commit/1ce5e680), [ec20c417](https://github.com/Dicklesworthstone/ntm/commit/ec20c417)).
 - **Robot-mode contract hardening.** Commands emit one stable JSON envelope, typed failures determine process exit status, selectors are canonical, sensitive interrupt follow-ups are redacted, and discovery/capability output is more concise and truthful ([222b57da](https://github.com/Dicklesworthstone/ntm/commit/222b57da), [0bee4911](https://github.com/Dicklesworthstone/ntm/commit/0bee4911), [1a39a4da](https://github.com/Dicklesworthstone/ntm/commit/1a39a4da)).
 - **Grok Build phase one.** Added first-class `grok` configuration, CLI add plus CLI/robot/REST spawn surfaces, configured default-model and exact `--effort` forwarding, stable-process and idle-pane launch admission, process/model discovery, counts, schemas, plain Ctrl+C interrupt support, optional doctor/dependency reporting, and topology-only saved-session restore. Authenticated-TUI prompt delivery, assignment, interrupt retasking, restart, and restore-time relaunch fail closed before pane mutation ([4bcb6fef](https://github.com/Dicklesworthstone/ntm/commit/4bcb6fef)).
-- **Configurable operator approval gates.** Global and project `[assign] operator_gated_labels` extend the built-in, case-insensitive gate vocabulary without allowing a repository to remove operator protections (#223).
-- **Persistent coordinator toggles.** `coordinator enable|disable` now updates the selected config atomically, preserves unrelated content and symlink targets, serializes concurrent writers, validates digest intervals and the strict NTM schema, and reports the exact persisted values in JSON (#223).
+- **Configurable operator approval gates.** Global and project `[assign] operator_gated_labels` extend the built-in, case-insensitive gate vocabulary without allowing a repository to remove operator protections (#223) ([6761798a](https://github.com/Dicklesworthstone/ntm/commit/6761798a)).
+- **Persistent coordinator toggles.** `coordinator enable|disable` now updates the selected config atomically, preserves unrelated content and symlink targets, serializes concurrent writers, validates digest intervals and the strict NTM schema, and reports the exact persisted values in JSON (#223) ([6761798a](https://github.com/Dicklesworthstone/ntm/commit/6761798a)).
 
 ### Reliability
 
@@ -39,13 +39,19 @@ No unreleased changes.
 - Make the dependency-aware `bv --robot-plan` a mandatory automated-assignment boundary; reject command, parse, structure, blank-ID, and live-label coverage failures, replace stale triage labels with authoritative `br` state, and retain plan-only epic operator gates (#224).
 - Strictly load assignment policy from the project that owns the Beads workspace before retry, reassign, rebalance, coordinator, robot assign, robot bulk, robot spawn, watch, or distribute work. Cross-project robot and distribute commands now honor custom gates, and live distribute dispatch revalidates every eligibility field immediately before delivery.
 - Removed the unused `[health]` TOML section and made `[resilience]` the single restart/monitoring configuration. Existing `[health]` files now fail strict unknown-field validation and must be migrated; the `ntm health` command is unchanged.
+- Refuse repo-scoped hook writes through redirected `core.hooksPath`, and reject unusable worktree repositories before any pane or session mutation ([26cf34a4](https://github.com/Dicklesworthstone/ntm/commit/26cf34a4), [7d7f70d8](https://github.com/Dicklesworthstone/ntm/commit/7d7f70d8)).
+- Preserve DCG pre-send verdicts for leading-dash and bulleted command candidates (#228), rebuild and retry recognized Beads database corruption once under the guarded mutation boundary (#227), and classify pane activity from each pane's own content changes so a busy neighbor cannot pin `wait --completion` (#213) ([060e6cb3](https://github.com/Dicklesworthstone/ntm/commit/060e6cb3), [34e41a11](https://github.com/Dicklesworthstone/ntm/commit/34e41a11), [b8787274](https://github.com/Dicklesworthstone/ntm/commit/b8787274)).
+- Bound Agent Mail availability discovery to one sub-two-second deadline across lock contention, retries, and backoff; retry only transient transport, timeout, busy, 408, 425, 429, and 5xx failures; fail permanent errors after one probe; preserve cancellation state; and surface the terminal cause to CLI callers.
+- Run assignment-mutation policy preflight without unrelated projection refreshes, preserving zero-side-effect failures when selected or target-project configuration is invalid ([de487f7f](https://github.com/Dicklesworthstone/ntm/commit/de487f7f)).
 
 ### Verification And Release
 
 - Added real-tmux dashboard, assignment, reassignment, timeout, recovery, coordinator, robot bulk/spawn, watch, and distribute coverage, including process-boundary assertions for durable side effects, authoritative cross-project policy, malformed planning data, and zero-side-effect failures ([71f66f64](https://github.com/Dicklesworthstone/ntm/commit/71f66f64), [43048fa3](https://github.com/Dicklesworthstone/ntm/commit/43048fa3), [90010945](https://github.com/Dicklesworthstone/ntm/commit/90010945)).
-- Hardened DSR quality gates across macOS paths, race scheduling, terminal capability detection, tmux isolation, primary E2E, and legacy bulk E2E ([bc4f7a68](https://github.com/Dicklesworthstone/ntm/commit/bc4f7a68), [08acf37b](https://github.com/Dicklesworthstone/ntm/commit/08acf37b), [b43dff17](https://github.com/Dicklesworthstone/ntm/commit/b43dff17)).
+- Hardened DSR quality gates across macOS paths, race scheduling, terminal capability detection, private tmux-server isolation, primary E2E, and legacy bulk E2E ([bc4f7a68](https://github.com/Dicklesworthstone/ntm/commit/bc4f7a68), [08acf37b](https://github.com/Dicklesworthstone/ntm/commit/08acf37b), [b43dff17](https://github.com/Dicklesworthstone/ntm/commit/b43dff17), [5a5bdc85](https://github.com/Dicklesworthstone/ntm/commit/5a5bdc85)).
 - Kept real-tmux verification portable under long or capacity-constrained temp roots, and replaced scheduler-sensitive cancellation and worktree checks with bounded, deterministic synchronization.
 - Strict upgrade verification now accepts DSR's native macOS architecture artifacts while retaining exact legacy `darwin_all` support.
+- Added built-binary Agent Mail E2E coverage for permanent one-shot failure, bounded transient exhaustion, and successful transient recovery.
+- Added the canonical `VERSION` marker used by DSR version detection ([c727c38d](https://github.com/Dicklesworthstone/ntm/commit/c727c38d)).
 
 ---
 

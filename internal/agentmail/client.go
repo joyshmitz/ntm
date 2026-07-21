@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +35,13 @@ const (
 
 	// AvailabilityCacheTTL is how long to cache IsAvailable() results.
 	AvailabilityCacheTTL = 30 * time.Second
+
+	// availabilityProbeBudget bounds all health attempts and backoffs. Keep the
+	// probe below two seconds so optional Agent Mail discovery cannot stall CLI
+	// startup when the service is unavailable.
+	availabilityProbeBudget   = 1250 * time.Millisecond
+	availabilityProbeAttempts = 3
+	availabilityProbeBackoff  = 150 * time.Millisecond
 )
 
 // Client provides methods to interact with the Agent Mail API.
@@ -222,6 +230,12 @@ func (c *Client) IsAvailableContext(ctx context.Context) bool {
 		return c.availableCache.Load()
 	}
 
+	// One deadline covers lock contention, every attempt, and every backoff.
+	// Caller cancellation exits without changing either the cache or the last
+	// completed diagnostic.
+	probeCtx, cancelProbe := context.WithTimeout(ctx, availabilityProbeBudget)
+	defer cancelProbe()
+
 	// Acquire the health-check lock without losing caller cancellation while a
 	// concurrent probe is in flight. A plain Mutex.Lock would make the context
 	// API wait for that unrelated probe even after its own deadline expired.
@@ -229,9 +243,10 @@ func (c *Client) IsAvailableContext(ctx context.Context) bool {
 		timer := time.NewTimer(5 * time.Millisecond)
 		select {
 		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
+			timer.Stop()
+			return false
+		case <-probeCtx.Done():
+			timer.Stop()
 			return false
 		case <-timer.C:
 		}
@@ -246,20 +261,15 @@ func (c *Client) IsAvailableContext(ctx context.Context) bool {
 	if cacheTime > 0 && time.Now().Unix()-cacheTime < int64(AvailabilityCacheTTL.Seconds()) {
 		return c.availableCache.Load()
 	}
-
-	// Perform the health check with a bounded transient-failure retry: a
-	// remote or briefly-hiccuping Agent Mail server should not be branded
-	// unavailable (and cached as such) off a single failed probe. Caller
-	// cancellation aborts immediately and, as before, is never cached.
-	const availabilityProbeAttempts = 3
-	const availabilityProbeBackoff = 150 * time.Millisecond
+	if probeCtx.Err() != nil {
+		return false
+	}
 
 	var err error
 	available := false
+probeLoop:
 	for attempt := 1; attempt <= availabilityProbeAttempts; attempt++ {
-		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		_, err = c.HealthCheck(probeCtx)
-		cancel()
 		if ctx.Err() != nil {
 			return false
 		}
@@ -267,17 +277,20 @@ func (c *Client) IsAvailableContext(ctx context.Context) bool {
 			available = true
 			break
 		}
-		if attempt < availabilityProbeAttempts {
-			timer := time.NewTimer(availabilityProbeBackoff)
-			select {
-			case <-ctx.Done():
-				if !timer.Stop() {
-					<-timer.C
-				}
-				return false
-			case <-timer.C:
-			}
+		if !isRetryableAvailabilityError(err) || attempt == availabilityProbeAttempts || probeCtx.Err() != nil {
+			break
 		}
+
+		timer := time.NewTimer(availabilityProbeBackoff)
+		if !waitForAvailabilityRetry(ctx, probeCtx, timer) {
+			if ctx.Err() != nil {
+				return false
+			}
+			break probeLoop
+		}
+	}
+	if ctx.Err() != nil {
+		return false
 	}
 	if available {
 		c.lastAvailabilityErr.Store(availabilityErrBox{})
@@ -295,6 +308,45 @@ func (c *Client) IsAvailableContext(ctx context.Context) bool {
 	}
 
 	return available
+}
+
+func waitForAvailabilityRetry(ctx, probeCtx context.Context, timer *time.Timer) bool {
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-probeCtx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// isRetryableAvailabilityError limits availability retries to transport,
+// timeout, busy, and explicitly transient HTTP failures. Protocol, decode,
+// authentication, and other client errors fail immediately.
+func isRetryableAvailabilityError(err error) bool {
+	if errors.Is(err, ErrServerUnavailable) || errors.Is(err, ErrTimeout) || errors.Is(err, ErrTransientBusy) {
+		return true
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	default:
+		return apiErr.StatusCode >= http.StatusInternalServerError && apiErr.StatusCode <= 599
+	}
+}
+
+func responseBodyReadError(ctx context.Context, operation string, err error) error {
+	if ctx.Err() != nil {
+		return NewAPIError(operation, 0, ErrTimeout)
+	}
+	return NewAPIError(operation, 0, fmt.Errorf("%w: reading response body: %w", ErrServerUnavailable, err))
 }
 
 // InvalidateCache clears the availability cache, forcing the next IsAvailable() call
@@ -514,7 +566,7 @@ func (c *Client) callTool(ctx context.Context, toolName string, args map[string]
 	// Read response body (limit to 10MB to prevent DoS/OOM)
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
-		return nil, NewAPIError(toolName, 0, err)
+		return nil, responseBodyReadError(ctx, toolName, err)
 	}
 
 	// Check HTTP status
@@ -621,7 +673,7 @@ func (c *Client) ReadResource(ctx context.Context, uri string) (json.RawMessage,
 	// Read response body (limit to 10MB to prevent DoS/OOM)
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
-		return nil, NewAPIError("resources/read", 0, err)
+		return nil, responseBodyReadError(ctx, "resources/read", err)
 	}
 
 	// Check HTTP status

@@ -3,14 +3,52 @@ package agentmail
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type deadlineObservedContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+type doneObservedContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (c *doneObservedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Done()
+}
+
+type readErrorCloser struct {
+	err error
+}
+
+func (r readErrorCloser) Read([]byte) (int, error) { return 0, r.err }
+func (readErrorCloser) Close() error               { return nil }
+
+func (c *deadlineObservedContext) Deadline() (time.Time, bool) {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Deadline()
+}
 
 func TestNewClient(t *testing.T) {
 	// Test default configuration
@@ -153,6 +191,265 @@ func TestIsAvailableContextRetriesTransientProbeFailures(t *testing.T) {
 	}
 }
 
+func TestIsAvailableContextRetriesResponseBodyTransportFailure(t *testing.T) {
+	var calls atomic.Int32
+	client := NewClient(
+		WithBaseURL("http://agentmail.invalid/"),
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			call := calls.Add(1)
+			body := io.ReadCloser(readErrorCloser{err: io.ErrUnexpectedEOF})
+			if call > 1 {
+				body = io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":2,"result":{"status":"ok"}}`))
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       body,
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})}),
+	)
+
+	if !client.IsAvailableContext(context.Background()) {
+		t.Fatalf("availability did not recover after a transient response-body read failure: %v", client.LastAvailabilityError())
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("transient response-body read failure made %d calls, want one retry and one success", got)
+	}
+	if err := client.LastAvailabilityError(); err != nil {
+		t.Fatalf("successful retry did not clear response-body diagnostic: %v", err)
+	}
+}
+
+func TestAvailabilityProbeBudgetBoundsAllAttempts(t *testing.T) {
+	if availabilityProbeBudget <= 0 || availabilityProbeBudget >= 2*time.Second {
+		t.Fatalf("availability probe budget must be positive and below 2s, got %v", availabilityProbeBudget)
+	}
+
+	var calls atomic.Int32
+	client := NewClient(
+		WithBaseURL("http://agentmail.invalid/"),
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})}),
+	)
+
+	started := time.Now()
+	if client.IsAvailableContext(context.Background()) {
+		t.Fatal("deadline-bound availability probe reported success")
+	}
+	elapsed := time.Since(started)
+	if elapsed < availabilityProbeBudget-100*time.Millisecond {
+		t.Fatalf("availability probe returned before its budget: elapsed=%v budget=%v", elapsed, availabilityProbeBudget)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("availability probe exceeded the strict 2s bound: %v", elapsed)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("a hung attempt must consume the one overall budget; got %d calls", got)
+	}
+	if err := client.LastAvailabilityError(); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("budget exhaustion must retain the terminal timeout, got %v", err)
+	}
+}
+
+func TestAvailabilityRetryClassification(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{name: "server unavailable", err: ErrServerUnavailable, retryable: true},
+		{name: "timeout", err: ErrTimeout, retryable: true},
+		{name: "transient busy", err: ErrTransientBusy, retryable: true},
+		{name: "HTTP 408", err: NewAPIError("health_check", http.StatusRequestTimeout, errors.New("status")), retryable: true},
+		{name: "HTTP 425", err: NewAPIError("health_check", http.StatusTooEarly, errors.New("status")), retryable: true},
+		{name: "HTTP 429", err: NewAPIError("health_check", http.StatusTooManyRequests, errors.New("status")), retryable: true},
+		{name: "HTTP 500", err: NewAPIError("health_check", http.StatusInternalServerError, errors.New("status")), retryable: true},
+		{name: "HTTP 599", err: NewAPIError("health_check", 599, errors.New("status")), retryable: true},
+		{name: "unauthorized", err: NewAPIError("health_check", http.StatusUnauthorized, ErrUnauthorized)},
+		{name: "other HTTP 4xx", err: NewAPIError("health_check", http.StatusBadRequest, errors.New("status"))},
+		{name: "permanent JSON-RPC", err: NewAPIError("health_check", 0, &JSONRPCError{Code: -32602, Message: "invalid params"})},
+		{name: "malformed decode", err: NewAPIError("health_check", 0, errors.New("invalid character"))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableAvailabilityError(tt.err); got != tt.retryable {
+				t.Fatalf("isRetryableAvailabilityError() = %t, want %t for %v", got, tt.retryable, tt.err)
+			}
+		})
+	}
+}
+
+func TestIsAvailableContextPermanentFailuresAreOneShot(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+	}{
+		{name: "unauthorized", statusCode: http.StatusUnauthorized},
+		{name: "other HTTP 4xx", statusCode: http.StatusBadRequest},
+		{name: "permanent JSON-RPC", statusCode: http.StatusOK, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`},
+		{name: "malformed decode", statusCode: http.StatusOK, body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			client := NewClient(WithBaseURL(server.URL + "/"))
+			if client.IsAvailableContext(context.Background()) {
+				t.Fatal("permanent health failure reported available")
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("permanent failure must not be retried; got %d calls", got)
+			}
+			if err := client.LastAvailabilityError(); err == nil {
+				t.Fatal("permanent health failure did not retain its diagnostic")
+			}
+		})
+	}
+}
+
+func TestIsAvailableContextTransientExhaustionRetainsTerminalError(t *testing.T) {
+	statuses := []int{http.StatusServiceUnavailable, http.StatusTooManyRequests, http.StatusTooEarly}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := int(calls.Add(1))
+		http.Error(w, "transient", statuses[call-1])
+	}))
+	defer server.Close()
+
+	client := NewClient(WithBaseURL(server.URL + "/"))
+	if client.IsAvailableContext(context.Background()) {
+		t.Fatal("transiently failing server reported available after retry exhaustion")
+	}
+	if got := calls.Load(); got != int32(availabilityProbeAttempts) {
+		t.Fatalf("expected %d attempts, got %d", availabilityProbeAttempts, got)
+	}
+	var apiErr *APIError
+	if err := client.LastAvailabilityError(); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooEarly {
+		t.Fatalf("retry exhaustion must retain the terminal HTTP 425 error, got %v", err)
+	}
+}
+
+func TestIsAvailableContextCancellationDuringBackoffPreservesState(t *testing.T) {
+	firstResponse := make(chan struct{})
+	var firstResponseOnce sync.Once
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "transient", http.StatusServiceUnavailable)
+		firstResponseOnce.Do(func() { close(firstResponse) })
+	}))
+	defer server.Close()
+
+	client := NewClient(WithBaseURL(server.URL + "/"))
+	previousErr := NewAPIError("previous_probe", http.StatusBadGateway, ErrServerUnavailable)
+	client.lastAvailabilityErr.Store(availabilityErrBox{err: previousErr})
+	client.availableCache.Store(true)
+	client.availableCacheTime.Store(0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan bool, 1)
+	go func() { result <- client.IsAvailableContext(ctx) }()
+	select {
+	case <-firstResponse:
+	case <-time.After(time.Second):
+		t.Fatal("first availability response did not complete")
+	}
+	cancel()
+
+	select {
+	case available := <-result:
+		if available {
+			t.Fatal("canceled availability probe reported success")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("availability probe did not return after backoff cancellation")
+	}
+	if got := calls.Load(); got < 1 || got > int32(availabilityProbeAttempts) {
+		t.Fatalf("backoff cancellation made an invalid number of calls: %d", got)
+	}
+	if got := client.LastAvailabilityError(); got != previousErr {
+		t.Fatalf("backoff cancellation overwrote the previous diagnostic: got %v want %v", got, previousErr)
+	}
+	if got := client.availableCacheTime.Load(); got != 0 {
+		t.Fatalf("backoff cancellation populated the cache timestamp: %d", got)
+	}
+	if !client.availableCache.Load() {
+		t.Fatal("backoff cancellation overwrote the previous cached value")
+	}
+}
+
+func TestWaitForAvailabilityRetryHonorsCallerCancellation(t *testing.T) {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	observed := make(chan struct{})
+	ctx := &doneObservedContext{Context: baseCtx, observed: observed}
+	result := make(chan bool, 1)
+	go func() {
+		result <- waitForAvailabilityRetry(ctx, context.Background(), time.NewTimer(time.Second))
+	}()
+
+	select {
+	case <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("availability retry did not begin waiting on caller cancellation")
+	}
+	cancel()
+
+	select {
+	case retry := <-result:
+		if retry {
+			t.Fatal("caller cancellation allowed another availability retry")
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("availability retry did not stop after caller cancellation")
+	}
+}
+
+func TestIsAvailableContextInvalidatedFailureThenSuccessClearsDiagnostic(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		statusJSON, _ := json.Marshal(HealthStatus{Status: "ok"})
+		_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: 2, Result: statusJSON})
+	}))
+	defer server.Close()
+
+	client := NewClient(WithBaseURL(server.URL + "/"))
+	if client.IsAvailableContext(context.Background()) {
+		t.Fatal("initial real failure reported available")
+	}
+	if err := client.LastAvailabilityError(); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("initial failure diagnostic = %v, want unauthorized", err)
+	}
+
+	client.InvalidateCache()
+	if !client.IsAvailableContext(context.Background()) {
+		t.Fatal("fresh successful probe after cache invalidation reported unavailable")
+	}
+	if err := client.LastAvailabilityError(); err != nil {
+		t.Fatalf("successful probe did not clear the previous diagnostic: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected one failed and one successful probe, got %d calls", got)
+	}
+}
+
 // TestIsAvailableContextSurfacesTerminalProbeError guards the diagnostics
 // side: a hard-down server yields unavailable AND a retrievable reason.
 func TestIsAvailableContextSurfacesTerminalProbeError(t *testing.T) {
@@ -210,6 +507,70 @@ func TestIsAvailableContextCancelsWhileAnotherHealthCheckOwnsLock(t *testing.T) 
 	}
 }
 
+func TestAvailabilityProbeBudgetIncludesLockContention(t *testing.T) {
+	firstProbeStarted := make(chan struct{}, 1)
+	var calls atomic.Int32
+	client := NewClient(
+		WithBaseURL("http://agentmail.invalid/"),
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if calls.Add(1) == 1 {
+				firstProbeStarted <- struct{}{}
+			}
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})}),
+	)
+
+	ownerCtx, cancelOwner := context.WithCancel(context.Background())
+	ownerDone := make(chan bool, 1)
+	go func() { ownerDone <- client.IsAvailableContext(ownerCtx) }()
+	select {
+	case <-firstProbeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("owning availability probe did not start")
+	}
+
+	deadlineObserved := make(chan struct{})
+	waiterCtx := &deadlineObservedContext{Context: context.Background(), observed: deadlineObserved}
+	waiterDone := make(chan bool, 1)
+	go func() { waiterDone <- client.IsAvailableContext(waiterCtx) }()
+	select {
+	case <-deadlineObserved:
+	case <-time.After(500 * time.Millisecond):
+		cancelOwner()
+		t.Fatal("availability waiter did not establish its overall deadline before lock acquisition")
+	}
+	waiterStarted := time.Now()
+
+	// Leave the waiter less than a fresh probe budget after the owner releases
+	// the lock. A per-attempt deadline would therefore exceed the total bound.
+	time.Sleep(availabilityProbeBudget - 350*time.Millisecond)
+	cancelOwner()
+	select {
+	case available := <-ownerDone:
+		if available {
+			t.Fatal("canceled owning availability probe reported success")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("owning availability probe did not return after cancellation")
+	}
+
+	select {
+	case available := <-waiterDone:
+		if available {
+			t.Fatal("deadline-bound availability waiter reported success")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("availability waiter exceeded the strict two-second total budget")
+	}
+	if elapsed := time.Since(waiterStarted); elapsed >= 2*time.Second {
+		t.Fatalf("availability waiter exceeded the strict two-second total budget: %v", elapsed)
+	}
+	if got := calls.Load(); got < 1 || got > 2 {
+		t.Fatalf("availability contention made %d probes, want the owner plus at most one bounded waiter probe", got)
+	}
+}
+
 func TestIsAvailableContextDoesNotCacheCanceledProbe(t *testing.T) {
 	probeStarted := make(chan struct{}, 1)
 	releaseProbe := make(chan struct{})
@@ -227,6 +588,8 @@ func TestIsAvailableContextDoesNotCacheCanceledProbe(t *testing.T) {
 	defer close(releaseProbe)
 
 	client := NewClient(WithBaseURL(server.URL + "/"))
+	previousErr := NewAPIError("previous_probe", http.StatusBadGateway, ErrServerUnavailable)
+	client.lastAvailabilityErr.Store(availabilityErrBox{err: previousErr})
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan bool, 1)
 	go func() { result <- client.IsAvailableContext(ctx) }()
@@ -246,6 +609,9 @@ func TestIsAvailableContextDoesNotCacheCanceledProbe(t *testing.T) {
 	}
 	if cacheTime := client.availableCacheTime.Load(); cacheTime != 0 {
 		t.Fatalf("canceled availability probe populated cache timestamp %d", cacheTime)
+	}
+	if got := client.LastAvailabilityError(); got != previousErr {
+		t.Fatalf("probe cancellation overwrote the previous diagnostic: got %v want %v", got, previousErr)
 	}
 	if !client.IsAvailableContext(t.Context()) {
 		t.Fatal("live probe after cancellation was poisoned by canceled availability result")

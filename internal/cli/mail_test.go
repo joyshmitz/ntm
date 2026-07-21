@@ -101,6 +101,57 @@ type overseerCall struct {
 	ThreadID   string   `json:"thread_id,omitempty"`
 }
 
+type mailAvailabilityDiagnosticStub struct {
+	err error
+}
+
+func (s mailAvailabilityDiagnosticStub) LastAvailabilityError() error {
+	return s.err
+}
+
+type legacyMailAvailabilityStub struct{}
+
+func TestAgentMailUnavailableErrorUsesOptionalDiagnostic(t *testing.T) {
+	reason := errors.New("health endpoint returned 503")
+	err := agentMailUnavailableError(
+		t.Context(),
+		mailAvailabilityDiagnosticStub{err: reason},
+		"agent mail server not available",
+	)
+
+	if !errors.Is(err, reason) {
+		t.Fatalf("agentMailUnavailableError() error = %v, want wrapped diagnostic reason", err)
+	}
+	if !strings.Contains(err.Error(), "reason: health endpoint returned 503") {
+		t.Fatalf("agentMailUnavailableError() error = %q, want diagnostic reason", err)
+	}
+}
+
+func TestAgentMailUnavailableErrorPreservesLegacyFallback(t *testing.T) {
+	const fallback = "agent mail server not available"
+	err := agentMailUnavailableError(t.Context(), legacyMailAvailabilityStub{}, fallback)
+	if err == nil || err.Error() != fallback {
+		t.Fatalf("agentMailUnavailableError() error = %v, want %q", err, fallback)
+	}
+}
+
+func TestAgentMailUnavailableErrorPrioritizesCallerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := agentMailUnavailableError(
+		ctx,
+		mailAvailabilityDiagnosticStub{err: errors.New("health endpoint returned 503")},
+		"agent mail server not available",
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("agentMailUnavailableError() error = %v, want context.Canceled", err)
+	}
+	if strings.Contains(err.Error(), "health endpoint returned 503") {
+		t.Fatalf("agentMailUnavailableError() error = %q, diagnostic overrode caller cancellation", err)
+	}
+}
+
 func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 	t.Helper()
 	stub := &mailStub{

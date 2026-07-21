@@ -192,6 +192,25 @@ type mailInboxClient interface {
 	FetchInbox(ctx context.Context, opts agentmail.FetchInboxOptions) ([]agentmail.InboxMessage, error)
 }
 
+// mailAvailabilityErrorProvider is implemented by the concrete Agent Mail
+// client, but remains optional so lightweight command mocks do not need to
+// model diagnostic state.
+type mailAvailabilityErrorProvider interface {
+	LastAvailabilityError() error
+}
+
+func agentMailUnavailableError(ctx context.Context, client any, fallback string) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("checking agent mail availability: %w", ctxErr)
+	}
+	if provider, ok := client.(mailAvailabilityErrorProvider); ok {
+		if reason := provider.LastAvailabilityError(); reason != nil {
+			return fmt.Errorf("%s\nreason: %w", fallback, reason)
+		}
+	}
+	return errors.New(fallback)
+}
+
 // newMailInboxCmd shows aggregate inbox for project agents.
 func newMailInboxCmdReal() *cobra.Command {
 	var (
@@ -403,10 +422,7 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 	defer cancel()
 
 	if !client.IsAvailableContext(ctx) {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("checking agent mail availability: %w", ctxErr)
-		}
-		return fmt.Errorf("agent mail server not available")
+		return agentMailUnavailableError(ctx, client, "agent mail server not available")
 	}
 
 	agents, err := client.ListProjectAgents(ctx, projectKey)
@@ -757,10 +773,10 @@ func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, i
 	defer cancel()
 
 	if !client.IsAvailableContext(ctx) {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("checking agent mail availability: %w", ctxErr)
-		}
-		return fmt.Errorf("agent mail server not available at %s\nstart the server with: am serve-http --host 127.0.0.1 --no-tui --no-auth", client.BaseURL())
+		return agentMailUnavailableError(ctx, client, fmt.Sprintf(
+			"agent mail server not available at %s\nstart the server with: am serve-http --host 127.0.0.1 --no-tui --no-auth",
+			client.BaseURL(),
+		))
 	}
 
 	// Ensure project exists (and agent registered)
@@ -903,10 +919,10 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 
 	// Check if Agent Mail is available
 	if !client.IsAvailableContext(ctx) {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("checking agent mail availability: %w", ctxErr)
-		}
-		return fmt.Errorf("agent mail server not available at %s\nstart the server with: am serve-http --host 127.0.0.1 --no-tui --no-auth", client.BaseURL())
+		return agentMailUnavailableError(ctx, client, fmt.Sprintf(
+			"agent mail server not available at %s\nstart the server with: am serve-http --host 127.0.0.1 --no-tui --no-auth",
+			client.BaseURL(),
+		))
 	}
 
 	// Ensure project exists before proceeding
