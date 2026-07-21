@@ -6418,6 +6418,54 @@ func TestSelectedConfigAllowsProjectionRefresh(t *testing.T) {
 	})
 }
 
+func TestRobotAssignmentMutationRequiresPolicyPreflight(t *testing.T) {
+	originalBulkAssign := robotBulkAssign
+	originalSpawn := robotSpawn
+	originalSpawnAssignWork := robotSpawnAssignWork
+	originalRestartPane := robotRestartPane
+	originalRestartPaneBead := robotRestartPaneBead
+	t.Cleanup(func() {
+		robotBulkAssign = originalBulkAssign
+		robotSpawn = originalSpawn
+		robotSpawnAssignWork = originalSpawnAssignWork
+		robotRestartPane = originalRestartPane
+		robotRestartPaneBead = originalRestartPaneBead
+	})
+
+	tests := []struct {
+		name            string
+		bulkAssign      string
+		spawn           string
+		spawnAssignWork bool
+		restartPane     string
+		restartBead     string
+		want            bool
+	}{
+		{name: "bulk assignment", bulkAssign: "project", want: true},
+		{name: "spawn with assignment", spawn: "project", spawnAssignWork: true, want: true},
+		{name: "restart with bead assignment", restartPane: "project", restartBead: "ntm-123", want: true},
+		{name: "spawn without assignment", spawn: "project"},
+		{name: "assignment flag without spawn", spawnAssignWork: true},
+		{name: "restart without bead assignment", restartPane: "project"},
+		{name: "bead flag without restart", restartBead: "ntm-123"},
+		{name: "no assignment mutation"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			robotBulkAssign = test.bulkAssign
+			robotSpawn = test.spawn
+			robotSpawnAssignWork = test.spawnAssignWork
+			robotRestartPane = test.restartPane
+			robotRestartPaneBead = test.restartBead
+
+			if got := robotAssignmentMutationRequiresPolicyPreflight(); got != test.want {
+				t.Fatalf("robotAssignmentMutationRequiresPolicyPreflight() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestPluginsListUsesGlobalConfigFlag(t *testing.T) {
 	resetFlags()
 	oldCfg, oldCfgFile := cfg, cfgFile

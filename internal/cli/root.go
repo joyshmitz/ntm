@@ -2975,10 +2975,11 @@ func initializeRobotPersistence(ctx context.Context) error {
 	robot.SetProjectionStore(store)
 	robotStateStore = store
 
-	// Command-specific safety loaders own the typed error contract for an
-	// explicitly selected config. Do not let this optional projection refresh
-	// invoke bv/br before those loaders reject a missing or non-regular path.
-	if !selectedConfigAllowsProjectionRefresh() {
+	// Assignment mutations perform their own strict policy validation before
+	// consulting bv/br. Keep the persistence store available to the command, but
+	// do not let this optional refresh cross that command-specific safety boundary.
+	// Explicitly selected invalid config paths have the same ordering requirement.
+	if robotAssignmentMutationRequiresPolicyPreflight() || !selectedConfigAllowsProjectionRefresh() {
 		return nil
 	}
 
@@ -5045,6 +5046,16 @@ func selectedConfigAllowsProjectionRefresh() bool {
 	}
 	info, err := os.Stat(selectedConfigPath())
 	return err == nil && info.Mode().IsRegular()
+}
+
+func robotAssignmentMutationRequiresPolicyPreflight() bool {
+	if strings.TrimSpace(robotBulkAssign) != "" {
+		return true
+	}
+	if strings.TrimSpace(robotSpawn) != "" && robotSpawnAssignWork {
+		return true
+	}
+	return strings.TrimSpace(robotRestartPane) != "" && strings.TrimSpace(robotRestartPaneBead) != ""
 }
 
 func selectedConfigDir() string {

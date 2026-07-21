@@ -59,7 +59,18 @@ type Client struct {
 	healthCheckMu      sync.Mutex
 	availableCache     atomic.Bool
 	availableCacheTime atomic.Int64 // Unix timestamp in seconds
+
+	// lastAvailabilityErr stores the terminal error of the most recent
+	// completed availability probe (nil-equivalent cleared on success) so
+	// health surfaces can explain WHY Agent Mail looks unavailable instead
+	// of collapsing the reason into a bare bool.
+	lastAvailabilityErr atomic.Value // of availabilityErrBox
 }
+
+// availabilityErrBox wraps an error for atomic.Value storage (atomic.Value
+// requires consistent concrete types; a nil error is stored as a box with a
+// nil field).
+type availabilityErrBox struct{ err error }
 
 // tokenKey builds the cache key for the registration-token map. Using
 // a unit-separator (\x1f) between components avoids any chance of
@@ -236,14 +247,42 @@ func (c *Client) IsAvailableContext(ctx context.Context) bool {
 		return c.availableCache.Load()
 	}
 
-	// Perform health check
-	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
+	// Perform the health check with a bounded transient-failure retry: a
+	// remote or briefly-hiccuping Agent Mail server should not be branded
+	// unavailable (and cached as such) off a single failed probe. Caller
+	// cancellation aborts immediately and, as before, is never cached.
+	const availabilityProbeAttempts = 3
+	const availabilityProbeBackoff = 150 * time.Millisecond
 
-	_, err := c.HealthCheck(probeCtx)
-	available := err == nil
-	if ctx.Err() != nil || probeCtx.Err() != nil {
-		return false
+	var err error
+	available := false
+	for attempt := 1; attempt <= availabilityProbeAttempts; attempt++ {
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err = c.HealthCheck(probeCtx)
+		cancel()
+		if ctx.Err() != nil {
+			return false
+		}
+		if err == nil {
+			available = true
+			break
+		}
+		if attempt < availabilityProbeAttempts {
+			timer := time.NewTimer(availabilityProbeBackoff)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return false
+			case <-timer.C:
+			}
+		}
+	}
+	if available {
+		c.lastAvailabilityErr.Store(availabilityErrBox{})
+	} else {
+		c.lastAvailabilityErr.Store(availabilityErrBox{err: err})
 	}
 
 	// Cache the result
@@ -262,6 +301,21 @@ func (c *Client) IsAvailableContext(ctx context.Context) bool {
 // to perform a fresh health check.
 func (c *Client) InvalidateCache() {
 	c.availableCacheTime.Store(0)
+}
+
+// LastAvailabilityError returns the terminal error of the most recent
+// completed availability probe, or nil when the last probe succeeded (or no
+// probe has completed yet). Health and diagnostics surfaces use it to report
+// WHY Agent Mail is considered unavailable.
+func (c *Client) LastAvailabilityError() error {
+	if c == nil {
+		return nil
+	}
+	box, ok := c.lastAvailabilityErr.Load().(availabilityErrBox)
+	if !ok {
+		return nil
+	}
+	return box.err
 }
 
 // DefaultArchivePath is the default location for the Agent Mail archive.

@@ -119,6 +119,52 @@ func TestIsAvailable(t *testing.T) {
 	}
 }
 
+// TestIsAvailableContextRetriesTransientProbeFailures guards the bounded
+// availability retry: a remote Agent Mail server that hiccups for one or two
+// probes must not be branded unavailable (and negatively cached) off a single
+// failed health check.
+func TestIsAvailableContextRetriesTransientProbeFailures(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n <= 2 {
+			// Transient failure: refuse the first two probes.
+			http.Error(w, "temporarily overloaded", http.StatusServiceUnavailable)
+			return
+		}
+		var req JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return
+		}
+		statusJSON, _ := json.Marshal(HealthStatus{Status: "ok"})
+		_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: statusJSON})
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	if !c.IsAvailableContext(context.Background()) {
+		t.Fatalf("transiently failing server was branded unavailable after %d probes", calls.Load())
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("expected 3 probes (2 transient failures + 1 success), got %d", got)
+	}
+	if err := c.LastAvailabilityError(); err != nil {
+		t.Fatalf("successful availability must clear the last probe error, got %v", err)
+	}
+}
+
+// TestIsAvailableContextSurfacesTerminalProbeError guards the diagnostics
+// side: a hard-down server yields unavailable AND a retrievable reason.
+func TestIsAvailableContextSurfacesTerminalProbeError(t *testing.T) {
+	c := NewClient(WithBaseURL("http://localhost:1/"))
+	if c.IsAvailableContext(context.Background()) {
+		t.Fatal("unreachable server reported available")
+	}
+	if err := c.LastAvailabilityError(); err == nil {
+		t.Fatal("terminal probe failure must surface a reason via LastAvailabilityError")
+	}
+}
+
 func TestIsAvailableContextCancelsWhileAnotherHealthCheckOwnsLock(t *testing.T) {
 	probeStarted := make(chan struct{}, 1)
 	releaseProbe := make(chan struct{})

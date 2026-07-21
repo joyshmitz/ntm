@@ -36,8 +36,8 @@ type BulkAssignOutput struct {
 	Timestamp        string                 `json:"timestamp"`
 	Assignments      []BulkAssignAssignment `json:"assignments"`
 	Summary          BulkAssignSummary      `json:"summary"`
-	UnassignedBeads  []string               `json:"unassigned_beads,omitempty"`
-	UnassignedPanes  []string               `json:"unassigned_panes,omitempty"`
+	UnassignedBeads  []string               `json:"unassigned_beads"`
+	UnassignedPanes  []string               `json:"unassigned_panes"`
 	DryRun           bool                   `json:"dry_run,omitempty"`
 	AllocationSource string                 `json:"allocation_source,omitempty"`
 	Error            string                 `json:"error,omitempty"`
@@ -344,6 +344,36 @@ func assertBulkAssignTraceEmpty(t *testing.T, path, surface string) {
 	}
 	if len(bytes.TrimSpace(data)) != 0 {
 		t.Fatalf("bulk safety failure reached %s: %s", surface, data)
+	}
+}
+
+func assertBulkAssignFixtureHasNoProjectionRows(t *testing.T, fixture *robotProcessFixture) {
+	t.Helper()
+	statePath := filepath.Join(fixture.configDir, "ntm", "state.db")
+	database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(statePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+	if err != nil {
+		t.Fatalf("open bulk runtime state store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Errorf("close bulk runtime state store: %v", err)
+		}
+	})
+	for _, table := range []string{
+		"runtime_sessions",
+		"runtime_agents",
+		"runtime_work",
+		"runtime_coordination",
+		"runtime_quota",
+		"source_health",
+	} {
+		var count int
+		if err := database.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatalf("count bulk runtime projection table %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("bulk safety failure persisted %d row(s) in %s before policy validation", count, table)
+		}
 	}
 }
 
@@ -814,11 +844,16 @@ func TestE2E_RobotBulkAssign_JSONStructure(t *testing.T) {
 		t.Fatalf("[E2E-BULK-ASSIGN] Invalid JSON: %v", err)
 	}
 	requiredFields := []string{
-		"success", "session", "strategy", "timestamp", "assignments", "summary", "dry_run", "allocation_source",
+		"success", "session", "strategy", "timestamp", "assignments", "summary", "unassigned_beads", "unassigned_panes", "dry_run", "allocation_source",
 	}
 	for _, field := range requiredFields {
 		if _, ok := raw[field]; !ok {
 			t.Fatalf("[E2E-BULK-ASSIGN] Missing required field: %s", field)
+		}
+	}
+	for _, field := range []string{"unassigned_beads", "unassigned_panes"} {
+		if _, ok := raw[field].([]interface{}); !ok {
+			t.Fatalf("[E2E-BULK-ASSIGN] Required field %s is not an array: %#v", field, raw[field])
 		}
 	}
 	if _, present := raw["error"]; present {
@@ -2066,6 +2101,108 @@ func TestE2E_RobotBulkAssign_InvalidOrMissingSelectedConfigHasZeroSideEffects(t 
 			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
 			if paneOutput := fixture.mustTMUXOutput(t, "capture-pane", "-p", "-t", fixture.paneID, "-S", "-"); strings.Contains(paneOutput, marker) {
 				t.Fatalf("invalid bulk policy dispatched marker %q to pane: %s", marker, paneOutput)
+			}
+		})
+	}
+}
+
+func TestE2E_RobotBulkAssign_InvalidTargetProjectConfigStopsBeforePlanningAndProjection(t *testing.T) {
+	CommonE2EPrerequisites(t)
+
+	for _, test := range []struct {
+		name      string
+		directory bool
+	}{
+		{name: "invalid TOML"},
+		{name: "non-regular config path", directory: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRobotProcessFixture(t, "bulk-target-policy-invalid")
+			beadID := prepareBulkAssignBeads(t, fixture, 1)[0]
+			beforeBead := readBulkAssignFixtureBead(t, fixture, beadID)
+			mail := newAtomicAssignmentMailStub(fixture.projectDir)
+			t.Cleanup(mail.close)
+
+			triagePayload := fmt.Sprintf(
+				`{"triage":{"recommendations":[{"id":%q,"title":"Target policy must load first","type":"task","status":"open","priority":1,"score":100,"action":"assign","reasons":[]}]}}`,
+				beadID,
+			)
+			planPayload := fmt.Sprintf(
+				`{"plan":{"tracks":[{"track_id":"target-policy-first","items":[{"id":%q,"title":"Target policy must load first","status":"open","priority":1}]}]}}`,
+				beadID,
+			)
+			env, bvTrace, brTrace := installBulkAssignPlanningFixtures(
+				t, fixture, atomicAssignmentMergeEnv(fixture.env, mail.env()), triagePayload, planPayload, "ok", "real",
+			)
+
+			projectConfigDir := filepath.Join(fixture.projectDir, ".ntm")
+			if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+				t.Fatalf("create invalid target bulk config directory: %v", err)
+			}
+			projectConfigPath := filepath.Join(projectConfigDir, "config.toml")
+			invalidConfig := []byte("[assign\noperator_gated_labels = [\"release-approval\"]\n")
+			if test.directory {
+				if err := os.MkdirAll(projectConfigPath, 0o700); err != nil {
+					t.Fatalf("create non-regular target bulk config: %v", err)
+				}
+			} else if err := os.WriteFile(projectConfigPath, invalidConfig, 0o600); err != nil {
+				t.Fatalf("write invalid target bulk config: %v", err)
+			}
+
+			outsideDir := filepath.Join(fixture.root, "outside-target")
+			if err := os.MkdirAll(outsideDir, 0o700); err != nil {
+				t.Fatalf("create outside target bulk directory: %v", err)
+			}
+			marker := fmt.Sprintf("NTM_BULK_TARGET_POLICY_MUST_NOT_DISPATCH_%d", time.Now().UnixNano())
+			templatePath := filepath.Join(fixture.projectDir, "invalid-target-policy-template.txt")
+			if err := os.WriteFile(templatePath, []byte(marker+"::{bead_id}"), 0o600); err != nil {
+				t.Fatalf("write invalid target policy bulk template: %v", err)
+			}
+
+			process := runBuiltRobotProcessWithin(
+				t, defaultRunTimeout, fixture.ntmPath, outsideDir, env,
+				"--robot-bulk-assign="+fixture.session,
+				"--from-bv",
+				"--bulk-strategy=balanced",
+				"--prompt-template="+templatePath,
+				"--robot-format=json",
+			)
+			if process.exitCode != 1 || len(bytes.TrimSpace(process.stderr)) != 0 {
+				t.Fatalf("bulk invalid target policy exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+			}
+			var result BulkAssignOutput
+			decodeSingleRobotJSON(t, process.stdout, &result)
+			if result.Success || result.ErrorCode != "INVALID_FLAG" || result.Assignments == nil ||
+				result.UnassignedBeads == nil || result.UnassignedPanes == nil ||
+				!strings.Contains(strings.ToLower(result.Error), "config") {
+				t.Fatalf("bulk invalid target policy envelope = %+v, want checked-empty INVALID_FLAG response", result)
+			}
+
+			assertBulkAssignTraceEmpty(t, bvTrace, "bv planning or startup projection")
+			assertBulkAssignTraceEmpty(t, brTrace, "Beads planning or mutation")
+			assertBulkAssignFixtureHasNoProjectionRows(t, fixture)
+			afterBead := readBulkAssignFixtureBead(t, fixture, beadID)
+			if !bytes.Equal(bytes.TrimSpace(afterBead), bytes.TrimSpace(beforeBead)) {
+				t.Fatalf("bulk invalid target policy mutated Beads state:\nbefore=%s\nafter=%s", beforeBead, afterBead)
+			}
+			assertBulkAssignFixtureHasNoLedger(t, fixture, beadID)
+			assertAtomicAssignmentMailUntouched(t, mail.snapshot())
+			if paneOutput := fixture.mustTMUXOutput(t, "capture-pane", "-p", "-t", fixture.paneID, "-S", "-"); strings.Contains(paneOutput, marker) {
+				t.Fatalf("invalid target bulk policy dispatched marker %q to pane: %s", marker, paneOutput)
+			}
+			if test.directory {
+				info, err := os.Stat(projectConfigPath)
+				if err != nil || !info.IsDir() {
+					t.Fatalf("non-regular target bulk config changed: info=%v err=%v", info, err)
+				}
+			} else {
+				afterConfig, err := os.ReadFile(projectConfigPath)
+				if err != nil {
+					t.Fatalf("read invalid target bulk config after rejection: %v", err)
+				}
+				if !bytes.Equal(afterConfig, invalidConfig) {
+					t.Fatalf("bulk rejection mutated invalid target config:\nbefore=%s\nafter=%s", invalidConfig, afterConfig)
+				}
 			}
 		})
 	}
