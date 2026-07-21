@@ -479,6 +479,7 @@ func TestClassifyRebalanceErrorUsesStableCodes(t *testing.T) {
 		{err: fmt.Errorf("wrapped: %w", context.DeadlineExceeded), want: robot.ErrCodeTimeout},
 		{err: newRebalanceCommandError(robot.ErrCodeInvalidFlag, errors.New("bad filter")), want: robot.ErrCodeInvalidFlag},
 		{err: fmt.Errorf("active assignment: %w", assignment.ErrPaneIdentityMigrationRequired), want: "PANE_IDENTITY_MIGRATION_REQUIRED"},
+		{err: fmt.Errorf("changed tracker owner: %w", assignment.ErrClaimIneligible), want: "BEAD_INELIGIBLE"},
 		{err: errors.New("tmux failed"), want: robot.ErrCodeInternalError},
 	}
 	for _, test := range tests {

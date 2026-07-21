@@ -3144,6 +3144,54 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 			t.Fatalf("read %s: %v", path, err)
 		}
 	}
+	linkTool := func(t *testing.T, dir, source, name string) {
+		t.Helper()
+		if err := os.Symlink(source, filepath.Join(dir, name)); err != nil {
+			t.Fatalf("link %s into isolated PATH: %v", name, err)
+		}
+	}
+
+	t.Run("missing_bv_is_dependency_missing", func(t *testing.T) {
+		pathDir := t.TempDir()
+		linkTool(t, pathDir, fixture.tmuxPath, "tmux")
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{"PATH": pathDir})
+		process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env,
+			"--robot-format=json",
+			"--robot-assign="+fixture.session,
+			"--strategy=balanced",
+		)
+		envelope := assertAssignFailure(t, process, "DEPENDENCY_MISSING")
+		if !strings.Contains(envelope.Error, "bv is not installed") {
+			t.Fatalf("missing bv diagnostic=%q", envelope.Error)
+		}
+	})
+
+	t.Run("missing_br_is_dependency_missing", func(t *testing.T) {
+		brPath, err := exec.LookPath("br")
+		if err != nil {
+			t.Fatalf("real br is required: %v", err)
+		}
+		bvPath, err := exec.LookPath("bv")
+		if err != nil {
+			t.Fatalf("real bv is required: %v", err)
+		}
+		runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath, "init", "--prefix=rae2e", "--json")
+		runRobotFixtureTool(t, fixture, defaultRunTimeout, brPath,
+			"create", "Missing br recommendation contract", "--type=task", "--priority=1", "--silent")
+		pathDir := t.TempDir()
+		linkTool(t, pathDir, fixture.tmuxPath, "tmux")
+		linkTool(t, pathDir, bvPath, "bv")
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{"PATH": pathDir})
+		process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env,
+			"--robot-format=json",
+			"--robot-assign="+fixture.session,
+			"--strategy=balanced",
+		)
+		envelope := assertAssignFailure(t, process, "DEPENDENCY_MISSING")
+		if !strings.Contains(envelope.Error, "br") || !strings.Contains(envelope.Error, "executable file not found") {
+			t.Fatalf("missing br diagnostic=%q", envelope.Error)
+		}
+	})
 
 	t.Run("SIGINT_cancels_blocked_ready_scan_once", func(t *testing.T) {
 		fakeBin := filepath.Join(fixture.root, "cancel-bin")
@@ -3152,6 +3200,24 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 		}
 		brStarted := filepath.Join(fixture.root, "cancel-br-started")
 		brCalls := filepath.Join(fixture.root, "cancel-br-calls.log")
+		bvPath := filepath.Join(fakeBin, "bv")
+		bvScript := `#!/bin/sh
+case "${1:-}" in
+    --robot-triage)
+        printf '%s\n' '{"triage":{"recommendations":[]}}'
+        ;;
+    --robot-plan)
+        printf '%s\n' '{"plan":{"tracks":[{"track_id":"cancel","items":[{"id":"cancel-ready","title":"Cancelable ready scan","status":"open","priority":1}]}]}}'
+        ;;
+    *)
+        printf 'unexpected bv args: %s\n' "$*" >&2
+        exit 64
+        ;;
+esac
+`
+		if err := os.WriteFile(bvPath, []byte(bvScript), 0o700); err != nil {
+			t.Fatalf("write cancellation bv: %v", err)
+		}
 		brPath := filepath.Join(fakeBin, "br")
 		brScript := `#!/bin/sh
 if [ "${1:-}" = "--lock-timeout" ]; then

@@ -1988,11 +1988,7 @@ func TestE2EAtomicAssignmentFreshTerminalBeadsAreGuarded(t *testing.T) {
 			}
 			fixture.assertBead(t, test.beadID, test.status, "")
 			fixture.assertMarkerCounts(t, prompt, map[int]int{0: 0, 1: 0})
-			record := fixture.readLedgerAssignment(t, test.beadID)
-			if record.Status != "failed" || record.ClaimState != "ineligible" || record.ClaimAttempts != 1 ||
-				record.DispatchAttempts != 0 || record.PromptSent != "" || record.DispatchReceiptID != "" || record.DispatchedAt != nil {
-				t.Fatalf("fresh %s refusal durable state = %+v", test.name, record)
-			}
+			fixture.assertLedgerReplicasHaveNoAssignment(t, test.beadID)
 		})
 	}
 
@@ -2030,10 +2026,7 @@ func TestE2EAtomicAssignmentFreshTerminalBeadsAreGuarded(t *testing.T) {
 			}
 			fixture.assertBead(t, test.beadID, test.status, "")
 			fixture.assertMarkerCounts(t, prompt, map[int]int{0: 0, 1: 0})
-			record := fixture.readLedgerAssignment(t, test.beadID)
-			if record.Status != "failed" || record.ClaimState != "ineligible" || record.DispatchAttempts != 0 || record.DispatchReceiptID != "" {
-				t.Fatalf("fresh %s bulk refusal durable state = %+v", test.name, record)
-			}
+			fixture.assertLedgerReplicasHaveNoAssignment(t, test.beadID)
 		})
 	}
 }
@@ -2972,7 +2965,7 @@ func TestE2EAtomicAssignmentCompletionRejectsSupersededGeneration(t *testing.T) 
 		"--quiet",
 	)
 	watch.Dir = fixture.projectDir
-	watch.Env = atomicAssignmentMergeEnv(fixture.env, mail.env())
+	watch.Env = atomicAssignmentMergeEnv(fixture.env, fixture.completionWatchEnv(t, mail.env()))
 	var watchStdout bytes.Buffer
 	var watchStderr bytes.Buffer
 	watch.Stdout = &watchStdout
@@ -4882,7 +4875,7 @@ func TestE2EAtomicRetryReassignAndRebalanceInvalidPolicyIsMutationFreeBuiltProce
 		t.Fatalf("seed invalid-policy retry generation exit=%d stdout=%s stderr=%s", retrySeed.exitCode, retrySeed.stdout, retrySeed.stderr)
 	}
 	fixture.waitForMarkerCount(t, 0, retrySourcePrompt, 1)
-	fixture.driveAssignmentStatus(t, fixture.panes[0], retryBeadID, "ERROR: invalid-policy retry fixture", "failed")
+	fixture.driveAssignmentStatus(t, fixture.panes[0], retryBeadID, "ERROR: fatal invalid-policy retry fixture", "failed")
 	retryBefore := fixture.readLedgerAssignment(t, retryBeadID)
 	if retryBefore.Status != "failed" {
 		t.Fatalf("invalid-policy retry seed status=%q, want failed: %+v", retryBefore.Status, retryBefore)
@@ -5063,7 +5056,11 @@ func TestE2EAtomicAssignmentLabelEnrichmentFailuresFailClosedBuiltProcess(t *tes
 	brScript := strings.Join([]string{
 		"#!/bin/sh",
 		`printf '%s\n' "$*" >> "$NTM_E2E_BR_TRACE"`,
-		`case "$NTM_E2E_BR_MODE:$1" in`,
+		`command=`,
+		`for arg in "$@"; do`,
+		`  case "$arg" in ready|list) command="$arg"; break ;; esac`,
+		`done`,
+		`case "$NTM_E2E_BR_MODE:$command" in`,
 		`  ready_failure:ready) printf 'injected br ready failure\n' >&2; exit 70 ;;`,
 		`  list_failure:list) printf 'injected br list failure\n' >&2; exit 71 ;;`,
 		`  malformed_ready:ready) printf '{\n'; exit 0 ;;`,
@@ -5093,27 +5090,27 @@ func TestE2EAtomicAssignmentLabelEnrichmentFailuresFailClosedBuiltProcess(t *tes
 		{
 			name: "br ready failure", mode: "ready_failure",
 			wantDiagnostic:    "read bead labels (br ready",
-			wantBRInvocations: []string{"ready --json --limit 100000"},
+			wantBRInvocations: []string{"--lock-timeout 5000 ready --json --limit 100000"},
 		},
 		{
 			name: "br list failure", mode: "list_failure",
 			wantDiagnostic:    "read bead labels (br list",
-			wantBRInvocations: []string{"ready --json --limit 100000", "list --json --status open --limit 100000"},
+			wantBRInvocations: []string{"--lock-timeout 5000 ready --json --limit 100000", "--lock-timeout 5000 list --json --status open --limit 100000"},
 		},
 		{
 			name: "malformed br ready JSON", mode: "malformed_ready",
 			wantDiagnostic:    "parse bead labels (br ready",
-			wantBRInvocations: []string{"ready --json --limit 100000"},
+			wantBRInvocations: []string{"--lock-timeout 5000 ready --json --limit 100000"},
 		},
 		{
 			name: "malformed br list JSON", mode: "malformed_list",
 			wantDiagnostic:    "parse bead labels (br list",
-			wantBRInvocations: []string{"ready --json --limit 100000", "list --json --status open --limit 100000"},
+			wantBRInvocations: []string{"--lock-timeout 5000 ready --json --limit 100000", "--lock-timeout 5000 list --json --status open --limit 100000"},
 		},
 		{
 			name: "plan item absent from both label sources", mode: "absent",
 			wantDiagnostic:    "absent from both br ready and br list --status open",
-			wantBRInvocations: []string{"ready --json --limit 100000", "list --json --status open --limit 100000"},
+			wantBRInvocations: []string{"--lock-timeout 5000 ready --json --limit 100000", "--lock-timeout 5000 list --json --status open --limit 100000"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -7264,16 +7261,18 @@ func TestE2EAtomicRebalanceUsesAtomicReplacement(t *testing.T) {
 			"--apply",
 		)
 		if result.exitCode != 1 || len(bytes.TrimSpace(result.stderr)) != 0 ||
-			!bytes.Contains(result.stdout, []byte("does not match durable claim actor")) {
+			!bytes.Contains(result.stdout, []byte("authorized generation state")) {
 			t.Fatalf("changed-owner rebalance exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
 		}
 		var envelope struct {
-			Success bool   `json:"success"`
-			Session string `json:"session"`
-			Error   string `json:"error"`
+			Success   bool   `json:"success"`
+			Session   string `json:"session"`
+			ErrorCode string `json:"error_code"`
+			Error     string `json:"error"`
 		}
 		decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
-		if envelope.Success || envelope.Session != fixture.session || !strings.Contains(envelope.Error, "does not match durable claim actor") {
+		if envelope.Success || envelope.Session != fixture.session || envelope.ErrorCode != "BEAD_INELIGIBLE" ||
+			!strings.Contains(envelope.Error, "DifferentRebalanceOwner") || !strings.Contains(envelope.Error, "authorized generation state") {
 			t.Fatalf("changed-owner rebalance envelope = %+v", envelope)
 		}
 		if after := fixture.readLedgerAssignment(t, beadID); !reflect.DeepEqual(after, before) {
@@ -7572,7 +7571,8 @@ func TestE2EAtomicAssignmentReservationSafetyContracts(t *testing.T) {
 			}
 			var envelope atomicAssignmentReassignEnvelope
 			decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
-			if envelope.Success || envelope.Error == nil || envelope.Error.Code != "INVALID_STATE" || !strings.Contains(envelope.Error.Message, terminal.trackerStatus) {
+			if envelope.Success || envelope.Error == nil || envelope.Error.Code != "BEAD_INELIGIBLE" ||
+				!strings.Contains(envelope.Error.Message, terminal.trackerStatus) || !strings.Contains(envelope.Error.Message, "authorized generation state") {
 				t.Fatalf("terminal source reassign envelope = %+v", envelope)
 			}
 			afterCalls := mail.snapshot()
@@ -7610,8 +7610,8 @@ func TestE2EAtomicAssignmentReservationSafetyContracts(t *testing.T) {
 		}
 		var envelope atomicAssignmentReassignEnvelope
 		decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
-		if envelope.Success || envelope.Error == nil || envelope.Error.Code != "INVALID_STATE" ||
-			!strings.Contains(envelope.Error.Message, "does not match durable claim actor") {
+		if envelope.Success || envelope.Error == nil || envelope.Error.Code != "BEAD_INELIGIBLE" ||
+			!strings.Contains(envelope.Error.Message, "DifferentLiveOwner") || !strings.Contains(envelope.Error.Message, "authorized generation state") {
 			t.Fatalf("changed-owner reassign envelope = %+v", envelope)
 		}
 		callsAfter := mail.snapshot()
@@ -10188,7 +10188,7 @@ func (f *atomicAssignmentCLIFixture) driveAssignmentStatusUntil(t *testing.T, pa
 		"--quiet",
 	)
 	watch.Dir = f.projectDir
-	watch.Env = append([]string(nil), f.env...)
+	watch.Env = atomicAssignmentMergeEnv(f.env, f.completionWatchEnv(t, nil))
 	if requireCompletionEvent {
 		// The normal watch loop acknowledges failed events immediately. Hold its
 		// handler after the detector has durably claimed the event so this helper
@@ -10384,6 +10384,22 @@ func (f *atomicAssignmentCLIFixture) startCompletionWatch(t *testing.T, env map[
 	return f.startCompletionWatchWithInterval(t, env, 100*time.Millisecond)
 }
 
+func (f *atomicAssignmentCLIFixture) completionWatchEnv(t *testing.T, overrides map[string]string) map[string]string {
+	t.Helper()
+	result := make(map[string]string, len(overrides)+1)
+	for key, value := range overrides {
+		result[key] = value
+	}
+	basePath := atomicAssignmentEnvValue(f.env, "PATH")
+	if overridePath := strings.TrimSpace(result["PATH"]); overridePath != "" {
+		basePath = overridePath
+	}
+	binDir := t.TempDir()
+	writeSpawnEmptyBV(t, filepath.Join(binDir, "bv"))
+	result["PATH"] = binDir + string(os.PathListSeparator) + basePath
+	return result
+}
+
 func (f *atomicAssignmentCLIFixture) startCompletionWatchWithInterval(t *testing.T, env map[string]string, watchInterval time.Duration) *atomicCompletionWatchProcess {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -10397,7 +10413,7 @@ func (f *atomicAssignmentCLIFixture) startCompletionWatchWithInterval(t *testing
 		"--reserve-files=false",
 	)
 	cmd.Dir = f.projectDir
-	cmd.Env = atomicAssignmentMergeEnv(f.env, env)
+	cmd.Env = atomicAssignmentMergeEnv(f.env, f.completionWatchEnv(t, env))
 	stdout, err := os.CreateTemp(f.root, "completion-watch-stdout-*.log")
 	if err != nil {
 		cancel()

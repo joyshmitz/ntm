@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -578,9 +579,13 @@ func TestClassifyActionableLabelsErrorPreservesWrappedCancellation(t *testing.T)
 		})
 	}
 
-	err := classifyActionableLabelsError(t.Context(), errors.New("malformed label response"))
+	cause := errors.New("malformed label response")
+	err := classifyActionableLabelsError(t.Context(), cause)
 	if !errors.Is(err, ErrActionableLabelsUnverified) {
 		t.Fatalf("generic label error = %v, want ErrActionableLabelsUnverified", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("generic label error = %v, want original cause preserved", err)
 	}
 }
 
@@ -725,6 +730,12 @@ func TestGetActionableRecommendationsFailsClosedOnUnverifiedPlan(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("error = %q, want substring %q", err, tt.wantError)
+			}
+			if tt.planExit != 0 {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("error = %v, want preserved plan process failure", err)
+				}
 			}
 		})
 	}

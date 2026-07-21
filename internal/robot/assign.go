@@ -336,6 +336,10 @@ func setAssignError(output *AssignOutput, err error, hint string) {
 		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry the command after cancellation")
 		return
 	}
+	if assignmentDependencyMissing(err) {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeDependencyMissing, hint)
+		return
+	}
 	output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, hint)
 }
 

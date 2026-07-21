@@ -308,7 +308,7 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 		}
 		code := ErrCodeInternalError
 		hint := "Ensure bv plan output and live br labels are complete and valid"
-		if bulkAssignDependencyMissing(err) {
+		if assignmentDependencyMissing(err) {
 			code = ErrCodeDependencyMissing
 			hint = "Install bv and br and ensure both are available on PATH"
 		}
@@ -337,7 +337,7 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 		}
 		code := ErrCodeInternalError
 		hint := "Ensure bv output and the local .beads workspace are valid"
-		if bulkAssignDependencyMissing(err) {
+		if assignmentDependencyMissing(err) {
 			code = ErrCodeDependencyMissing
 			hint = "Install bv and ensure it is available on PATH"
 		}
@@ -366,7 +366,7 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 		}
 		code := ErrCodeInternalError
 		hint := "Inspect br output and the local .beads workspace"
-		if bulkAssignDependencyMissing(err) {
+		if assignmentDependencyMissing(err) {
 			code = ErrCodeDependencyMissing
 			hint = "Install br and ensure it is available on PATH"
 		}
@@ -403,7 +403,7 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 	return output, nil
 }
 
-func bulkAssignDependencyMissing(err error) bool {
+func assignmentDependencyMissing(err error) bool {
 	if errors.Is(err, bv.ErrNotInstalled) || errors.Is(err, exec.ErrNotFound) {
 		return true
 	}

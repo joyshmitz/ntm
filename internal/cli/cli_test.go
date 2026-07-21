@@ -6418,13 +6418,15 @@ func TestSelectedConfigAllowsProjectionRefresh(t *testing.T) {
 	})
 }
 
-func TestRobotAssignmentMutationRequiresPolicyPreflight(t *testing.T) {
+func TestRobotAssignmentCommandRequiresPolicyPreflight(t *testing.T) {
+	originalAssign := robotAssign
 	originalBulkAssign := robotBulkAssign
 	originalSpawn := robotSpawn
 	originalSpawnAssignWork := robotSpawnAssignWork
 	originalRestartPane := robotRestartPane
 	originalRestartPaneBead := robotRestartPaneBead
 	t.Cleanup(func() {
+		robotAssign = originalAssign
 		robotBulkAssign = originalBulkAssign
 		robotSpawn = originalSpawn
 		robotSpawnAssignWork = originalSpawnAssignWork
@@ -6434,6 +6436,7 @@ func TestRobotAssignmentMutationRequiresPolicyPreflight(t *testing.T) {
 
 	tests := []struct {
 		name            string
+		assign          string
 		bulkAssign      string
 		spawn           string
 		spawnAssignWork bool
@@ -6441,6 +6444,7 @@ func TestRobotAssignmentMutationRequiresPolicyPreflight(t *testing.T) {
 		restartBead     string
 		want            bool
 	}{
+		{name: "assignment recommendations", assign: "project", want: true},
 		{name: "bulk assignment", bulkAssign: "project", want: true},
 		{name: "spawn with assignment", spawn: "project", spawnAssignWork: true, want: true},
 		{name: "restart with bead assignment", restartPane: "project", restartBead: "ntm-123", want: true},
@@ -6453,14 +6457,15 @@ func TestRobotAssignmentMutationRequiresPolicyPreflight(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			robotAssign = test.assign
 			robotBulkAssign = test.bulkAssign
 			robotSpawn = test.spawn
 			robotSpawnAssignWork = test.spawnAssignWork
 			robotRestartPane = test.restartPane
 			robotRestartPaneBead = test.restartBead
 
-			if got := robotAssignmentMutationRequiresPolicyPreflight(); got != test.want {
-				t.Fatalf("robotAssignmentMutationRequiresPolicyPreflight() = %t, want %t", got, test.want)
+			if got := robotAssignmentCommandRequiresPolicyPreflight(); got != test.want {
+				t.Fatalf("robotAssignmentCommandRequiresPolicyPreflight() = %t, want %t", got, test.want)
 			}
 		})
 	}

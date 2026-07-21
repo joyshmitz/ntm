@@ -2975,11 +2975,11 @@ func initializeRobotPersistence(ctx context.Context) error {
 	robot.SetProjectionStore(store)
 	robotStateStore = store
 
-	// Assignment mutations perform their own strict policy validation before
+	// Assignment commands perform their own strict policy validation before
 	// consulting bv/br. Keep the persistence store available to the command, but
 	// do not let this optional refresh cross that command-specific safety boundary.
 	// Explicitly selected invalid config paths have the same ordering requirement.
-	if robotAssignmentMutationRequiresPolicyPreflight() || !selectedConfigAllowsProjectionRefresh() {
+	if robotAssignmentCommandRequiresPolicyPreflight() || !selectedConfigAllowsProjectionRefresh() {
 		return nil
 	}
 
@@ -5048,8 +5048,8 @@ func selectedConfigAllowsProjectionRefresh() bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-func robotAssignmentMutationRequiresPolicyPreflight() bool {
-	if strings.TrimSpace(robotBulkAssign) != "" {
+func robotAssignmentCommandRequiresPolicyPreflight() bool {
+	if strings.TrimSpace(robotAssign) != "" || strings.TrimSpace(robotBulkAssign) != "" {
 		return true
 	}
 	if strings.TrimSpace(robotSpawn) != "" && robotSpawnAssignWork {

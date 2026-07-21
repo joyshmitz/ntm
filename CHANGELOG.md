@@ -19,7 +19,7 @@ No unreleased changes.
 
 ## [v1.20.0] -- 2026-07-21 [GitHub Release]
 
-**81 commits since v1.19.1** -- atomic agent assignment, canonical pane identity, unified robot contracts, first-class Grok Build launch support, and substantially broader real-tmux verification.
+**82 commits since v1.19.1** -- atomic agent assignment, canonical pane identity, unified robot contracts, first-class Grok Build launch support, and substantially broader real-tmux verification.
 
 ### Features
 
@@ -43,6 +43,7 @@ No unreleased changes.
 - Preserve DCG pre-send verdicts for leading-dash and bulleted command candidates (#228), rebuild and retry recognized Beads database corruption once under the guarded mutation boundary (#227), and classify pane activity from each pane's own content changes so a busy neighbor cannot pin `wait --completion` (#213) ([060e6cb3](https://github.com/Dicklesworthstone/ntm/commit/060e6cb3), [34e41a11](https://github.com/Dicklesworthstone/ntm/commit/34e41a11), [b8787274](https://github.com/Dicklesworthstone/ntm/commit/b8787274)).
 - Bound Agent Mail availability discovery to one sub-two-second deadline across lock contention, retries, and backoff; retry only transient transport, timeout, busy, 408, 425, 429, and 5xx failures; fail permanent errors after one probe; preserve cancellation state; and surface the terminal cause to CLI callers.
 - Run assignment-mutation policy preflight without unrelated projection refreshes, preserving zero-side-effect failures when selected or target-project configuration is invalid ([de487f7f](https://github.com/Dicklesworthstone/ntm/commit/de487f7f)).
+- Preserve missing `bv` and `br` identities through assignment planning so robot recommendation and bulk surfaces return `DEPENDENCY_MISSING`; validate robot assignment policy before optional projection refresh; and classify unauthorized rebalance or reassign generations as `BEAD_INELIGIBLE` without mutation.
 
 ### Verification And Release
 
@@ -51,6 +52,7 @@ No unreleased changes.
 - Kept real-tmux verification portable under long or capacity-constrained temp roots, and replaced scheduler-sensitive cancellation and worktree checks with bounded, deterministic synchronization.
 - Strict upgrade verification now accepts DSR's native macOS architecture artifacts while retaining exact legacy `darwin_all` support.
 - Added built-binary Agent Mail E2E coverage for permanent one-shot failure, bounded transient exhaustion, and successful transient recovery.
+- Expanded built-binary assignment E2E coverage for terminal Beads, fail-closed label enrichment, missing `bv` and `br`, completion lease takeover, generation conflicts, reservation refusal, spawn cancellation, and zero-side-effect policy rejection; completion watchers now use immutable per-process fixtures, and direct replay assertions derive pane identity from the isolated tmux topology.
 - Added the canonical `VERSION` marker used by DSR version detection ([c727c38d](https://github.com/Dicklesworthstone/ntm/commit/c727c38d)).
 
 ---

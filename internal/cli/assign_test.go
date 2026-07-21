@@ -4092,6 +4092,20 @@ sleep 300
 		t.Fatalf("create agent window: %v", err)
 	}
 	paneID = strings.TrimSpace(paneID)
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		t.Fatalf("list panes after creating assignment target: %v", err)
+	}
+	var expectedPane *tmux.Pane
+	for index := range panes {
+		if panes[index].ID == paneID {
+			expectedPane = &panes[index]
+			break
+		}
+	}
+	if expectedPane == nil {
+		t.Fatalf("created pane %s was absent from session topology: %+v", paneID, panes)
+	}
 	if err := tmux.SetPaneTitle(paneID, session+"__cc_1"); err != nil {
 		t.Fatalf("set pane title: %v", err)
 	}
@@ -4154,7 +4168,10 @@ sleep 300
 	if durable == nil {
 		t.Fatal("direct assignment missing from durable ledger")
 	}
-	if durable.OccupancyKey != paneID || durable.DispatchTarget != paneID || first.Data.Receipt.Pane.ID != paneID || first.Data.Receipt.Pane.Target != "2.1" {
+	receiptPane := first.Data.Receipt.Pane
+	if durable.Pane != expectedPane.Index || durable.OccupancyKey != expectedPane.ID || durable.DispatchTarget != expectedPane.ID ||
+		receiptPane.ID != expectedPane.ID || receiptPane.WindowIndex != expectedPane.WindowIndex ||
+		receiptPane.Index != expectedPane.Index || receiptPane.Target != expectedPane.Ref().Physical() {
 		t.Fatalf("pane identity drift: ledger=%+v receipt=%+v", durable, first.Data.Receipt.Pane)
 	}
 }
@@ -4184,7 +4201,11 @@ func runDirectAssignCLIProcess(t *testing.T, args []string) (AssignEnvelope[Dire
 		t.Fatalf("encode helper args: %v", err)
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestDirectAssignCLIProcessHelper$")
-	cmd.Env = append(os.Environ(), "NTM_DIRECT_ASSIGN_HELPER_ARGS="+string(rawArgs), "NTM_NO_COLOR=1")
+	cmd.Env = append(os.Environ(),
+		"NTM_DIRECT_ASSIGN_HELPER_ARGS="+string(rawArgs),
+		"NTM_TEST_TMUX_ENV_OWNED=1",
+		"NTM_NO_COLOR=1",
+	)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

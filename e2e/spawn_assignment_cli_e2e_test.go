@@ -4574,8 +4574,16 @@ func TestE2ESpawnAssignFailureReturnsNonzeroSingleJSON(t *testing.T) {
 		t.Fatalf("create spawn assignment failure project: %v", err)
 	}
 	fixture.mustBRAt(t, projectDir, "init", "--prefix=spawnfail", "--json")
+	fakeBin := filepath.Join(fixture.root, "spawn-assign-failure-bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatalf("create spawn assignment failure bin: %v", err)
+	}
+	writeSpawnEmptyBV(t, filepath.Join(fakeBin, "bv"))
 
-	result := fixture.runNTM(t, map[string]string{"NTM_PROJECTS_BASE": projectsBase},
+	result := fixture.runNTM(t, map[string]string{
+		"NTM_PROJECTS_BASE": projectsBase,
+		"PATH":              fakeBin + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
+	},
 		"--json", "spawn", fixture.session,
 		"--cod=1", "--no-user", "--no-hooks", "--no-cass-context", "--no-recovery",
 		"--assign", "--ready-timeout=1s", "--assign-timeout=2s",
@@ -4758,7 +4766,7 @@ func TestE2ESpawnAssignmentSignalCancellationMatrix(t *testing.T) {
 		assertSpawnStagedWithoutEnter(t, sendLog)
 		fixture.assertBead(t, "open", "")
 		fixture.assertMarkerCount(t, 0)
-		fixture.stub.assertCleanMutationCount(t, 0)
+		fixture.stub.assertNoCalls(t)
 	})
 
 	t.Run("distribute_SIGINT_cancels_after_staging_before_enter", func(t *testing.T) {
@@ -4785,8 +4793,13 @@ func TestE2ESpawnAssignmentSignalCancellationMatrix(t *testing.T) {
 		assertSpawnSignalJSONFailure(t, result, "TIMEOUT")
 		time.Sleep(tmux.DoubleEnterFirstDelay + tmux.DoubleEnterSecondDelay + 250*time.Millisecond)
 		assertSpawnStagedWithoutEnter(t, sendLog)
-		fixture.assertBead(t, beadID, "open", "")
-		fixture.assertLedgerHasNoAssignment(t, beadID)
+		record := fixture.readLedgerAssignment(t, beadID)
+		if record.ClaimState != "claimed" || record.ClaimActor == "" || record.ClaimedAt == nil ||
+			record.DispatchState != "sending" || record.DispatchAttempts != 1 || record.DispatchedAt != nil ||
+			record.DispatchReceiptID != "" || record.PromptSent != "" {
+			t.Fatalf("canceled distribute durable boundary = %+v", record)
+		}
+		fixture.assertBead(t, beadID, "in_progress", record.ClaimActor)
 		stagedCopies := 0
 		for pane := range fixture.panes {
 			stagedCopies += strings.Count(fixture.capturePane(t, pane), marker)
@@ -4823,13 +4836,13 @@ func TestE2ESpawnAssignmentSignalCancellationMatrix(t *testing.T) {
 		fixture := newSpawnAssignmentCLIFixture(t)
 		startedDir := t.TempDir()
 		fixture.stub.blockAgentsPath = filepath.Join(startedDir, "agents-read")
-		fixture.stub.blockAgentsAt = 3 // two projection reads, then assignment admission
+		fixture.stub.blockAgentsAt = 1
 		result := runSpawnSignalCanceledCLI(t, fixture.ntmPath, fixture.projectDir, fixture.env, startedDir, 1, syscall.SIGINT, fixture.spawnArgs()...)
 		assertSpawnSignalJSONFailure(t, result, "TIMEOUT")
 		fixture.assertBead(t, "open", "")
 		fixture.assertMarkerCount(t, 0)
 		counts := fixture.stub.assertCleanMutationCount(t, 0)
-		if counts.ensure < 2 || counts.list < fixture.stub.blockAgentsAt {
+		if counts.ensure < 1 || counts.list < fixture.stub.blockAgentsAt {
 			t.Fatalf("spawn assignment cancellation stopped before assignment admission: counts=%+v", counts)
 		}
 		assertSpawnSignalCancellationNoActuation(t, fixture)
@@ -8883,6 +8896,16 @@ func (s *spawnAssignmentMCPStub) assertCleanMutationCount(t *testing.T, reserve 
 			s.ensure, s.list, s.reserve, reserve, s.errors)
 	}
 	return spawnAssignmentMCPCounts{ensure: s.ensure, list: s.list, reserve: s.reserve}
+}
+
+func (s *spawnAssignmentMCPStub) assertNoCalls(t *testing.T) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.errors) != 0 || s.ensure != 0 || s.list != 0 || s.reserve != 0 {
+		t.Fatalf("Agent Mail MCP calls ensure/list/reserve=%d/%d/%d, want no calls; errors=%v",
+			s.ensure, s.list, s.reserve, s.errors)
+	}
 }
 
 func anyStringSlice(value any) ([]string, bool) {

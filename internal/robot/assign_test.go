@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -980,12 +981,50 @@ func TestGetAssignCanceledContextReturnsStructuredFailure(t *testing.T) {
 }
 
 func TestSetAssignErrorClassifiesWrappedCancellationAsTimeout(t *testing.T) {
-	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+	for _, cause := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		errors.Join(context.Canceled, bv.ErrNotInstalled),
+	} {
 		output := &AssignOutput{RobotResponse: NewRobotResponse(true)}
 		setAssignError(output, fmt.Errorf("observe candidates: %w", cause), "internal hint")
 		if output.Success || output.ErrorCode != ErrCodeTimeout || output.Hint != "Retry the command after cancellation" {
 			t.Fatalf("setAssignError(%v) = %+v, want TIMEOUT failure", cause, output.RobotResponse)
 		}
+	}
+}
+
+func TestSetAssignErrorClassifiesMissingDependenciesAndInternalFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{
+			name:     "bv missing",
+			err:      fmt.Errorf("triage failed: %w", bv.ErrNotInstalled),
+			wantCode: ErrCodeDependencyMissing,
+		},
+		{
+			name:     "br missing",
+			err:      fmt.Errorf("ready scan failed: %w", &exec.Error{Name: "br", Err: exec.ErrNotFound}),
+			wantCode: ErrCodeDependencyMissing,
+		},
+		{
+			name:     "malformed output",
+			err:      errors.New("malformed bv output"),
+			wantCode: ErrCodeInternalError,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := &AssignOutput{RobotResponse: NewRobotResponse(true)}
+			setAssignError(output, test.err, "repair assignment dependencies")
+			if output.Success || output.ErrorCode != test.wantCode || output.Hint != "repair assignment dependencies" {
+				t.Fatalf("setAssignError(%v) = %+v, want %s failure", test.err, output.RobotResponse, test.wantCode)
+			}
+		})
 	}
 }
 

@@ -1096,6 +1096,9 @@ func classifyRebalanceError(err error) string {
 	if errors.Is(err, assignment.ErrPaneIdentityMigrationRequired) {
 		return "PANE_IDENTITY_MIGRATION_REQUIRED"
 	}
+	if errors.Is(err, assignment.ErrClaimIneligible) {
+		return "BEAD_INELIGIBLE"
+	}
 	return robot.ErrCodeInternalError
 }
 

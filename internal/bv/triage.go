@@ -280,7 +280,7 @@ func GetActionableRecommendationsContext(ctx context.Context, dir string, n int)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		return nil, fmt.Errorf("%w: load bv --robot-triage: %v", ErrActionablePlanUnverified, err)
+		return nil, fmt.Errorf("%w: load bv --robot-triage: %w", ErrActionablePlanUnverified, err)
 	}
 
 	plan, planErr := GetPlanContext(ctx, dir)
@@ -288,7 +288,7 @@ func GetActionableRecommendationsContext(ctx context.Context, dir string, n int)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		return nil, fmt.Errorf("%w: load bv --robot-plan: %v", ErrActionablePlanUnverified, planErr)
+		return nil, fmt.Errorf("%w: load bv --robot-plan: %w", ErrActionablePlanUnverified, planErr)
 	}
 	if plan == nil {
 		return nil, fmt.Errorf("%w: bv --robot-plan returned no plan", ErrActionablePlanUnverified)
@@ -384,7 +384,7 @@ func classifyActionableLabelsError(ctx context.Context, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return fmt.Errorf("%w: %v", ErrActionableLabelsUnverified, err)
+	return fmt.Errorf("%w: %w", ErrActionableLabelsUnverified, err)
 }
 
 // readyBeadLabels returns a map of bead ID -> labels for the actionable work

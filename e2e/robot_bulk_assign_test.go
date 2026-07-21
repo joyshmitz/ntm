@@ -774,7 +774,7 @@ func TestE2ERobotBulkAssignMissingDependenciesAreTyped(t *testing.T) {
 			t.Fatalf("link %s into isolated PATH: %v", name, err)
 		}
 	}
-	assertMissing := func(t *testing.T, fixture *robotProcessFixture, env []string, wantText string) {
+	assertMissing := func(t *testing.T, fixture *robotProcessFixture, env []string, wantText ...string) {
 		t.Helper()
 		process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, env,
 			"--robot-bulk-assign="+fixture.session,
@@ -788,8 +788,13 @@ func TestE2ERobotBulkAssignMissingDependenciesAreTyped(t *testing.T) {
 		}
 		var result BulkAssignOutput
 		decodeSingleRobotJSON(t, process.stdout, &result)
-		if result.Success || result.ErrorCode != "DEPENDENCY_MISSING" || !strings.Contains(result.Error, wantText) || result.Assignments == nil {
+		if result.Success || result.ErrorCode != "DEPENDENCY_MISSING" || result.Assignments == nil {
 			t.Fatalf("missing dependency envelope=%+v", result)
+		}
+		for _, want := range wantText {
+			if !strings.Contains(result.Error, want) {
+				t.Fatalf("missing dependency error=%q, want %q", result.Error, want)
+			}
 		}
 	}
 
@@ -798,7 +803,7 @@ func TestE2ERobotBulkAssignMissingDependenciesAreTyped(t *testing.T) {
 		pathDir := t.TempDir()
 		linkTool(t, pathDir, tmuxPath, "tmux")
 		env := mergeRobotProcessEnv(fixture.env, map[string]string{"PATH": pathDir})
-		assertMissing(t, fixture, env, "bv triage failed")
+		assertMissing(t, fixture, env, "bv is not installed")
 	})
 
 	t.Run("br", func(t *testing.T) {
@@ -810,7 +815,7 @@ func TestE2ERobotBulkAssignMissingDependenciesAreTyped(t *testing.T) {
 		linkTool(t, pathDir, tmuxPath, "tmux")
 		linkTool(t, pathDir, bvPath, "bv")
 		env := mergeRobotProcessEnv(fixture.env, map[string]string{"PATH": pathDir})
-		assertMissing(t, fixture, env, "fetch in-progress failed")
+		assertMissing(t, fixture, env, "br", "executable file not found")
 	})
 }
 
